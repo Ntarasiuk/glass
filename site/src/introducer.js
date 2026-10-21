@@ -10,6 +10,12 @@ const MAX_CLIENTS = 32;
 const MAX_OFFERS_PER_SOCKET = 5;
 
 export class Introducer extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    // The host's heartbeat, answered without waking this object.
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+  }
+
   async fetch(request) {
     if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected a WebSocket', { status: 426 });
     const url = new URL(request.url);
@@ -32,9 +38,17 @@ export class Introducer extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** The authenticated host socket, if any. */
+  /**
+   * The host's newest signed-in connection. A host that reconnected can leave an older
+   * socket behind that looks open but goes nowhere; offers must never be sent to it.
+   */
   host() {
-    return this.ctx.getWebSockets('host').find((ws) => ws.deserializeAttachment()?.authed);
+    let best;
+    for (const ws of this.ctx.getWebSockets('host')) {
+      const meta = ws.deserializeAttachment();
+      if (meta?.authed && (!best || (meta.authedAt ?? 0) >= (best.meta.authedAt ?? 0))) best = { ws, meta };
+    }
+    return best?.ws;
   }
 
   async webSocketMessage(ws, raw) {
@@ -57,7 +71,7 @@ export class Introducer extends DurableObject {
       }
       // One live host per id: a newer connection replaces an older one.
       for (const other of this.ctx.getWebSockets('host')) if (other !== ws) other.close(4000, 'replaced');
-      ws.serializeAttachment({ ...meta, authed: true });
+      ws.serializeAttachment({ ...meta, authed: true, authedAt: Date.now() });
       ws.send(JSON.stringify({ t: 'ready' }));
       return;
     }

@@ -351,13 +351,18 @@ async fn signal(wt_port: u16) -> Result<()> {
         .context("connecting to the introducer")?;
     let (mut tx, mut rx) = ws.split();
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ToIntroducer>();
-    let mut ping = tokio::time::interval(Duration::from_secs(25));
+    let mut ping = tokio::time::interval(Duration::from_secs(20));
+    let mut last_pong = std::time::Instant::now();
     let mut check = tokio::time::interval(Duration::from_secs(3));
     loop {
         tokio::select! {
             msg = rx.next() => {
                 let Some(msg) = msg else { anyhow::bail!("introducer closed the connection") };
                 let Message::Text(text) = msg? else { continue };
+                if text.as_str() == "pong" {
+                    last_pong = std::time::Instant::now();
+                    continue;
+                }
                 match serde_json::from_str::<FromIntroducer>(&text) {
                     Ok(FromIntroducer::Challenge { nonce }) => {
                         let sig = key.sign(format!("glass-signal-v1\n{nonce}").as_bytes())?;
@@ -391,7 +396,14 @@ async fn signal(wt_port: u16) -> Result<()> {
             Some(out) = out_rx.recv() => {
                 tx.send(Message::text(serde_json::to_string(&out)?)).await?;
             }
-            _ = ping.tick() => tx.send(Message::Ping(Default::default())).await?,
+            _ = ping.tick() => {
+                // A heartbeat glassdesk.dev answers: a connection that looks open but goes
+                // nowhere (after a network change) would otherwise swallow every offer.
+                if last_pong.elapsed() > Duration::from_secs(60) {
+                    anyhow::bail!("glassdesk.dev stopped answering");
+                }
+                tx.send(Message::text("ping")).await?;
+            }
             _ = check.tick() => {
                 if !enabled() {
                     info!("remote access turned off");
