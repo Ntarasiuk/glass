@@ -27,7 +27,7 @@ writeFileSync(
 
 > ${summary}
 
-Install on the computer to be controlled: \`curl -fsSL glassdesk.dev | sh\` (macOS 13+ on Apple Silicon or Intel; Linux x86_64 on Wayland, beta). The installer starts \`glass setup\`, a guided setup for Tailscale, the background service and permissions. Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free and open source (MIT).
+Install on the computer to be controlled: \`curl -fsSL glassdesk.dev | sh\` (macOS 13+ on Apple Silicon or Intel; Linux x86_64 on Wayland, beta). The installer starts \`glass setup\`, a guided setup for Tailscale, the background service and permissions. From outside the tailnet, \`glass link --anywhere\` makes a one-time link that connects any browser directly over WebRTC (end-to-end encrypted, no open ports). Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free and open source (MIT).
 
 ## Docs
 

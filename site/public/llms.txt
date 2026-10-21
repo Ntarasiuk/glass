@@ -1,8 +1,8 @@
 # Glass
 
-> Glass is a free, open-source, low-latency remote desktop for macOS and Linux (Wayland). Install it on the computer you want to control, then see and control it from a browser on an iPad, iPhone, or another computer. Typical latency is 15–30 ms from screen capture to display, including over Tailscale. Nothing to install on the viewing device.
+> Glass is a free, open-source, low-latency remote desktop for macOS and Linux (Wayland). Install it on the computer you want to control, then see and control it from a browser on an iPad, iPhone, or another computer. Typical latency is 15–30 ms from screen capture to display, over Tailscale or from anywhere through a one-time link (direct WebRTC, end-to-end encrypted). Nothing to install on the viewing device.
 
-Install on the computer to be controlled: `curl -fsSL glassdesk.dev | sh` (macOS 13+ on Apple Silicon or Intel; Linux x86_64 on Wayland, beta). The installer starts `glass setup`, a guided setup for Tailscale, the background service and permissions. Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free and open source (MIT).
+Install on the computer to be controlled: `curl -fsSL glassdesk.dev | sh` (macOS 13+ on Apple Silicon or Intel; Linux x86_64 on Wayland, beta). The installer starts `glass setup`, a guided setup for Tailscale, the background service and permissions. From outside the tailnet, `glass link --anywhere` makes a one-time link that connects any browser directly over WebRTC (end-to-end encrypted, no open ports). Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free and open source (MIT).
 
 ## Docs
 

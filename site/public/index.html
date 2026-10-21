@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Glass: a remote desktop that feels local</title>
-  <meta name="description" content="Control your Mac or Linux computer from an iPad or any browser with about 20 ms of latency. Free and open source. One-line install, multiple displays, audio, clipboard and files, private over Tailscale.">
+  <meta name="description" content="Control your Mac or Linux computer from an iPad or any browser with about 20 ms of latency, on your Tailscale network or from anywhere with a one-time link. Free and open source. One-line install, multiple displays, audio, clipboard and files, end-to-end encrypted.">
   <link rel="canonical" href="https://glassdesk.dev/">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="alternate" type="text/markdown" href="/docs.md" title="Glass documentation (Markdown)">
@@ -12,7 +12,7 @@
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://glassdesk.dev/">
   <meta property="og:title" content="Glass: your computer, in any browser">
-  <meta property="og:description" content="A remote desktop that feels local: about 20 ms from your Mac or Linux screen to your iPad. Free, open source, one-line install.">
+  <meta property="og:description" content="A remote desktop that feels local: about 20 ms from your Mac or Linux screen to your iPad, at home or from anywhere. Free, open source, one-line install.">
   <meta name="twitter:card" content="summary">
   <meta name="theme-color" content="#07080a">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -44,6 +44,8 @@
       "System audio, clipboard sync and file transfer",
       "Adapts to bad networks",
       "Secure access over Tailscale",
+      "Remote access from anywhere over WebRTC: direct, end-to-end encrypted, no open ports",
+      "One-time access links with per-device passes",
       "Set up by an AI agent over SSH"
     ]
   }
@@ -63,7 +65,7 @@
     <section class="hero wrap">
       <div class="hero-copy">
         <h1>Your computer, in any browser.</h1>
-        <p class="lede">Glass streams your Mac or Linux desktop to an iPad, phone or laptop with about 20&nbsp;milliseconds of delay. Nothing to install on the device in your hands.</p>
+        <p class="lede">Glass streams your Mac or Linux desktop to an iPad, phone or laptop with about 20&nbsp;milliseconds of delay, at home or from anywhere. Nothing to install on the device in your hands.</p>
         <div class="command" data-copy="curl -fsSL glassdesk.dev | sh">
           <code><span class="prompt" aria-hidden="true">$</span> curl -fsSL glassdesk.dev | sh</code>
           <button type="button" class="copy">Copy</button>
@@ -101,7 +103,9 @@
         <div><dt>Full control</dt><dd>Trackpad, keyboard, touch and pinch to zoom. Unlock a locked Mac. ⌘Tab works.</dd></div>
         <div><dt>Sound, clipboard, files</dt><dd>System audio, copy and paste both ways, and files sent directly between your devices.</dd></div>
         <div><dt>Steady on bad Wi-Fi</dt><dd>Adapts its bitrate to the network, reconnects by itself, and never shows a corrupted frame.</dd></div>
-        <div><dt>Private by default</dt><dd>Runs over your own Tailscale network. Your devices get in; nothing else does.</dd></div>
+        <div><dt>From anywhere</dt><dd>Away from home, <code>glass link --anywhere</code> connects any browser straight to your computer: end-to-end encrypted, no ports opened.</dd></div>
+        <div><dt>Links that work once</dt><dd>Let a phone or a friend's laptop in with a one-time link. Each device gets its own pass; revoke them all with one command.</dd></div>
+        <div><dt>Private by default</dt><dd>On your own Tailscale network, your devices get in and nothing else does. Remote access stays off until you turn it on.</dd></div>
       </dl>
     </section>
 
@@ -117,7 +121,7 @@
     <section class="agent wrap" aria-labelledby="agent">
       <div>
         <h2 id="agent">Or let your agent do it.</h2>
-        <p>Glass comes with a skill for AI agents. Ask Claude Code to <q>set up Glass on my Mac mini</q> and it finds the machine on your tailnet, installs Glass over SSH, and tells you exactly which switch to click on that screen.</p>
+        <p>Glass comes with a skill for AI agents. Ask Claude Code to <q>set up Glass on my Mac mini</q> and it finds the machine on your tailnet, installs Glass over SSH, and tells you exactly which switch to click on that screen. Later, just ask it for a link to your computer.</p>
       </div>
       <div class="command" data-copy="mkdir -p ~/.claude/skills/glass && curl -fsSL https://glassdesk.dev/skill.md -o ~/.claude/skills/glass/SKILL.md">
         <code><span class="prompt" aria-hidden="true">$</span> mkdir -p ~/.claude/skills/glass &amp;&amp; curl -fsSL https://glassdesk.dev/skill.md -o ~/.claude/skills/glass/SKILL.md</code>

@@ -111,6 +111,7 @@ section p { color: var(--text-dim); }
 .features div { padding: 20px 0 22px; border-top: 1px solid var(--line); }
 .features dt { font: 650 19px var(--display); letter-spacing: -0.015em; }
 .features dd { margin: 6px 0 0; color: var(--text-dim); font-size: 16px; line-height: 1.55; }
+.features dd code { white-space: nowrap; }
 
 .steps { list-style: none; margin: 36px 0 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; counter-reset: step; }
 .steps li { counter-increment: step; padding-top: 22px; border-top: 2px solid var(--line-strong); position: relative; }
