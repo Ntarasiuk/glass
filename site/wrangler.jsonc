@@ -7,7 +7,7 @@
     "directory": "./public",
     "binding": "ASSETS",
     // The Worker decides who gets the install script and counts downloads.
-    "run_worker_first": ["/", "/install.sh", "/releases/*", "/api/*"]
+    "run_worker_first": ["/", "/install.sh", "/releases/*", "/api/*", "/signal/*"]
   },
   "d1_databases": [
     {
@@ -17,6 +17,9 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Remote access: introduces browsers to hosts (see src/introducer.js).
+  "durable_objects": { "bindings": [{ "name": "INTRODUCER", "class_name": "Introducer" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Introducer"] }],
   "routes": [{ "pattern": "glassdesk.dev", "custom_domain": true }],
   "workers_dev": true,
   "observability": { "enabled": true }

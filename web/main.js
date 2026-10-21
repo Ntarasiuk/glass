@@ -6,6 +6,7 @@ import { attachInput } from './input.js';
 import { createUI } from './ui.js';
 import { log } from './log.js';
 import { MAC_KEYCODES as K } from './keymap.js';
+import { hostIdFor, serveRtc } from './rtc.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -49,25 +50,37 @@ function storage(fn) {
 
 // The host prints a link with `#t=<token>`; remember it and drop it from the URL.
 // A magic link carries `#l=<code>` instead: single use, so it's never stored.
+// Remote access (glassdesk.dev/app/#r=<host key>) keeps `r` in the URL: it names the
+// computer, and isn't secret.
 const hashParams = new URLSearchParams(location.hash.slice(1));
 const hashToken = hashParams.get('t');
 const link = hashParams.get('l') ?? undefined;
-if (hashToken) storage((s) => s.setItem(TOKEN_KEY, hashToken));
-if (hashToken || link) history.replaceState(null, '', location.pathname + location.search);
-const token = hashToken ?? storage((s) => s.getItem(TOKEN_KEY));
+const remoteKey = hashParams.get('r') ?? undefined;
+const remoteId = remoteKey && (await hostIdFor(remoteKey));
+// Every remote computer shares this page's origin, so credentials are kept per computer:
+// one computer's token must never be offered to another.
+const tokenKey = remoteId ? `${TOKEN_KEY}.${remoteId}` : TOKEN_KEY;
+const passKey = remoteId ? `${PASS_KEY}.${remoteId}` : PASS_KEY;
+if (hashToken) storage((s) => s.setItem(tokenKey, hashToken));
+if (hashToken || link) history.replaceState(null, '', location.pathname + location.search + (remoteKey ? `#r=${remoteKey}` : ''));
+const token = hashToken ?? storage((s) => s.getItem(tokenKey));
 const savedPass = (() => {
   try {
-    const p = JSON.parse(storage((s) => s.getItem(PASS_KEY)) ?? 'null');
+    const p = JSON.parse(storage((s) => s.getItem(passKey)) ?? 'null');
     return p && p.expires * 1000 > Date.now() ? p.pass : undefined;
   } catch { return undefined; }
 })();
 let guest = false; // signed in with a magic link: no switching machines, no updating the host
 
-const config = await fetch('config.json').then((r) => r.json());
+// Remote: no host serves this page, so there's no config to fetch.
+const config = remoteKey
+  ? { wtPort: 0, wtHost: null, certHash: null, version: null }
+  : await fetch('config.json').then((r) => r.json());
 
 // Reload into new client code when the host's web files change (checked on reconnect
 // and when the tab comes back), so a long-lived tab never runs stale code.
 async function reloadIfUpdated(reason) {
+  if (remoteKey) return;
   try {
     const latest = await fetch('config.json').then((r) => r.json());
     if (latest.version && latest.version !== config.version) {
@@ -160,7 +173,7 @@ const ui = createUI({
   onToken: (t) => {
     tokenTried = true;
     showStatus('connecting', 'Connecting', machineName(currentHost));
-    storage((s) => s.setItem(TOKEN_KEY, t));
+    storage((s) => s.setItem(tokenKey, t));
     worker.postMessage({ type: 'token', token: t });
   },
 });
@@ -193,6 +206,16 @@ function armMachineTimeout() {
 const wtUrl = (machine) => `https://${machine.includes(':') ? machine : `${machine}:${config.wtPort}`}/`;
 const machineId = (m) => (m.wt_port && m.wt_port !== config.wtPort ? `${m.dns}:${m.wt_port}` : m.dns);
 
+// Remote access: the WebRTC connection lives here (the main thread) and is relayed to the
+// worker over a MessagePort.
+let rtcPort;
+if (remoteKey) {
+  const channel = new MessageChannel();
+  const signalUrl = `${location.origin.replace(/^http/, 'ws')}/signal/connect/${remoteId}`;
+  serveRtc({ port: channel.port1, hostKey: remoteKey, signalUrl, log });
+  rtcPort = channel.port2;
+}
+
 worker.postMessage({
   type: 'init',
   url: wtUrl(currentHost),
@@ -200,8 +223,9 @@ worker.postMessage({
   token,
   link,
   pass: savedPass,
+  rtcPort,
   decoderStep: Number(storage((s) => s.getItem(DECODER_STEP_KEY)) ?? 0),
-});
+}, rtcPort ? [rtcPort] : []);
 armMachineTimeout();
 showStatus('connecting', 'Connecting', machineName(currentHost));
 ui.setStatsPressed(statsVisible);
@@ -268,8 +292,8 @@ worker.onmessage = ({ data }) => {
       storage((s) => s.setItem(DECODER_STEP_KEY, String(data.step)));
       break;
     case 'unauthorized':
-      storage((s) => s.removeItem(TOKEN_KEY));
-      storage((s) => s.removeItem(PASS_KEY));
+      storage((s) => s.removeItem(tokenKey));
+      storage((s) => s.removeItem(passKey));
       log('warn', 'token rejected');
       hideStatus();
       ui.showAuth({ rejected: tokenTried });
@@ -303,7 +327,8 @@ function onControl(msg) {
       input.setHostOs(msg.host_os ?? 'macos');
       ui.setHostOs(msg.host_os ?? 'macos');
       guest = Boolean(msg.guest);
-      ui.setGuest(guest);
+      // Remote: other machines aren't reachable from here, so no machines menu either.
+      ui.setGuest(guest || Boolean(remoteKey));
       onLayout(msg.streams);
       log('info', 'welcome', { displays: displays.length, streams: msg.streams.map((d) => d.id), audio: msg.audio });
       break;
@@ -311,7 +336,7 @@ function onControl(msg) {
       onLayout(msg.streams);
       break;
     case 'pass':
-      storage((s) => s.setItem(PASS_KEY, JSON.stringify({ pass: msg.pass, expires: msg.expires })));
+      storage((s) => s.setItem(passKey, JSON.stringify({ pass: msg.pass, expires: msg.expires })));
       ui.toast({ text: `You're in. This device has access until ${formatExpiry(msg.expires)}.`, icon: 'link', timeout: 6000 });
       log('info', 'signed in with a magic link', { expires: msg.expires });
       break;
@@ -341,6 +366,7 @@ function onControl(msg) {
 
 
 function machineName(id) {
+  if (remoteKey) return 'your computer';
   return machineNames[id] ?? id.split('.')[0].split(':')[0];
 }
 
@@ -360,7 +386,11 @@ function onConnectionStatus(text) {
   const name = machineName(currentHost);
   if (text === 'connected') showStatus('connecting', `Connected to ${name}`, 'Waiting for the screen…');
   else if (text.startsWith('disconnected')) showStatus('reconnecting', 'Reconnecting', `Lost the connection to ${name}. Trying again…`);
-  else if (text.startsWith('connection failed'))
+  else if (text.startsWith('connection failed') && remoteKey) {
+    // Remote: the reason is specific (offline, identity check, no route), so show it.
+    const reason = text.replace(/^connection failed: /, '').replace(/, retrying…$/, '');
+    showStatus('error', `Can't reach ${name}`, `${reason} Retrying…`);
+  } else if (text.startsWith('connection failed'))
     showStatus('error', `Can't reach ${name}`, 'Retrying. Make sure Glass is running there and both devices are on Tailscale.');
   else if (text.startsWith('waiting for access token')) hideStatus();
 }

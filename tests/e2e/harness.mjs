@@ -1,7 +1,7 @@
 // Starts isolated `glass --test` hosts and gives tests helpers for the page and the
 // host's /test/* hooks. Each host gets its own ports, config dir, downloads and logs.
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { createSocket } from 'node:dgram';
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
@@ -33,7 +33,7 @@ function isFree(port, kind) {
 }
 
 /** The next port in this worker's block that's free for `kind` (tcp or udp). */
-async function freePort(kind) {
+export async function freePort(kind) {
   for (let i = 0; i < PORTS_PER_WORKER; i++) {
     const port = firstPort + (nextOffset++ % PORTS_PER_WORKER);
     if (await isFree(port, kind)) return port;
@@ -43,8 +43,9 @@ async function freePort(kind) {
 
 export class Host {
   /** `os`: what the host reports itself as (macos or linux). */
-  constructor({ configDir, os = 'macos', latest, webDir } = {}) {
+  constructor({ configDir, os = 'macos', latest, webDir, env } = {}) {
     this.webDir = webDir;
+    this.env = env;
     this.os = os;
     this.latest = latest;
     this.dir = mkdtempSync(join(tmpdir(), 'glass-e2e-'));
@@ -70,7 +71,7 @@ export class Host {
         ...(this.webDir ? ['--web-dir', this.webDir] : []),
       ],
       {
-        env: { ...process.env, GLASS_CONFIG_DIR: this.configDir, GLASS_TEST_OS: this.os, ...(this.latest && { GLASS_TEST_LATEST: this.latest }) },
+        env: { ...process.env, GLASS_CONFIG_DIR: this.configDir, GLASS_TEST_OS: this.os, ...(this.latest && { GLASS_TEST_LATEST: this.latest }), ...this.env },
         stdio: 'ignore',
       },
     );
@@ -90,6 +91,11 @@ export class Host {
     this.proc.kill('SIGTERM');
     await exited;
     this.proc = undefined;
+  }
+
+  /** Runs the glass CLI against this host's config (and environment). */
+  cli(...args) {
+    return execFileSync(BINARY, args, { env: { ...process.env, GLASS_CONFIG_DIR: this.configDir, ...this.env } }).toString();
   }
 
   get token() {

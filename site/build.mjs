@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 // Generates the docs in every format from docs.md (the single source), and copies the
 // latest release into public/. Run before `wrangler deploy` (npm run deploy does).
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { marked } from 'marked';
 
 const SITE = 'https://glassdesk.dev';
@@ -80,6 +80,10 @@ ${body}
 `,
 );
 
+// The web client, for remote access from anywhere (glassdesk.dev/app/#r=…).
+rmSync('public/app', { recursive: true, force: true });
+cpSync('../web', 'public/app', { recursive: true });
+
 // Latest release from the Rust build (../dist, made by scripts/package.sh).
 mkdirSync('public/releases', { recursive: true });
 const dist = '../dist';
@@ -96,4 +100,4 @@ for (const f of latest) {
   writeFileSync(`public/releases/${f}.sha256`, `${sum}  ${f}\n`);
 }
 
-console.log('built: skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, releases/');
+console.log('built: skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, app/, releases/');

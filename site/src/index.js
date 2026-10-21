@@ -1,5 +1,9 @@
 // glassdesk.dev: landing page, one-line installer, release downloads (counted in D1),
-// and the feedback API. Static files come from ./public via the ASSETS binding.
+// the feedback API, and the introducer for remote access (WebRTC signaling, one Durable
+// Object per host). Static files come from ./public via the ASSETS binding; the web client
+// for remote access is served from /app/.
+
+export { Introducer } from './introducer.js';
 
 const FEEDBACK_MAX = 4000;
 const FEEDBACK_PER_HOUR = 5;
@@ -18,6 +22,16 @@ export default {
     }
 
     if (url.pathname === '/api/stats') return stats(request, env);
+
+    // /signal/host/<id> (the host) and /signal/connect/<id> (a browser).
+    const signal = url.pathname.match(/^\/signal\/(host|connect)\/([A-Za-z0-9_-]{22})$/);
+    if (signal) {
+      const [, kind, id] = signal;
+      const target = new URL(`https://introducer/?role=${kind === 'host' ? 'host' : 'client'}&id=${id}`);
+      const headers = new Headers(request.headers);
+      headers.set('X-Client-IP', request.headers.get('CF-Connecting-IP') ?? '');
+      return env.INTRODUCER.get(env.INTRODUCER.idFromName(id)).fetch(new Request(target, { headers }));
+    }
 
     const wantsScript = url.pathname === '/install.sh' || (url.pathname === '/' && CLI_AGENT.test(ua));
     if (wantsScript) {

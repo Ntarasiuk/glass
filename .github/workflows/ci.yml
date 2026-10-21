@@ -22,6 +22,9 @@ jobs:
       - run: cargo test --workspace
       - run: cargo build --release -p glass-host
       - run: node --test tests/unit/*.test.mjs
+      - name: Site deps (the e2e tests run its introducer locally)
+        working-directory: site
+        run: npm ci
       - name: End-to-end (Chrome, glass --test)
         working-directory: tests/e2e
         run: |
@@ -46,6 +49,9 @@ jobs:
         with: { node-version: 24 }
       - run: cargo test --workspace
       - run: cargo build --release -p glass-host
+      - name: Site deps (the e2e tests run its introducer locally)
+        working-directory: site
+        run: npm ci
       - name: End-to-end (Chrome, glass --test)
         working-directory: tests/e2e
         run: |

@@ -9,8 +9,15 @@ export function log(level, msg, data) {
   if (level === 'error') console.error(msg, data ?? '');
 }
 
+// Remote access (glassdesk.dev/app/) has no host web server to send logs to.
+const remote = new URLSearchParams(location.hash.slice(1)).has('r');
+
 function flush() {
   if (!queue.length) return;
+  if (remote) {
+    queue.length = 0;
+    return;
+  }
   const body = queue.splice(0).join('\n');
   fetch('log', { method: 'POST', body, keepalive: true }).catch(() => {});
 }

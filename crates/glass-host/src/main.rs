@@ -3,6 +3,7 @@ mod control;
 mod files;
 mod media;
 mod rate;
+mod remote;
 mod server;
 mod setup;
 mod soft_encode;
@@ -126,6 +127,15 @@ enum Command {
         /// Print JSON ({url, link_expires, grant_secs, summary}) for scripts and agents.
         #[arg(long)]
         json: bool,
+        /// A link that works from anywhere, not just your tailnet (over WebRTC; turns on
+        /// remote access).
+        #[arg(long)]
+        anywhere: bool,
+    },
+    /// Remote access from outside your tailnet (WebRTC via glassdesk.dev): on, off or status.
+    Remote {
+        #[arg(value_parser = ["on", "off", "status"], default_value = "status")]
+        action: String,
     },
     /// Show the access token for devices outside your tailnet.
     Token {
@@ -139,7 +149,7 @@ enum Command {
 }
 
 /// `glass link`: a one-time link (and QR code) to the running host.
-fn print_link(grant: std::time::Duration, json: bool) -> Result<()> {
+fn print_link(grant: std::time::Duration, json: bool, anywhere: bool) -> Result<()> {
     let base = status::read()
         .filter(|s| s.is_fresh())
         .and_then(|s| s.url)
@@ -147,11 +157,16 @@ fn print_link(grant: std::time::Duration, json: bool) -> Result<()> {
             anyhow::anyhow!("Glass isn't running here. Start it (glass setup), then try again.")
         })?;
     let link = access::create_link(&access::file_for(&default_token_file()), grant)?;
-    let url = format!(
-        "{}#l={}",
-        base.trim_end_matches('/').to_owned() + "/",
-        link.code
-    );
+    let url = if anywhere {
+        remote::set_enabled(true)?;
+        remote::link_url(&remote::HostKey::load_or_create()?, &link.code)
+    } else {
+        format!(
+            "{}#l={}",
+            base.trim_end_matches('/').to_owned() + "/",
+            link.code
+        )
+    };
     if json {
         let out = serde_json::json!({
             "url": url,
@@ -169,6 +184,31 @@ fn print_link(grant: std::time::Duration, json: bool) -> Result<()> {
         access::describe(access::LINK_TTL),
         access::describe(link.grant),
     );
+    Ok(())
+}
+
+/// `glass remote on|off|status`.
+fn remote_cli(action: &str) -> Result<()> {
+    match action {
+        "on" => {
+            remote::set_enabled(true)?;
+            println!("Remote access is on. Make a link with: glass link --anywhere");
+        }
+        "off" => {
+            remote::set_enabled(false)?;
+            println!(
+                "Remote access is off. Links made with --anywhere stop working within seconds; tailnet access is unaffected."
+            );
+        }
+        _ => println!(
+            "Remote access is {}.",
+            if remote::enabled() {
+                "on (glass remote off to stop)"
+            } else {
+                "off (glass remote on, or glass link --anywhere)"
+            }
+        ),
+    }
     Ok(())
 }
 
@@ -231,7 +271,13 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Command::Link { grant, json, .. }) => print_link(*grant, *json),
+        Some(Command::Link {
+            grant,
+            json,
+            anywhere,
+            ..
+        }) => print_link(*grant, *json, *anywhere),
+        Some(Command::Remote { action }) => remote_cli(action),
         Some(Command::Token { set: true, .. }) => set_token(&default_token_file()),
         Some(Command::Token { reset, .. }) => {
             let path = default_token_file();

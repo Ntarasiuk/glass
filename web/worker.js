@@ -6,6 +6,7 @@ import {
   ping, readPong, readVideoHeader,
 } from './proto.js';
 import { VideoStream, probeDecoders, setDecoderStep } from './video-stream.js';
+import { RtcTransport } from './rtc-transport.js';
 
 const PING_INTERVAL_MS = 500;
 const CLOCK_SAMPLES = 16;
@@ -27,6 +28,7 @@ const textDecoder = new TextDecoder();
 let url;
 let certHash;
 let token;
+let rtcPort; // remote access: WebRTC over the main thread instead of WebTransport
 let link; // magic link code; traded for a guest pass on first sign-in
 let pass; // guest pass
 let rejected = false;
@@ -68,7 +70,7 @@ function videoStream(index) {
 
 self.onmessage = async ({ data }) => {
   if (data.type === 'init') {
-    ({ url, certHash, token, link, pass } = data);
+    ({ url, certHash, token, link, pass, rtcPort } = data);
     setDecoderStep(data.decoderStep ?? 0);
     await probeDecoders(log);
     setInterval(() => datagramWriter?.write(ping(performance.now())).catch(() => {}), PING_INTERVAL_MS);
@@ -153,8 +155,8 @@ async function connect() {
   const options = certHash
     ? { serverCertificateHashes: [{ algorithm: 'sha-256', value: new Uint8Array(certHash) }] }
     : {};
-  log('info', 'connecting', { url, pinned: !!certHash });
-  transport = new WebTransport(url, options);
+  log('info', 'connecting', rtcPort ? { remote: true } : { url, pinned: !!certHash });
+  transport = rtcPort ? new RtcTransport(rtcPort) : new WebTransport(url, options);
   transport.closed.catch(() => {});
   await transport.ready;
   lastRxMs = performance.now();

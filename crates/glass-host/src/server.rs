@@ -97,6 +97,7 @@ pub async fn run(
         );
     };
     info!("WebTransport listening on udp/{wt_port}");
+    crate::remote::watch(wt_port);
 
     let cert_hash = cert_hash.map(|h| serde_json::from_str::<Vec<u8>>(&h).unwrap());
     let version_dir = web_dir.clone();
@@ -180,9 +181,14 @@ pub async fn run(
 
 async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
     let request = incoming.await?;
+    // A WebRTC viewer arrives through the local bridge, which vouches for its real address.
+    let relayed = crate::remote::relayed_peer(request.path());
     let conn = request.accept().await?;
     let peer = conn.remote_address();
-    info!("client connected: {peer}");
+    match relayed {
+        Some(ip) => info!("client connected: {ip} (remote, over WebRTC)"),
+        None => info!("client connected: {peer}"),
+    }
 
     let authed = Arc::new(AtomicBool::new(false));
     let audio_on = Arc::new(AtomicBool::new(false));
@@ -254,6 +260,7 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                         audio_on: audio_on.clone(),
                         video_on: video_on.clone(),
                         ctl_tx: ctl_tx.clone(),
+                        relayed,
                     };
                     tokio::spawn(async move {
                         if let Err(e) = control(ctx, send, recv, rx).await {
@@ -270,6 +277,7 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                         audio_on: audio_on.clone(),
                         video_on: video_on.clone(),
                         ctl_tx: ctl_tx.clone(),
+                        relayed,
                     };
                     tokio::spawn(async move {
                         if let Err(e) = uni_stream(ctx, stream).await {
@@ -297,6 +305,8 @@ struct SessionCtx {
     audio_on: Arc<AtomicBool>,
     video_on: Arc<AtomicBool>,
     ctl_tx: mpsc::UnboundedSender<ServerMsg>,
+    /// The real address of a WebRTC viewer (the connection itself is loopback).
+    relayed: Option<std::net::IpAddr>,
 }
 
 async fn control(
@@ -307,7 +317,9 @@ async fn control(
 ) -> Result<()> {
     let shared = &ctx.shared;
     let hello = control::read_json::<ClientMsg>(&mut recv).await;
-    let peer = ctx.conn.remote_address().ip().to_canonical();
+    let peer = ctx
+        .relayed
+        .unwrap_or_else(|| ctx.conn.remote_address().ip().to_canonical());
     if auth_blocked(shared, peer) {
         warn!("{peer}: rejected (too many failed sign-ins)");
         control::write_json(
@@ -340,6 +352,8 @@ async fn control(
     }
     if auth.is_none()
         && hello_ok
+        // Over WebRTC the address is public, never a tailnet device's.
+        && ctx.relayed.is_none()
         && let Some(owner) = &shared.tailnet_owner
         && tailscale::is_trusted(peer, owner).await
     {
@@ -374,8 +388,7 @@ async fn control(
     let Some(auth) = auth else {
         record_auth_failure(shared, peer);
         warn!(
-            "{}: rejected (bad or missing token)",
-            ctx.conn.remote_address()
+            "{peer}: rejected (bad or missing token)"
         );
         if link_failed {
             let msg = "This link has expired or was already used. Ask for a new one.".into();
@@ -396,10 +409,9 @@ async fn control(
     shared.video.request_keyframe(None);
     let guest = matches!(auth, Auth::Guest { .. });
     match &auth {
-        Auth::Token => info!("{}: authenticated via token", ctx.conn.remote_address()),
+        Auth::Token => info!("{peer}: authenticated via token"),
         Auth::Tailnet => info!(
-            "{}: authenticated via tailnet identity",
-            ctx.conn.remote_address()
+            "{peer}: authenticated via tailnet identity"
         ),
         Auth::Guest { expires, new, .. } => {
             let left = crate::access::describe(Duration::from_secs(
@@ -407,8 +419,7 @@ async fn control(
             ));
             let how = if *new { "magic link" } else { "guest pass" };
             info!(
-                "{}: authenticated via {how} ({left} left)",
-                ctx.conn.remote_address()
+                "{peer}: authenticated via {how} ({left} left)"
             );
         }
     }
@@ -519,8 +530,7 @@ async fn control(
                     shared.video.request_keyframe(None);
                 }
                 info!(
-                    "{}: video {}",
-                    ctx.conn.remote_address(),
+                    "{peer}: video {}",
                     if on { "resumed" } else { "paused" }
                 );
             }
@@ -549,8 +559,7 @@ async fn control(
             ClientMsg::Audio { on } => {
                 ctx.audio_on.store(on, Ordering::Relaxed);
                 info!(
-                    "{}: audio {}",
-                    ctx.conn.remote_address(),
+                    "{peer}: audio {}",
                     if on { "on" } else { "off" }
                 );
             }

@@ -79,7 +79,9 @@ The skill drives two commands you can also use in your own scripts:
 
 Devices that aren't on your tailnet, or belong to another tailnet user, are asked for the access token (`glass token` shows it; `glass token --set` lets you choose one). A link containing `#t=<token>` signs a browser in once and is then remembered.
 
-**Magic links.** To let in a device without handing out the token, run `glass link` on the host; it prints the link and a QR code. The link works once, within 15 minutes, and gives that device its own access for 24 hours by default (`glass link --for 7d` to change it). Guests can use the computer but can't switch machines or update Glass. `glass link --revoke` cuts every guest off within seconds and voids unused links; your token and tailnet devices are unaffected. Only fingerprints of links and passes are stored, in `~/.config/glass/access.json`. The guest's device still needs to reach the host (be on your tailnet).
+**Magic links.** To let in a device without handing out the token, run `glass link` on the host; it prints the link and a QR code. The link works once, within 15 minutes, and gives that device its own access for 24 hours by default (`glass link --for 7d` to change it). Guests can use the computer but can't switch machines or update Glass. `glass link --revoke` cuts every guest off within seconds and voids unused links; your token and tailnet devices are unaffected. Only fingerprints of links and passes are stored, in `~/.config/glass/access.json`. On your tailnet, the guest's device must be on the tailnet too; for anywhere else, see the next paragraph.
+
+**From anywhere (no Tailscale on the device).** `glass link --anywhere` makes a link like `https://glassdesk.dev/app/#r=…&l=…` that works from any network. The browser and your computer connect directly over WebRTC: UDP, end-to-end encrypted, about as fast as on the tailnet. When a direct path is impossible (some cellular and corporate networks), traffic goes through Cloudflare's TURN relay, still end-to-end encrypted. glassdesk.dev only introduces the two sides; your computer keeps one outgoing connection to it and opens no ports. The link carries your computer's public key and the computer signs every connection answer, so the browser refuses anyone else, glassdesk.dev included. Remote access is off until you make such a link (or run `glass remote on`); `glass remote off` turns it off. One thing to know: in this mode the viewer page itself comes from glassdesk.dev, whereas on your tailnet it comes from your own computer.
 
 ## Using Glass
 
@@ -121,7 +123,9 @@ glass setup         Guided setup: Tailscale, background service, permissions, co
 glass setup --yes [--json]   Unattended setup for scripts and agents; reports what's left
 glass status [--json]        Is the service running? Capturing? Permissions? Connect URL
 glass link [--for 24h]   One-time magic link (and QR code) for a device outside your tailnet
+glass link --anywhere    The same, working from any network (WebRTC via glassdesk.dev)
 glass link --revoke      Cut off every device let in with a magic link
+glass remote on|off      Remote access from outside your tailnet (status without an argument)
 glass token         Show the access token for devices outside your tailnet
 glass token --reset Replace it with a new random token
 glass token --set   Choose your own token (prompted; or piped: echo … | glass token --set)
