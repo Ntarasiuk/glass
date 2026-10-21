@@ -308,6 +308,8 @@ test.describe('input', () => {
     await host.clearInput();
 
     const canvases = page.locator('#screens canvas:not(.hidden)');
+    // Some hosts leave the cursor out of the video; there must still be a pointer.
+    expect(await canvases.first().evaluate((c) => getComputedStyle(c).cursor)).not.toBe('none');
     for (const [i, canvas] of [canvases.nth(0), canvases.nth(1)].entries()) {
       const box = await canvas.boundingBox();
       // Letterboxed: the 16:9 video sits centred inside the canvas box.
