@@ -382,6 +382,11 @@ test.describe('input', () => {
     });
     expect(hit).toBe('toolbar');
     await expect(page.locator('#toolbar')).not.toHaveClass(/idle/);
+    // While it slides in, a second tap can't land on a button passing under the finger...
+    const pressable = () => page.evaluate(() => getComputedStyle(document.getElementById('btn-download')).pointerEvents !== 'none');
+    expect(await pressable()).toBe(false);
+    // ...and once it's in place, buttons work.
+    await expect.poll(pressable).toBe(true);
     await expect(page.locator('.panel:not(.hidden)')).toHaveCount(0);
     await page.waitForTimeout(300);
     expect((await host.input('down')).events).toHaveLength(0);

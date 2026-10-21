@@ -107,7 +107,7 @@
     }
     /* Idle: tuck up under the top edge, leaving a lip to reach for. */
     #toolbar.idle { transform: translateY(calc(-100% - var(--top) + 7px)); opacity: 0.6; }
-    #toolbar.idle button { pointer-events: none; }
+    #toolbar.idle button, #toolbar.waking button { pointer-events: none; }
     /* Touch: a fingertip-sized grab handle hangs under the tucked toolbar. Narrow, so it
        covers as little of the remote menu bar as possible. */
     [data-input="touch"] #toolbar.idle::after {

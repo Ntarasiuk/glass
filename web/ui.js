@@ -3,6 +3,8 @@
 const $ = (id) => document.getElementById(id);
 
 const TOOLBAR_IDLE_MS = 3000;
+// Matches the slide-in transition in index.html (420 ms), plus a beat.
+const TOOLBAR_WAKE_MS = 450;
 
 export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken }) {
   const toolbar = $('toolbar');
@@ -18,7 +20,15 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
 
   // Fade the toolbar when idle so it doesn't cover the remote screen.
   let idleTimer;
+  let wakingTimer;
   function wakeToolbar() {
+    if (toolbar.classList.contains('idle')) {
+      // Buttons ignore presses until it has finished sliding in, so a tap or click aimed
+      // at the tucked toolbar can't land on whichever button slides under it.
+      toolbar.classList.add('waking');
+      clearTimeout(wakingTimer);
+      wakingTimer = setTimeout(() => toolbar.classList.remove('waking'), TOOLBAR_WAKE_MS);
+    }
     toolbar.classList.remove('idle');
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
