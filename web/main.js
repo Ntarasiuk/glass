@@ -102,7 +102,12 @@ const input = attachInput({
   swapCmdOption: storage((s) => s.getItem(SWAP_KEY)) === '1',
   ctrlAsCmd,
   pcKeyboard,
+  onZoom: (s) => {
+    document.getElementById('zoom-pill').classList.toggle('hidden', s === 1);
+    document.getElementById('zoom-level').textContent = `${s.toFixed(1)}×`;
+  },
 });
+document.getElementById('zoom-reset').addEventListener('click', () => input.resetZoom());
 
 const ui = createUI({
   onOpenMachines: loadMachines,
@@ -204,6 +209,7 @@ const videoSizes = [];
 let status = 'connecting…';
 let codec = '';
 let statsCount = 0;
+let targetMbps;
 let displays = [];
 const transfers = new Map(); // id -> toast
 
@@ -237,7 +243,9 @@ worker.onmessage = ({ data }) => {
         hud.textContent =
           `${currentHost.split('.')[0]}  ${status}  ${codec}  ${videoSizes.filter(Boolean).join(' + ')}\n` +
           `latency ${data.latencyAvg.toFixed(1)} ms (max ${data.latencyMax.toFixed(1)})  rtt ${data.rtt.toFixed(1)} ms\n` +
-          `${data.fps} fps  ${data.mbps.toFixed(1)} Mbps  dropped ${data.dropped}` +
+          `${data.fps} fps  ${data.mbps.toFixed(1)} Mbps` +
+          (targetMbps ? ` (target ${targetMbps.toFixed(0)})` : '') +
+          `  dropped ${data.dropped}` +
           (data.audioPackets ? `\naudio ${data.audioPackets} pkt/s  lost ${data.audioLost}` : '');
       }
       break;
@@ -282,6 +290,9 @@ function onControl(msg) {
       break;
     case 'layout':
       onLayout(msg.streams);
+      break;
+    case 'bitrate':
+      targetMbps = msg.bps / 1e6;
       break;
     case 'clipboard':
       log('info', 'mac clipboard changed', { length: msg.text.length });

@@ -29,6 +29,8 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static DROP_FRAMES: AtomicU32 = AtomicU32::new(0);
 /// Corrupt the next frame after its checksum is computed.
 static CORRUPT_NEXT: AtomicBool = AtomicBool::new(false);
+/// Current adaptive bitrate, readable at /test/bitrate.
+static BITRATE: AtomicU32 = AtomicU32::new(0);
 
 pub fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
@@ -77,7 +79,8 @@ pub struct TestVideo {
 }
 
 impl TestVideo {
-    pub fn new(frames: broadcast::Sender<Arc<EncodedFrame>>, fps: u32) -> Self {
+    pub fn new(frames: broadcast::Sender<Arc<EncodedFrame>>, fps: u32, bitrate: u32) -> Self {
+        BITRATE.store(bitrate, Ordering::Relaxed);
         let displays: Vec<DisplayInfo> = (0..DISPLAYS)
             .map(|i| DisplayInfo {
                 id: i as u32,
@@ -138,6 +141,10 @@ impl VideoSource for TestVideo {
     fn displays(&self) -> Result<Vec<DisplayInfo>> {
         Ok(self.displays.clone())
     }
+
+    fn set_bitrate(&self, bps: u32) {
+        BITRATE.store(bps, Ordering::Relaxed);
+    }
 }
 
 fn pattern_loop(
@@ -147,7 +154,8 @@ fn pattern_loop(
     frames: broadcast::Sender<Arc<EncodedFrame>>,
     fps: u32,
 ) {
-    let mut encoder = Encoder::new(WIDTH, HEIGHT, fps, 2_000_000, 1.0).expect("test encoder");
+    let mut applied = BITRATE.load(Ordering::Relaxed);
+    let mut encoder = Encoder::new(WIDTH, HEIGHT, fps, applied, 1.0).expect("test encoder");
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
     let mut next = Instant::now();
     for n in 0u64.. {
@@ -156,6 +164,11 @@ fn pattern_loop(
         let s = slot.load(Ordering::Relaxed);
         if s < 0 {
             continue;
+        }
+        let target = BITRATE.load(Ordering::Relaxed);
+        if target != applied {
+            encoder.set_bitrate(target);
+            applied = target;
         }
         let frame = render(display, n);
         let force = keyframe.swap(false, Ordering::Relaxed);
@@ -291,6 +304,7 @@ pub fn routes(events: broadcast::Sender<ServerMsg>, downloads: PathBuf) -> axum:
             "/test/drop",
             post(|Query(q): Query<DropQuery>| async move { DROP_FRAMES.store(q.frames, Ordering::Relaxed) }),
         )
+        .route("/test/bitrate", get(|| async { Json(serde_json::json!({"bps": BITRATE.load(Ordering::Relaxed)})) }))
         .route("/test/corrupt", post(|| async { CORRUPT_NEXT.store(true, Ordering::Relaxed) }))
         .route(
             "/test/downloads",

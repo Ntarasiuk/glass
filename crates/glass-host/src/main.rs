@@ -1,6 +1,7 @@
 mod control;
 mod files;
 mod media;
+mod rate;
 mod server;
 mod setup;
 mod soft_encode;
@@ -218,7 +219,7 @@ async fn run_host(args: Args) -> Result<()> {
         _,
         _,
     ) = if args.test {
-        let video = Arc::new(testmode::TestVideo::new(frames.clone(), args.fps as u32));
+        let video = Arc::new(testmode::TestVideo::new(frames.clone(), args.fps as u32, (args.mbps * 1_000_000) as u32));
         video.set_layout(media::Layout::Single(None))?;
         testmode::start_tone(audio.clone());
         (video, Box::new(testmode::FakeInput), Arc::new(testmode::FakeClipboard), None, None)
@@ -276,6 +277,7 @@ async fn run_host(args: Args) -> Result<()> {
         token: token.clone(),
         tailnet_owner,
         audio,
+        rate: Mutex::new(rate::RateControl::new((args.mbps * 1_000_000) as u32)),
     });
     info!("open {scheme}://{host}:{}/#t={token}", args.http_port);
     server::run(

@@ -225,11 +225,15 @@ test.describe('input', () => {
     await expect.poll(async () => (await host.input('down')).events.map((e) => e.button)).toContain(2);
 
     await host.clearInput();
+    // Two fingers moving up together, in small steps like a real swipe.
+    const steps = Array.from({ length: 10 }, (_, i) => 0.6 - (i + 1) * 0.02).flatMap((fy) => [
+      { type: 'pointermove', id: 1, fx: 0.4, fy },
+      { type: 'pointermove', id: 2, fx: 0.6, fy },
+    ]);
     await touch(page, 0, [
       { type: 'pointerdown', id: 1, fx: 0.4, fy: 0.6 },
       { type: 'pointerdown', id: 2, fx: 0.6, fy: 0.6 },
-      { type: 'pointermove', id: 1, fx: 0.4, fy: 0.4 },
-      { type: 'pointermove', id: 2, fx: 0.6, fy: 0.4 },
+      ...steps,
       { type: 'pointerup', id: 1, fx: 0.4, fy: 0.4 },
       { type: 'pointerup', id: 2, fx: 0.6, fy: 0.4 },
     ]);
@@ -237,6 +241,45 @@ test.describe('input', () => {
     // Fingers moved up, so content scrolls down (positive dy), and nothing was clicked.
     expect((await host.input('scroll')).events.reduce((s, e) => s + e.dy, 0)).toBeGreaterThan(0);
     expect((await host.input('down')).events).toHaveLength(0);
+  });
+
+  it('pinch zooms locally, taps still land in the right place, reset restores', async ({ page, host }) => {
+    await open(page, host);
+    await host.clearInput();
+    // Pinch out around the centre.
+    await touch(page, 0, [
+      { type: 'pointerdown', id: 1, fx: 0.45, fy: 0.5 },
+      { type: 'pointerdown', id: 2, fx: 0.55, fy: 0.5 },
+      { type: 'pointermove', id: 1, fx: 0.4, fy: 0.5 },
+      { type: 'pointermove', id: 2, fx: 0.6, fy: 0.5 },
+      { type: 'pointermove', id: 1, fx: 0.35, fy: 0.5 },
+      { type: 'pointermove', id: 2, fx: 0.65, fy: 0.5 },
+      { type: 'pointerup', id: 1, fx: 0.35, fy: 0.5 },
+      { type: 'pointerup', id: 2, fx: 0.65, fy: 0.5 },
+    ]);
+    await expect(page.locator('#zoom-pill')).toBeVisible();
+    // Fingers went from 10% to 30% of the width apart: 3×.
+    await expect(page.locator('#zoom-level')).toHaveText('3.0×');
+    // Zooming is local: nothing reached the Mac.
+    expect((await host.input()).events.filter((e) => e.t !== 'move')).toHaveLength(0);
+
+    // The centre of the (zoomed) canvas is still the centre of the remote screen.
+    await host.clearInput();
+    const view = page.viewportSize();
+    await page.evaluate(({ x, y }) => {
+      const canvas = document.querySelector('#screens canvas');
+      for (const type of ['pointerdown', 'pointerup']) {
+        canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: 'touch', pointerId: 3, clientX: x, clientY: y }));
+      }
+    }, { x: view.width / 2, y: view.height / 2 });
+    await expect.poll(async () => (await host.input('move')).events.length).toBeGreaterThan(0);
+    const move = (await host.input('move')).events[0];
+    expect(move.x).toBeCloseTo(0.5, 1);
+    expect(move.y).toBeCloseTo(0.5, 1);
+
+    await page.locator('#zoom-reset').click();
+    await expect(page.locator('#zoom-pill')).toBeHidden();
+    expect(await page.locator('#screens').evaluate((el) => el.style.transform)).toBe('');
   });
 
   it('on-screen keyboard text becomes key taps', async ({ page, host }) => {
@@ -308,6 +351,18 @@ test.describe('resilience', () => {
     await expect.poll(async () => (await stats(page)).dropped, { timeout: 5_000 }).toBe(0);
     expect((await stats(page)).fps).toBeGreaterThan(10);
     expect(host.clientLog('decoder error detail')).toHaveLength(0);
+  });
+
+  it('backs off the bitrate under loss and recovers', async ({ page, host }) => {
+    await open(page, host);
+    const bps = async () => (await host.get('/test/bitrate')).bps;
+    const max = await bps();
+    await host.post('/test/drop?frames=4');
+    await expect.poll(bps, { timeout: 5_000 }).toBeLessThan(max);
+    const low = await bps();
+    await expect(page.locator('#hud')).toContainText('target');
+    // Clean network again: it climbs back.
+    await expect.poll(bps, { timeout: 15_000 }).toBeGreaterThan(low);
   });
 
   it('never decodes a corrupted frame', async ({ page, host }) => {

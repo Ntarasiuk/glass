@@ -99,6 +99,15 @@ impl Encoder {
         Ok(Self { session, force_keyframe, on_frame })
     }
 
+    /// Changes the target bitrate on the fly; low-latency rate control adapts within frames.
+    pub fn set_bitrate(&self, bps: u32) {
+        let value = CFNumber::new_i32(bps as i32);
+        let status = unsafe { VTSessionSetProperty(&self.session, kVTCompressionPropertyKey_AverageBitRate, Some(&value)) };
+        if status != 0 {
+            tracing::warn!("set bitrate {bps}: {status}");
+        }
+    }
+
     pub fn encode(&self, image: &CVImageBuffer, pts: CMTime, capture_us: u64) {
         let props = self.force_keyframe.swap(false, Ordering::Relaxed).then(|| {
             let keys = unsafe { [kVTEncodeFrameOptionKey_ForceKeyFrame] };

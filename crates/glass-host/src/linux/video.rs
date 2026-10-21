@@ -43,6 +43,8 @@ struct Monitor {
     /// Stream number this monitor is sent as, or -1 when not shown.
     slot: AtomicI32,
     keyframe: AtomicBool,
+    /// Adaptive target bitrate; the encoder thread applies changes.
+    bitrate: std::sync::atomic::AtomicU32,
 }
 
 /// Monitor rects for input mapping, by display id.
@@ -192,6 +194,7 @@ impl Video {
                 }),
                 slot: AtomicI32::new(-1),
                 keyframe: AtomicBool::new(true),
+                bitrate: std::sync::atomic::AtomicU32::new(self.config.bitrate as u32),
             });
             // One-slot queue: if encoding falls behind, newer frames replace nothing and
             // are simply dropped until the encoder is free.
@@ -230,6 +233,7 @@ fn encode_loop(
     scale: f64,
 ) {
     let mut encoder: Option<Encoder> = None;
+    let mut applied_bitrate = bitrate;
     let mut last: Option<(Frame, u64)> = None;
     loop {
         let fresh = match rx.recv_timeout(IDLE_POLL) {
@@ -256,7 +260,7 @@ fn encode_loop(
         let size = (frame.width, frame.height);
         let mut force = wants_key;
         if encoder.as_ref().is_none_or(|e| e.source_size() != size) {
-            match Encoder::new(frame.width, frame.height, fps, bitrate, scale) {
+            match Encoder::new(frame.width, frame.height, fps, monitor.bitrate.load(Ordering::Relaxed), scale) {
                 Ok(e) => encoder = Some(e),
                 Err(e) => {
                     warn!("encoder: {e:#}");
@@ -266,6 +270,11 @@ fn encode_loop(
             force = true;
             let mut info = monitor.info.lock().unwrap();
             (info.width, info.height) = size;
+        }
+        let target = monitor.bitrate.load(Ordering::Relaxed);
+        if target != applied_bitrate {
+            encoder.as_mut().unwrap().set_bitrate(target);
+            applied_bitrate = target;
         }
         let capture_us = if has_fresh { *captured_us } else { now_us() };
         match encoder.as_mut().unwrap().encode(frame, force) {
@@ -423,5 +432,12 @@ impl VideoSource for Video {
     }
     fn displays(&self) -> Result<Vec<DisplayInfo>> {
         Video::displays(self)
+    }
+    fn set_bitrate(&self, bps: u32) {
+        if let Some(monitors) = self.monitors.lock().unwrap().as_ref() {
+            for m in monitors {
+                m.bitrate.store(bps, Ordering::Relaxed);
+            }
+        }
     }
 }

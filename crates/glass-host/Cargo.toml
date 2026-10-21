@@ -15,6 +15,7 @@ cliclack = "0.5.6"
 console = "0.16.6"
 glass-proto = { version = "0.1.0", path = "../glass-proto" }
 openh264 = "0.9"
+openh264-sys2 = "0.9"
 qrcode = { version = "0.14.1", default-features = false }
 rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 serde = { version = "1.0.229", features = ["derive"] }

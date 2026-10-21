@@ -69,6 +69,16 @@ impl Encoder {
         })
     }
 
+    /// Changes the target bitrate on the fly (no new keyframe).
+    pub fn set_bitrate(&mut self, bps: u32) {
+        let mut info = openh264_sys2::TagBitrateInfo { iLayer: openh264_sys2::SPATIAL_LAYER_ALL, iBitrate: bps as i32 };
+        // SAFETY: SetOption(ENCODER_OPTION_BITRATE) takes a pointer to SBitrateInfo, which
+        // lives for the duration of the call.
+        unsafe {
+            self.h264.raw_api().set_option(openh264_sys2::ENCODER_OPTION_BITRATE, (&raw mut info).cast());
+        }
+    }
+
     /// Size the encoder was built for; a different frame size needs a new encoder.
     pub fn source_size(&self) -> (usize, usize) {
         self.src

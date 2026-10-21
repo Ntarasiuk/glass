@@ -38,6 +38,7 @@ pub struct Shared {
     /// Tailnet login of this Mac's owner; their devices skip the token.
     pub tailnet_owner: Option<String>,
     pub audio: AudioPackets,
+    pub rate: Mutex<crate::rate::RateControl>,
 }
 
 pub struct TlsFiles {
@@ -293,6 +294,8 @@ async fn control(
         host_os: if crate::testmode::enabled() { crate::testmode::host_os() } else { crate::platform::OS },
     };
     control::write_json(&mut send, &welcome).await?;
+    let bps = shared.rate.lock().unwrap().target();
+    control::write_json(&mut send, &ServerMsg::Bitrate { bps }).await?;
 
     let mut events = shared.events.subscribe();
     tokio::spawn(async move {
@@ -328,6 +331,14 @@ async fn control(
                     shared.video.request_keyframe(None);
                 }
                 info!("{}: video {}", ctx.conn.remote_address(), if on { "resumed" } else { "paused" });
+            }
+            ClientMsg::NetStats(report) => {
+                let changed = shared.rate.lock().unwrap().report(report, std::time::Instant::now());
+                if let Some(bps) = changed {
+                    info!("bitrate → {:.1} Mbps", bps as f64 / 1e6);
+                    shared.video.set_bitrate(bps);
+                    let _ = shared.events.send(ServerMsg::Bitrate { bps });
+                }
             }
             ClientMsg::Audio { on } => {
                 ctx.audio_on.store(on, Ordering::Relaxed);

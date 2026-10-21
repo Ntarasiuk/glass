@@ -26,6 +26,7 @@ pub struct VideoConfig {
 /// What to stream: one display (main when `None`) or every display.
 struct Stream {
     capture: Capture,
+    encoder: Arc<Encoder>,
     display: DisplayInfo,
     keyframe: Arc<AtomicBool>,
 }
@@ -36,6 +37,8 @@ pub struct Video {
     /// Shared across layout changes so audio sequence numbers stay continuous.
     audio: Arc<Mutex<Packetizer>>,
     streams: Mutex<Vec<Stream>>,
+    /// Current adaptive target; new streams start at it.
+    bitrate: std::sync::atomic::AtomicU32,
 }
 
 impl Video {
@@ -45,7 +48,8 @@ impl Video {
         audio: AudioPackets,
     ) -> Self {
         let audio = Arc::new(Mutex::new(Packetizer::new(audio)));
-        Self { config, frames, audio, streams: Mutex::new(Vec::new()) }
+        let bitrate = std::sync::atomic::AtomicU32::new(config.bitrate as u32);
+        Self { config, frames, audio, streams: Mutex::new(Vec::new()), bitrate }
     }
 
     /// The displays being streamed; index = stream number.
@@ -110,10 +114,12 @@ impl Video {
                 let _ = frames.send(Arc::new(EncodedFrame { stream: index, ..frame }));
             }),
         )?;
-        let capture = capture::start(&display.sc, width, height, self.config.fps, Arc::new(encoder), audio)?;
+        let encoder = Arc::new(encoder);
+        encoder.set_bitrate(self.bitrate.load(Ordering::Relaxed));
+        let capture = capture::start(&display.sc, width, height, self.config.fps, encoder.clone(), audio)?;
         let id = display.info.id;
         info!("stream {index}: display {id} at {width}x{height} @ {}fps", self.config.fps);
-        Ok(Stream { capture, display: display.info.clone(), keyframe })
+        Ok(Stream { capture, encoder, display: display.info.clone(), keyframe })
     }
 
     pub fn displays(&self) -> Result<Vec<DisplayInfo>> {
@@ -133,5 +139,11 @@ impl VideoSource for Video {
     }
     fn displays(&self) -> Result<Vec<DisplayInfo>> {
         Video::displays(self)
+    }
+    fn set_bitrate(&self, bps: u32) {
+        self.bitrate.store(bps, Ordering::Relaxed);
+        for s in self.streams.lock().unwrap().iter() {
+            s.encoder.set_bitrate(bps);
+        }
     }
 }

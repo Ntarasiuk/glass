@@ -375,6 +375,15 @@ function tick() {
 }
 
 function reportStats() {
+  // Feeds the host's adaptive bitrate. Hidden tabs decode nothing, so they don't report.
+  if (visible && (stats.frames || stats.dropped)) {
+    sendControl({
+      t: 'netStats',
+      dropped: stats.dropped,
+      frames: stats.frames,
+      latency_ms: stats.latencySamples ? stats.latencySum / stats.latencySamples : null,
+    });
+  }
   self.postMessage({
     type: 'stats',
     fps: stats.frames,

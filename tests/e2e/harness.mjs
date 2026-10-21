@@ -131,7 +131,9 @@ export async function touch(page, canvasIndex, points) {
     ({ canvasIndex, points }) => {
       const canvas = document.querySelectorAll('#screens canvas')[canvasIndex];
       const r = canvas.getBoundingClientRect();
-      for (const { type, id = 1, fx, fy } of points) {
+      // Touch ids distinct from the mouse's (1), as on real hardware.
+      for (const { type, id: finger = 1, fx, fy } of points) {
+        const id = 100 + finger;
         canvas.dispatchEvent(
           new PointerEvent(type, {
             bubbles: true,

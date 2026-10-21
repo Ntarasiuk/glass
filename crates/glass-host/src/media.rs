@@ -49,6 +49,8 @@ pub trait VideoSource: Send + Sync {
     fn set_layout(&self, layout: Layout) -> anyhow::Result<Vec<DisplayInfo>>;
     /// Every capturable display. May block.
     fn displays(&self) -> anyhow::Result<Vec<DisplayInfo>>;
+    /// Target bitrate for each stream, in bits per second (adaptive rate control).
+    fn set_bitrate(&self, bps: u32);
 }
 
 /// Where client input goes (the platform injector, or a recorder in tests).

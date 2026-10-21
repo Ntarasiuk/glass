@@ -9,6 +9,9 @@ const TAP_SLOP_PX = 10;
 // the gesture into a scroll without a stray click.
 const TOUCH_PRESS_DELAY_MS = 120;
 const CLIPBOARD_WAIT_MS = 1500;
+const MAX_ZOOM = 5;
+// A two-finger gesture becomes a pinch once the finger spread changes this much.
+const PINCH_THRESHOLD = 0.08;
 const PASTE_FALLBACK_MS = 150;
 
 const MODIFIER_CODES = ['MetaLeft', 'MetaRight', 'ShiftLeft', 'ShiftRight', 'AltLeft', 'AltRight', 'ControlLeft', 'ControlRight'];
@@ -24,7 +27,7 @@ const MODIFIER_KEYCODES = new Set(MODIFIER_CODES.map((c) => MAC_KEYCODES[c]));
  */
 export function attachInput({
   screens, keySink, send, control, nextClipboard, onLocalShortcut, swapCmdOption = false, ctrlAsCmd = true,
-  pcKeyboard = false,
+  pcKeyboard = false, onZoom,
 }) {
   // With iPadOS set to turn the physical ⌘ key into ⌥ (so it can't claim ⌘Tab etc.),
   // swap them back here so the Mac gets the keys the user actually pressed.
@@ -166,7 +169,44 @@ export function attachInput({
       gesture.pressed = false;
       gesture.scrolling = true;
       gesture.last = centroid();
+      // Decided on first movement: pinch (zoom), pan (when zoomed) or scroll the remote.
+      gesture.mode = undefined;
+      gesture.start = { c: centroid(), spread: spread(), zoom: { ...zoom } };
     }
+  }
+
+  // ---- Local zoom (pinch): scales the remote screens on this device only ----
+
+  const zoom = { s: 1, x: 0, y: 0 };
+
+  function spread() {
+    const [a, b] = [...touches.values()];
+    return b ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
+  }
+
+  /** Scale `s` around the fingers: the point that was under `c0` ends up under `c`. */
+  function zoomTo(s, c, start) {
+    s = Math.min(MAX_ZOOM, Math.max(1, s));
+    const px = (start.c.x - start.zoom.x) / start.zoom.s;
+    const py = (start.c.y - start.zoom.y) / start.zoom.s;
+    const w = screens.clientWidth;
+    const h = screens.clientHeight;
+    // Keep the screens covering the viewport: no panning past the edges.
+    zoom.s = s;
+    zoom.x = Math.min(0, Math.max(w - w * s, c.x - px * s));
+    zoom.y = Math.min(0, Math.max(h - h * s, c.y - py * s));
+    applyZoom();
+  }
+
+  function applyZoom() {
+    screens.style.transform = zoom.s === 1 ? '' : `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.s})`;
+    rects.clear();
+    onZoom?.(zoom.s);
+  }
+
+  function resetZoom() {
+    Object.assign(zoom, { s: 1, x: 0, y: 0 });
+    applyZoom();
   }
 
   screens.addEventListener('pointermove', (e) => {
@@ -174,8 +214,19 @@ export function attachInput({
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (gesture.scrolling) {
       const c = centroid();
-      // Natural scrolling: content follows the fingers.
-      send(Input.SCROLL, { a: gesture.last.x - c.x, b: gesture.last.y - c.y });
+      const start = gesture.start;
+      if (!gesture.mode && start && touches.size >= 2) {
+        const ratio = spread() / (start.spread || 1);
+        const moved = Math.hypot(c.x - start.c.x, c.y - start.c.y) > TAP_SLOP_PX;
+        if (Math.abs(ratio - 1) > PINCH_THRESHOLD) gesture.mode = 'zoom';
+        else if (moved) gesture.mode = zoom.s > 1 ? 'zoom' : 'scroll';
+      }
+      if (gesture.mode === 'zoom' && touches.size >= 2) {
+        zoomTo(start.zoom.s * (spread() / (start.spread || 1)), c, start);
+      } else if (gesture.mode === 'scroll') {
+        // Natural scrolling: content follows the fingers.
+        send(Input.SCROLL, { a: gesture.last.x - c.x, b: gesture.last.y - c.y });
+      }
       gesture.last = c;
       return;
     }
@@ -194,6 +245,8 @@ export function attachInput({
 
   function touchUp(e, cancelled = false) {
     touches.delete(e.pointerId);
+    // Snap back to 1× when a pinch ends just above it.
+    if (touches.size === 0 && gesture?.mode === 'zoom' && zoom.s < 1.05) resetZoom();
     if (!gesture || touches.size > 0) return;
     clearTimers();
     if (!gesture.done && !gesture.scrolling && !cancelled) {
@@ -338,6 +391,7 @@ export function attachInput({
       resize.observe(canvas);
     },
     focusKeys,
+    resetZoom,
     setCtrlAsCmd(on) {
       releaseKeys();
       remappedCtrl = undefined;
