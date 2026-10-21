@@ -64,6 +64,22 @@ impl RateControl {
         self.target
     }
 
+    pub fn max(&self) -> u32 {
+        self.max
+    }
+
+    /// Starts low for a link of unknown size (a new viewer over the internet): the first
+    /// keyframe is sized for it, then the rate climbs as the link proves it can take more.
+    pub fn start_cautiously(&mut self, bps: u32, now: Instant) -> Option<u32> {
+        if bps >= self.target {
+            return None;
+        }
+        self.target = bps;
+        self.ceiling = Some(bps);
+        self.last_decrease = Some(now);
+        Some(bps)
+    }
+
     /// Feeds one client report; returns the new target if it changed meaningfully.
     pub fn report(&mut self, r: Report, now: Instant) -> Option<u32> {
         let baseline = self.latencies.iter().copied().fold(f64::INFINITY, f64::min);
@@ -202,6 +218,16 @@ mod tests {
         };
         rc.report(busy, t0 + Duration::from_secs(41));
         assert!(rc.target() > low);
+    }
+
+    #[test]
+    fn a_cautious_start_climbs_gently() {
+        let mut rc = RateControl::new(MAX);
+        let t0 = Instant::now();
+        assert_eq!(rc.start_cautiously(6_000_000, t0), Some(6_000_000));
+        assert_eq!(rc.start_cautiously(9_000_000, t0), None, "never raises");
+        rc.report(clean(), t0 + Duration::from_secs(2));
+        assert_eq!(rc.target(), 6_600_000, "probes up from there");
     }
 
     #[test]

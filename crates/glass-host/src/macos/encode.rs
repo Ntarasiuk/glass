@@ -30,16 +30,31 @@ use objc2_video_toolbox::{
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
 const MAX_GOP_FRAMES: i32 = 900;
 
-/// The average target, plus hard limits so bursts (motion, keyframes) can't swamp a slow
-/// link: at most 1.2× the target over any second, and half a second's worth in any
-/// quarter second.
+/// Frames the encoder skipped to stay within its rate limits, logged every few seconds.
+fn note_skipped_frame() {
+    use std::sync::Mutex;
+    static SKIPPED: Mutex<(u32, Option<std::time::Instant>)> = Mutex::new((0, None));
+    let mut s = SKIPPED.lock().unwrap();
+    s.0 += 1;
+    let since = *s.1.get_or_insert_with(std::time::Instant::now);
+    if since.elapsed() >= std::time::Duration::from_secs(5) {
+        tracing::info!(
+            "encoder skipped {} frames in {:.0}s to stay within the bitrate",
+            s.0,
+            since.elapsed().as_secs_f64()
+        );
+        *s = (0, Some(std::time::Instant::now()));
+    }
+}
+
+/// The average target, plus a loose ceiling of twice that over any second, so a runaway
+/// burst can't swamp a slow link. Tighter limits make the encoder drop frames outright
+/// (a frozen picture) instead of lowering quality, so the adaptive rate does the rest.
 fn set_rate(session: &VTCompressionSession, bps: u32) {
     let bytes_per_sec = bps as f64 / 8.0;
     let limits = [
-        CFNumber::new_f64(bytes_per_sec * 1.2),
+        CFNumber::new_f64(bytes_per_sec * 2.0),
         CFNumber::new_f64(1.0),
-        CFNumber::new_f64(bytes_per_sec * 0.5),
-        CFNumber::new_f64(0.25),
     ];
     let limits = CFArray::from_retained_objects(&limits);
     let average = CFNumber::new_i32(bps as i32);
@@ -165,8 +180,13 @@ impl Encoder {
         let on_frame = self.on_frame.clone();
         let handler = RcBlock::new(
             move |status: i32, _flags: VTEncodeInfoFlags, sample: *mut CMSampleBuffer| {
-                if status != 0 || sample.is_null() {
+                if status != 0 {
                     tracing::warn!("encode failed: {status}");
+                    return;
+                }
+                if sample.is_null() {
+                    // Dropped by rate control to stay within the limits: count, don't shout.
+                    note_skipped_frame();
                     return;
                 }
                 if let Some(frame) = unsafe { annex_b(&*sample) } {

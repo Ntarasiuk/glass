@@ -502,9 +502,13 @@ async fn bridge(
         bridge_secret()
     );
     let conn = endpoint.connect(url).await.context("loopback session")?;
+    crate::server::remote_viewer_joined();
 
     let mut datagram_channel: Option<Arc<dyn DataChannel>> = None;
     let mut bridge_drops = 0u64;
+    let mut gate = FrameGate::default();
+    let mut last_keyframe_ask = std::time::Instant::now();
+    let mut last_congestion_report = std::time::Instant::now();
     let mut last_drop_report = std::time::Instant::now();
     loop {
         tokio::select! {
@@ -540,11 +544,30 @@ async fn bridge(
             datagram = conn.receive_datagram() => {
                 let datagram = datagram?;
                 if let Some(dc) = &datagram_channel {
-                    // Drop rather than queue: a late frame is worse than a missing one.
-                    if dc.outstanding_bytes().await.unwrap_or(0) < DATAGRAM_BACKLOG {
-                        let _ = dc.try_send(BytesMut::from(&datagram.payload()[..])).await;
-                    } else {
-                        bridge_drops += 1;
+                    let outstanding = dc.outstanding_bytes().await.unwrap_or(0);
+                    let payload = datagram.payload();
+                    match gate.admit(&payload, outstanding) {
+                        Admit::Send => {
+                            let _ = dc.try_send(BytesMut::from(&payload[..])).await;
+                        }
+                        Admit::Drop => bridge_drops += 1,
+                    }
+                    // Tell the bitrate controller: the browser can't see these drops.
+                    if gate.dropped_frames > 0 && last_congestion_report.elapsed() >= Duration::from_secs(1) {
+                        crate::server::bridge_congestion(std::mem::take(&mut gate.dropped_frames));
+                        last_congestion_report = std::time::Instant::now();
+                    }
+                    // Waiting for a keyframe the browser can't ask for (it sees no gap when
+                    // nothing arrives at all): ask on its behalf.
+                    // Ask once the send buffer has drained, so the keyframe and the frames
+                    // after it fit; asking sooner just loops on keyframes alone.
+                    for stream in gate.waiting_for_keyframe() {
+                        if outstanding < DATAGRAM_BACKLOG / 4
+                            && last_keyframe_ask.elapsed() >= Duration::from_millis(500)
+                        {
+                            last_keyframe_ask = std::time::Instant::now();
+                            let _ = conn.send_datagram([glass_proto::KIND_KEYFRAME_REQUEST, stream]);
+                        }
                     }
                 }
                 // Tells apart loss here (the WebRTC send buffer is full) from loss on the way.
@@ -575,6 +598,80 @@ async fn bridge(
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Admit {
+    Send,
+    Drop,
+}
+
+/// Decides, a whole video frame at a time, what the WebRTC send buffer can take. Dropping
+/// single packets when it's full would leave nearly every frame with a hole: bandwidth
+/// spent on frames that can't be decoded. And once a frame is gone, the frames after it
+/// can't be decoded either until the next keyframe, so those go too.
+#[derive(Default)]
+struct FrameGate {
+    /// Per stream: the frame being passed through and whether it's sent or dropped.
+    current: [Option<(u32, bool)>; glass_proto::MAX_STREAMS],
+    /// Per stream: a frame was dropped, so wait for a keyframe.
+    broken: [bool; glass_proto::MAX_STREAMS],
+    /// Frames dropped since the bitrate controller was last told.
+    dropped_frames: u32,
+}
+
+/// Rough bytes on the wire per video fragment.
+const FRAGMENT_BYTES: usize = 1250;
+
+impl FrameGate {
+    /// Streams whose picture is broken until a keyframe arrives.
+    fn waiting_for_keyframe(&self) -> impl Iterator<Item = u8> + '_ {
+        self.broken
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| **b)
+            .map(|(i, _)| i as u8)
+    }
+
+    fn admit(&mut self, datagram: &[u8], outstanding: usize) -> Admit {
+        let Some(h) = (datagram.first() == Some(&glass_proto::KIND_VIDEO))
+            .then(|| glass_proto::VideoHeader::read(datagram))
+            .flatten()
+        else {
+            // Audio and pings: small; drop only if things are badly backed up.
+            return if outstanding < DATAGRAM_BACKLOG * 2 {
+                Admit::Send
+            } else {
+                Admit::Drop
+            };
+        };
+        let s = (h.stream as usize).min(glass_proto::MAX_STREAMS - 1);
+        if let Some((id, send)) = self.current[s]
+            && id == h.frame_id
+        {
+            return if send { Admit::Send } else { Admit::Drop };
+        }
+        // A new frame: decide for all of it.
+        let keyframe = h.flags & glass_proto::FLAG_KEYFRAME != 0;
+        let send = if keyframe {
+            // Keyframes can be bigger than the whole budget; send once the queue has
+            // mostly drained, or the picture would never recover.
+            outstanding < DATAGRAM_BACKLOG / 2
+        } else {
+            !self.broken[s]
+                && outstanding + h.frag_count as usize * FRAGMENT_BYTES <= DATAGRAM_BACKLOG
+        };
+        self.broken[s] = if keyframe {
+            !send
+        } else {
+            self.broken[s] || !send
+        };
+        self.current[s] = Some((h.frame_id, send));
+        if !send {
+            self.dropped_frames += 1;
+        }
+        if send { Admit::Send } else { Admit::Drop }
     }
 }
 
@@ -635,6 +732,53 @@ mod tests {
             "1 host mdns, 1 relay v4, 1 srflx v6"
         );
         assert_eq!(candidate_summary("v=0"), "no candidates");
+    }
+
+    fn video(frame_id: u32, frag_idx: u16, frag_count: u16, keyframe: bool) -> Vec<u8> {
+        let h = glass_proto::VideoHeader {
+            flags: if keyframe {
+                glass_proto::FLAG_KEYFRAME
+            } else {
+                0
+            },
+            stream: 0,
+            frag_idx,
+            frag_count,
+            frame_id,
+            capture_us: 0,
+            checksum: 0,
+        };
+        let mut buf = vec![0u8; 64];
+        h.write(&mut buf);
+        buf
+    }
+
+    #[test]
+    fn drops_whole_frames_and_waits_for_a_keyframe() {
+        let mut g = FrameGate::default();
+        // Room: the whole frame goes, every fragment, even as the buffer fills.
+        assert_eq!(g.admit(&video(1, 0, 3, false), 0), Admit::Send);
+        assert_eq!(
+            g.admit(&video(1, 2, 3, false), DATAGRAM_BACKLOG),
+            Admit::Send
+        );
+        // No room for frame 2: all of it is dropped...
+        assert_eq!(
+            g.admit(&video(2, 0, 3, false), DATAGRAM_BACKLOG),
+            Admit::Drop
+        );
+        assert_eq!(g.admit(&video(2, 1, 3, false), 0), Admit::Drop);
+        // ...and so is frame 3, though there's room: it can't be decoded without 2.
+        assert_eq!(g.admit(&video(3, 0, 3, false), 0), Admit::Drop);
+        assert_eq!(g.waiting_for_keyframe().collect::<Vec<_>>(), [0]);
+        // A keyframe goes once the queue has drained, even if it's huge, and heals it.
+        assert_eq!(
+            g.admit(&video(4, 0, 400, true), DATAGRAM_BACKLOG),
+            Admit::Drop
+        );
+        assert_eq!(g.admit(&video(5, 0, 400, true), 0), Admit::Send);
+        assert_eq!(g.admit(&video(6, 0, 3, false), 0), Admit::Send);
+        assert_eq!(g.waiting_for_keyframe().count(), 0);
     }
 
     #[test]

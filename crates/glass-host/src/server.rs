@@ -113,6 +113,7 @@ pub async fn run(
             }))
         }
     };
+    let _ = SHARED.set(shared.clone());
     let _ = CLIENT_LOG.set(client_log.clone());
     let machines_cache = Arc::new(tokio::sync::Mutex::new(None));
     let app = axum::Router::new()
@@ -563,16 +564,7 @@ async fn control(
                 }
             }
             ClientMsg::NetStats(report) => {
-                let changed = shared
-                    .rate
-                    .lock()
-                    .unwrap()
-                    .report(report, std::time::Instant::now());
-                if let Some(bps) = changed {
-                    info!("bitrate → {:.1} Mbps", bps as f64 / 1e6);
-                    shared.video.set_bitrate(bps);
-                    let _ = shared.events.send(ServerMsg::Bitrate { bps });
-                }
+                apply_rate_report(shared, report);
             }
             ClientMsg::Audio { on } => {
                 ctx.audio_on.store(on, Ordering::Relaxed);
@@ -864,6 +856,55 @@ fn web_version(dir: &std::path::Path) -> String {
 }
 
 /// Client log batches arrive as JSON lines; appended verbatim with a receive timestamp.
+/// Feeds one congestion report (from a client, or the WebRTC bridge) to the adaptive bitrate.
+fn apply_rate_report(shared: &Shared, report: crate::rate::Report) {
+    let changed = shared
+        .rate
+        .lock()
+        .unwrap()
+        .report(report, std::time::Instant::now());
+    if let Some(bps) = changed {
+        info!("bitrate → {:.1} Mbps", bps as f64 / 1e6);
+        shared.video.set_bitrate(bps);
+        let _ = shared.events.send(ServerMsg::Bitrate { bps });
+    }
+}
+
+static SHARED: std::sync::OnceLock<Arc<Shared>> = std::sync::OnceLock::new();
+
+/// The WebRTC bridge drops whole frames when its link backs up; the browser only sees
+/// skipped frames, never damaged ones, so it reports no loss. The bridge reports it here.
+pub fn bridge_congestion(dropped_frames: u32) {
+    if let Some(shared) = SHARED.get() {
+        let report = crate::rate::Report {
+            dropped: dropped_frames,
+            frames: 1,
+            latency_ms: None,
+            received_bps: None,
+        };
+        apply_rate_report(shared, report);
+    }
+}
+
+/// A viewer arrived over the internet (WebRTC): start the stream at a rate such links
+/// usually take, instead of the LAN maximum, so the first keyframe isn't lost.
+pub fn remote_viewer_joined() {
+    if let Some(shared) = SHARED.get() {
+        let max = shared.rate.lock().unwrap().max();
+        let start = (max / 5).max(2_000_000);
+        let changed = shared
+            .rate
+            .lock()
+            .unwrap()
+            .start_cautiously(start, std::time::Instant::now());
+        if let Some(bps) = changed {
+            info!("bitrate → {:.1} Mbps (remote viewer)", bps as f64 / 1e6);
+            shared.video.set_bitrate(bps);
+            let _ = shared.events.send(ServerMsg::Bitrate { bps });
+        }
+    }
+}
+
 /// Where client logs go; set once the server starts.
 static CLIENT_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// Caps on log lines arriving over the control stream (remote clients).
