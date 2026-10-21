@@ -15,6 +15,37 @@ pub async fn prepare() -> Result<()> {
     Ok(())
 }
 
+pub fn prepare_unattended() -> Vec<crate::setup::Need> {
+    Vec::new()
+}
+
+/// No sudo involved on macOS.
+pub fn try_tailscale_operator() -> bool {
+    false
+}
+
+/// Opens the panes on the Mac's screen, so whoever is there (or controlling it) can click.
+pub fn permission_needs(status: &Status) -> Vec<crate::setup::Need> {
+    let mut needs = Vec::new();
+    if !status.capturing {
+        permissions::open_pane(permissions::SCREEN_RECORDING_PANE);
+        needs.push(crate::setup::Need {
+            step: "screen-recording",
+            action: "Allow \"glass\" in System Settings › Privacy & Security › Screen & System Audio Recording (opened on the Mac)".into(),
+            on_screen: true,
+        });
+    }
+    if !status.accessibility {
+        permissions::open_pane(permissions::ACCESSIBILITY_PANE);
+        needs.push(crate::setup::Need {
+            step: "accessibility",
+            action: "Allow \"glass\" in System Settings › Privacy & Security › Accessibility (opened on the Mac)".into(),
+            on_screen: true,
+        });
+    }
+    needs
+}
+
 pub fn permissions(status: Status) -> Result<()> {
     let status = screen_recording_step(status)?;
     accessibility_step(status)?;

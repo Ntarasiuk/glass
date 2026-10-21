@@ -168,3 +168,116 @@ fn qr(text: &str) -> String {
         Err(_) => String::new(),
     }
 }
+
+// ---- Unattended (`glass setup --yes`) ----
+
+/// A step that still needs a person (or an agent with more access).
+#[derive(Debug, serde::Serialize)]
+pub struct Need {
+    pub step: &'static str,
+    /// What to do, in one sentence a person can follow.
+    pub action: String,
+    /// True if it must happen at the machine itself (a click on its screen).
+    pub on_screen: bool,
+}
+
+#[derive(serde::Serialize)]
+struct Report {
+    ok: bool,
+    version: &'static str,
+    os: String,
+    url: Option<String>,
+    tailnet_name: Option<String>,
+    running: bool,
+    capturing: bool,
+    input: bool,
+    needs: Vec<Need>,
+}
+
+/// Does everything that needs no human, then reports what's left.
+pub async fn run_unattended(json: bool) -> Result<()> {
+    let mut needs = Vec::new();
+
+    let tailnet = match tailscale::probe().await {
+        tailscale::Probe::Ready { name } => match tailscale::ensure_cert(&crate::config_dir().join("certs")).await {
+            Some(_) => Some(name),
+            None if platform::setup::try_tailscale_operator() && tailscale::ensure_cert(&crate::config_dir().join("certs")).await.is_some() => Some(name),
+            None => {
+                needs.push(Need {
+                    step: "tailscale-cert",
+                    action: "Allow this user to fetch Tailscale certificates: sudo tailscale set --operator=$USER".into(),
+                    on_screen: false,
+                });
+                None
+            }
+        },
+        tailscale::Probe::NoHttps { .. } => {
+            needs.push(Need {
+                step: "tailscale-https",
+                action: format!("Enable HTTPS Certificates for the tailnet at {TAILSCALE_DNS_ADMIN}"),
+                on_screen: false,
+            });
+            None
+        }
+        tailscale::Probe::LoggedOut => {
+            needs.push(Need { step: "tailscale-login", action: "Sign in to Tailscale on this machine".into(), on_screen: true });
+            None
+        }
+        tailscale::Probe::Missing => {
+            needs.push(Need { step: "tailscale-install", action: format!("Install Tailscale: {TAILSCALE_DOWNLOAD}"), on_screen: false });
+            None
+        }
+    };
+
+    needs.extend(platform::setup::prepare_unattended());
+    let service = agent::install(true);
+    if let Err(e) = &service {
+        needs.push(Need { step: "service", action: format!("Couldn't install the background service: {e:#}"), on_screen: false });
+    }
+
+    // Give the service a moment to start and report.
+    let started = Instant::now();
+    let mut status = None;
+    while service.is_ok() && started.elapsed() < START_TIMEOUT {
+        status = status::read().filter(|s| s.is_fresh());
+        if status.as_ref().is_some_and(|s| s.capturing) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let running = status.is_some();
+    let s = status.unwrap_or_default();
+    if running {
+        needs.extend(platform::setup::permission_needs(&s));
+    } else if service.is_ok() {
+        needs.push(Need { step: "service", action: format!("Glass didn't start;{}", agent::LOG_HINT), on_screen: false });
+    }
+
+    // Platform checks before and after starting can flag the same step.
+    let mut seen = std::collections::HashSet::new();
+    needs.retain(|n| seen.insert(n.step));
+
+    let report = Report {
+        ok: needs.is_empty(),
+        version: env!("CARGO_PKG_VERSION"),
+        os: platform::os_version(),
+        url: tailnet.as_ref().map(|n| format!("https://{n}:8080/")).or(s.url.clone()),
+        tailnet_name: tailnet,
+        running,
+        capturing: s.capturing,
+        input: s.accessibility,
+        needs,
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Glass {} {}", report.version, if report.ok { "is ready" } else { "is installed; still needed:" });
+        for n in &report.needs {
+            println!("  - [{}{}] {}", n.step, if n.on_screen { ", on this machine's screen" } else { "" }, n.action);
+        }
+        if let Some(url) = &report.url {
+            println!("Open: {url}");
+        }
+    }
+    Ok(())
+}

@@ -7,6 +7,9 @@ import { marked } from 'marked';
 const SITE = 'https://glassdesk.dev';
 const docs = readFileSync('docs.md', 'utf8');
 
+// The agent skill, so `curl … /skill.md` installs it.
+copyFileSync('../skills/glass/SKILL.md', 'public/skill.md');
+
 // Full docs for LLMs and anyone who wants raw markdown.
 writeFileSync('public/llms-full.txt', docs);
 writeFileSync('public/docs.md', docs);
@@ -26,6 +29,7 @@ Install on the computer to be controlled: \`curl -fsSL glassdesk.dev | sh\` (mac
 - [Full documentation](${SITE}/llms-full.txt): everything in one file: install, setup, features, keyboard behaviour on iPad, CLI reference, architecture, security, troubleshooting, FAQ
 - [Documentation (HTML)](${SITE}/docs): the same, as a web page
 - [Install script](${SITE}/install.sh): what \`curl -fsSL glassdesk.dev | sh\` runs
+- [Agent skill](${SITE}/skill.md): how an AI agent sets Glass up on any machine in the user's Tailscale tailnet over SSH (\`glass setup --yes --json\`)
 - [Source code](https://github.com/Ntarasiuk/glass): Rust host, browser client, and this website (MIT)
 
 ## Optional
@@ -88,4 +92,4 @@ for (const f of latest) {
   writeFileSync(`public/releases/${f}.sha256`, `${sum}  ${f}\n`);
 }
 
-console.log('built: llms.txt, llms-full.txt, docs.md, docs/index.html, releases/');
+console.log('built: skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, releases/');

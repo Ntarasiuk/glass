@@ -30,6 +30,9 @@ const MACHINE_KEY = 'glass.machine';
 // Give up on a remembered machine after this many failed connects and return to the
 // machine that served this page.
 const MACHINE_MAX_FAILURES = 3;
+// ...or after this long without connecting: an unreachable host may never refuse, so
+// attempts just time out slowly.
+const MACHINE_CONNECT_TIMEOUT_MS = 12_000;
 // Default to PC keyboard conventions on Linux, Windows and ChromeOS clients.
 const isPC = /Linux|Windows|CrOS/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
 const pcKeyboard = (storage((s) => s.getItem(PC_KEYBOARD_KEY)) ?? (isPC ? '1' : '0')) === '1';
@@ -152,6 +155,18 @@ log('info', 'display mode', { standalone: !!standalone });
 const homeHost = config.wtHost ?? location.hostname;
 let currentHost = storage((s) => s.getItem(MACHINE_KEY)) ?? homeHost;
 let machineFailures = 0;
+let machineTimer;
+
+function giveUpOnMachine() {
+  ui.toast({ text: `Couldn't reach ${currentHost}; back to this machine`, kind: 'error' });
+  switchMachine(homeHost);
+}
+
+/** Falls back to the home machine if `currentHost` doesn't connect in time. */
+function armMachineTimeout() {
+  clearTimeout(machineTimer);
+  if (currentHost !== homeHost) machineTimer = setTimeout(giveUpOnMachine, MACHINE_CONNECT_TIMEOUT_MS);
+}
 // A machine is "host" (default port) or "host:port".
 const wtUrl = (machine) => `https://${machine.includes(':') ? machine : `${machine}:${config.wtPort}`}/`;
 const machineId = (m) => (m.wt_port && m.wt_port !== config.wtPort ? `${m.dns}:${m.wt_port}` : m.dns);
@@ -163,6 +178,7 @@ worker.postMessage({
   token,
   decoderStep: Number(storage((s) => s.getItem(DECODER_STEP_KEY)) ?? 0),
 });
+armMachineTimeout();
 
 // Canvases are created on demand (one per host stream) and handed to the worker once;
 // extras are hidden rather than destroyed so they can be reused.
@@ -198,10 +214,7 @@ worker.onmessage = ({ data }) => {
       break;
     case 'status':
       if (data.level === 'error' && /connection failed/.test(data.text) && currentHost !== homeHost) {
-        if (++machineFailures >= MACHINE_MAX_FAILURES) {
-          ui.toast({ text: `Couldn't reach ${currentHost}; back to this machine`, kind: 'error' });
-          switchMachine(homeHost);
-        }
+        if (++machineFailures >= MACHINE_MAX_FAILURES) giveUpOnMachine();
       }
       status = data.text;
       hud.textContent = status;
@@ -257,6 +270,7 @@ function onControl(msg) {
   switch (msg.t) {
     case 'welcome':
       machineFailures = 0;
+      clearTimeout(machineTimer);
       displays = msg.displays;
       // Nothing being streamed (e.g. capture failed): fall back to the first display.
       if (!msg.streams.length && displays.length) control({ t: 'selectDisplay', id: displays[0].id });
@@ -300,6 +314,7 @@ function switchMachine(host, name = host) {
   machineFailures = 0;
   storage((s) => (host === homeHost ? s.removeItem(MACHINE_KEY) : s.setItem(MACHINE_KEY, host)));
   displays = [];
+  armMachineTimeout();
   worker.postMessage({ type: 'switchHost', url: wtUrl(host) });
   log('info', 'switch machine', { host });
   ui.toast({ text: `Connecting to ${name}…`, timeout: 2500 });

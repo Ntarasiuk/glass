@@ -62,6 +62,9 @@ test('docs exist in every format and agree', async () => {
   assert.match(llms, /^# Glass\n\n> /);
   assert.match(llms, /llms-full\.txt/);
   assert.equal((await get('/docs/')).status, 200);
+  const skill = await (await get('/skill.md')).text();
+  assert.match(skill, /^---\nname: glass\ndescription: /);
+  assert.match(skill, /glass setup --yes --json/);
   const robots = await (await get('/robots.txt')).text();
   for (const bot of ['GPTBot', 'ClaudeBot', 'PerplexityBot']) assert.match(robots, new RegExp(bot));
 });

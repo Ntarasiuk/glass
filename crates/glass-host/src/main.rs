@@ -84,9 +84,20 @@ struct Args {
 #[derive(clap::Subcommand)]
 enum Command {
     /// Guided setup: Tailscale, background service, permissions, then how to connect.
-    Setup,
+    Setup {
+        /// Non-interactive (for scripts and AI agents): do every step that needs no
+        /// human, then report what's left. Uses sudo only if it needs no password.
+        #[arg(long)]
+        yes: bool,
+        /// With --yes: print the report as JSON.
+        #[arg(long, requires = "yes")]
+        json: bool,
+    },
     /// Show whether the background service is running and what it can do.
-    Status,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
     /// Send feedback to the Glass developers.
     Feedback { message: Vec<String> },
     /// Stop the background service and remove it from login items.
@@ -100,8 +111,14 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     match &args.command {
         None => run_host(args).await,
-        Some(Command::Setup) => setup::run().await,
-        Some(Command::Status) => print_status(),
+        Some(Command::Setup { yes: false, .. }) => setup::run().await,
+        Some(Command::Setup { yes: true, json }) => setup::run_unattended(*json).await,
+        Some(Command::Status { json: false }) => print_status(),
+        Some(Command::Status { json: true }) => {
+            let status = status::read().filter(|s| s.is_fresh());
+            println!("{}", serde_json::json!({ "running": status.is_some(), "status": status }));
+            Ok(())
+        }
         Some(Command::Feedback { message }) => send_feedback(&message.join(" ")),
         Some(Command::Uninstall) => {
             agent::uninstall()?;

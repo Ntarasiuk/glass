@@ -23,17 +23,7 @@ pub async fn prepare() -> Result<()> {
 fn dependencies_step() -> Result<()> {
     log::step("Desktop integration")?;
     loop {
-        let portal = std::path::Path::new("/usr/share/xdg-desktop-portal/portals").read_dir().is_ok_and(|mut d| {
-            d.any(|e| e.is_ok_and(|e| std::fs::read_to_string(e.path()).is_ok_and(|s| s.contains("ScreenCast"))))
-        });
-        let missing: Vec<&str> = [
-            (!has_command("pipewire")).then_some("pipewire"),
-            (!portal).then_some("xdg-desktop-portal-hyprland"),
-            (!has_command("wl-copy")).then_some("wl-clipboard"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let missing = missing_dependencies();
         if missing.is_empty() {
             log::success("PipeWire, screen-sharing portal and wl-clipboard found")?;
             return Ok(());
@@ -79,6 +69,76 @@ fn input_access_step() -> Result<()> {
         log::warning("Still no access to /dev/uinput. Log out and back in, then run `glass setup` again.")?;
     }
     Ok(())
+}
+
+fn sudo_n(script: &str) -> bool {
+    Command::new("sudo").args(["-n", "sh", "-c", script]).status().is_ok_and(|s| s.success())
+}
+
+fn missing_dependencies() -> Vec<&'static str> {
+    let portal = std::path::Path::new("/usr/share/xdg-desktop-portal/portals").read_dir().is_ok_and(|mut d| {
+        d.any(|e| e.is_ok_and(|e| std::fs::read_to_string(e.path()).is_ok_and(|s| s.contains("ScreenCast"))))
+    });
+    [
+        (!has_command("pipewire")).then_some("pipewire"),
+        (!portal).then_some("xdg-desktop-portal-hyprland"),
+        (!has_command("wl-copy")).then_some("wl-clipboard"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Installs what it can with passwordless sudo; reports the rest.
+pub fn prepare_unattended() -> Vec<crate::setup::Need> {
+    let mut needs = Vec::new();
+    let missing = missing_dependencies();
+    if !missing.is_empty() && !sudo_n(&format!("pacman -S --needed --noconfirm {}", missing.join(" "))) {
+        needs.push(crate::setup::Need {
+            step: "dependencies",
+            action: format!("Install: sudo pacman -S --needed {}", missing.join(" ")),
+            on_screen: false,
+        });
+    }
+    if !input::has_accessibility() {
+        let script = format!(
+            "echo 'KERNEL==\"uinput\", TAG+=\"uaccess\", OPTIONS+=\"static_node=uinput\"' > {UDEV_RULE} && \
+             echo uinput > {MODULES_LOAD} && modprobe uinput && \
+             udevadm control --reload-rules && udevadm trigger --name-match=uinput"
+        );
+        if !(sudo_n(&script) && input::has_accessibility()) {
+            needs.push(crate::setup::Need {
+                step: "input-access",
+                action: "Grant /dev/uinput access: run `glass setup` on the machine (asks for sudo once)".into(),
+                on_screen: false,
+            });
+        }
+    }
+    needs
+}
+
+pub fn try_tailscale_operator() -> bool {
+    let user = std::env::var("USER").unwrap_or_default();
+    !user.is_empty() && sudo_n(&format!("tailscale set --operator={user}"))
+}
+
+pub fn permission_needs(status: &Status) -> Vec<crate::setup::Need> {
+    let mut needs = Vec::new();
+    if !status.capturing {
+        needs.push(crate::setup::Need {
+            step: "screen-share",
+            action: "Approve screen sharing in the desktop's share picker (shown on the machine's screen)".into(),
+            on_screen: true,
+        });
+    }
+    if !status.accessibility {
+        needs.push(crate::setup::Need {
+            step: "input-access",
+            action: "Log out and back in so the uinput rule applies, or run `glass setup` there".into(),
+            on_screen: false,
+        });
+    }
+    needs
 }
 
 pub fn permissions(status: Status) -> Result<()> {

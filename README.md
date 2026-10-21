@@ -8,6 +8,8 @@ curl -fsSL glassdesk.dev | sh
 
 Run that on the computer you want to control. It installs Glass and starts `glass setup`, which walks you through Tailscale, the background service and macOS permissions, then shows a QR code to open on your iPad. Full docs: [glassdesk.dev/docs](https://glassdesk.dev/docs) (also as [markdown](site/docs.md)).
 
+Or let an AI agent do it on any machine in your tailnet: install the [Glass skill](skills/glass/SKILL.md) (`mkdir -p ~/.claude/skills/glass && curl -fsSL https://glassdesk.dev/skill.md -o ~/.claude/skills/glass/SKILL.md`) and ask Claude Code to "set up Glass on my Mac mini".
+
 ## Features
 
 - **Low latency.** Hardware H.264, WebTransport datagrams, WebCodecs decode in a worker, no jitter buffer.

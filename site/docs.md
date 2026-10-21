@@ -54,6 +54,23 @@ The setup guide walks through four steps and checks each one live:
 
 It finishes by showing the connect URL and a QR code to scan with the iPad.
 
+## Set up with an AI agent
+
+Glass ships an agent skill: https://glassdesk.dev/skill.md. With it, an agent like Claude Code can set Glass up on any Mac or Linux machine in your Tailscale tailnet over SSH. It finds the machine, installs Glass, runs the unattended setup, tells you exactly which permission switches to click on that machine's screen, waits until everything works, and verifies the connection.
+
+Install it for Claude Code:
+
+```sh
+mkdir -p ~/.claude/skills/glass && curl -fsSL https://glassdesk.dev/skill.md -o ~/.claude/skills/glass/SKILL.md
+```
+
+Then ask, for example: "set up Glass on my Mac mini". The target needs SSH: Tailscale SSH (`sudo tailscale set --ssh`) or Remote Login on macOS.
+
+The skill drives two commands you can also use in your own scripts:
+
+- `glass setup --yes --json`: does every setup step that needs no human (using `sudo` only if it needs no password), opens the macOS permission panes on the machine's screen, and prints a report: `ok`, `url`, `running`, `capturing`, `input`, and `needs`, the steps left, each with an `action` and whether it must happen `on_screen`.
+- `glass status --json`: whether the service is running, capturing, and allowed to inject input.
+
 ## Connecting
 
 1. Install Tailscale on the iPad (or other device) and sign in with the same account as the Mac.
@@ -99,7 +116,8 @@ Everything else, including ⌘C, ⌘V, ⌘Q, ⌘W, and arrows, works directly fr
 ```
 glass               Run the host in the foreground (the background service runs this)
 glass setup         Guided setup: Tailscale, background service, permissions, connect
-glass status        Is the service running? Capturing? Permissions? Connect URL
+glass setup --yes [--json]   Unattended setup for scripts and agents; reports what's left
+glass status [--json]        Is the service running? Capturing? Permissions? Connect URL
 glass feedback "…"  Send feedback to the developers
 glass uninstall     Stop the background service and remove it from login items
 glass --version

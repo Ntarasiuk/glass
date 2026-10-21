@@ -49,7 +49,17 @@ pub fn host_os() -> &'static str {
 
 /// Server hook: true if this frame should be dropped (its id still advances).
 pub fn take_drop() -> bool {
-    enabled() && DROP_FRAMES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)).is_ok()
+    if !enabled() {
+        return false;
+    }
+    let mut n = DROP_FRAMES.load(Ordering::Relaxed);
+    while n > 0 {
+        match DROP_FRAMES.compare_exchange_weak(n, n - 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(current) => n = current,
+        }
+    }
+    false
 }
 
 /// Server hook: true if this frame should be corrupted in flight.

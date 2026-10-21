@@ -175,7 +175,11 @@ test.describe('input', () => {
   });
 
   it('Ctrl as ⌘ turns Ctrl+Tab into ⌘Tab and keeps other Ctrl combos', async ({ page, host }) => {
-    await open(page, host);
+    // Mac keyboard conventions (Linux/Windows browsers default to PC keyboard mode).
+    await page.goto(host.url());
+    await page.evaluate(() => localStorage.setItem('glass.pcKeyboard', '0'));
+    await page.reload();
+    await expectVideo(page);
     await host.clearInput();
     await page.keyboard.down('Control');
     await page.keyboard.press('Tab');
@@ -338,7 +342,7 @@ test.describe('machines', () => {
       await expect.poll(async () => (await other.input('keydown')).events.length).toBe(1);
       expect((await host.input('keydown')).events).toHaveLength(0);
 
-      // A machine that never answers: back home after a few tries.
+      // A machine that never answers: back home after a few tries or a timeout.
       await page.evaluate(() => localStorage.setItem('glass.machine', 'localhost:1'));
       await page.reload();
       await expect(page.locator('.toast', { hasText: 'back to this machine' })).toBeVisible({ timeout: 30_000 });

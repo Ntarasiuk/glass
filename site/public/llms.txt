@@ -9,6 +9,7 @@ Install on the computer to be controlled: `curl -fsSL glassdesk.dev | sh` (macOS
 - [Full documentation](https://glassdesk.dev/llms-full.txt): everything in one file: install, setup, features, keyboard behaviour on iPad, CLI reference, architecture, security, troubleshooting, FAQ
 - [Documentation (HTML)](https://glassdesk.dev/docs): the same, as a web page
 - [Install script](https://glassdesk.dev/install.sh): what `curl -fsSL glassdesk.dev | sh` runs
+- [Agent skill](https://glassdesk.dev/skill.md): how an AI agent sets Glass up on any machine in the user's Tailscale tailnet over SSH (`glass setup --yes --json`)
 - [Source code](https://github.com/Ntarasiuk/glass): Rust host, browser client, and this website (MIT)
 
 ## Optional
