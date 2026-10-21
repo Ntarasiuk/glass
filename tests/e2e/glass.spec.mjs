@@ -179,6 +179,53 @@ test.describe('connecting', () => {
   });
 });
 
+test.describe('magic links', () => {
+  it('a link from the host lets one device in, once, until revoked', async ({ page, browser, host }) => {
+    await open(page, host);
+    await page.waitForTimeout(1500); // the host has written its status, which `glass link` reads
+    const env = { ...process.env, GLASS_CONFIG_DIR: host.configDir };
+    const made = JSON.parse(execFileSync(BINARY, ['link', '--json', '--for', '1h'], { env }).toString());
+    expect(made.summary).toBe('Works once, within 15 minutes. Gives that device 1 hour of access.');
+    const code = made.url.match(/#l=([0-9a-f]{32})$/)[1];
+    const link = `${host.base}/#l=${code}`;
+
+    // The guest: a separate browser with no token.
+    const guestContext = await browser.newContext();
+    const guest = await guestContext.newPage();
+    await guest.goto(link);
+    await expectVideo(guest);
+    await expect(guest.locator('.toast', { hasText: "You're in" })).toBeVisible();
+    expect(guest.url()).not.toContain('#l=');
+    await expect(guest.locator('#btn-machines')).toBeHidden();
+
+    // The pass survives a reload; the link itself is spent.
+    await guest.reload();
+    await expectVideo(guest);
+    const other = await (await browser.newContext()).newPage();
+    await other.goto(link);
+    await expect(other.locator('.toast', { hasText: 'expired or was already used' })).toBeVisible();
+    await expect(other.locator('#auth')).toBeVisible();
+
+    // Revoking cuts the guest off; on reconnect it's asked for a token.
+    expect(JSON.parse(execFileSync(BINARY, ['link', '--revoke', '--json'], { env }).toString())).toEqual({ revoked: 1 });
+    await expect(guest.locator('#auth')).toBeVisible({ timeout: 20_000 });
+    // The owner is unaffected.
+    await expect.poll(async () => (await stats(page)).fps).toBeGreaterThan(0);
+    await guestContext.close();
+  });
+
+  it('glass link prints a working link for the running host', async ({ browser, host }) => {
+    const page = await (await browser.newContext()).newPage();
+    await page.goto(`${host.base}/config.json`); // host is up and has written its status
+    await page.waitForTimeout(1500);
+    const out = execFileSync(BINARY, ['link', '--for', '2h'], { env: { ...process.env, GLASS_CONFIG_DIR: host.configDir } }).toString();
+    expect(out).toContain('Gives that device 2 hours of access');
+    const code = out.match(/#l=([0-9a-f]{32})/)[1];
+    await page.goto(`${host.base}/#l=${code}`);
+    await expectVideo(page);
+  });
+});
+
 test.describe('displays', () => {
   it('lists displays and switches between one and all', async ({ page, host }) => {
     await open(page, host);
@@ -532,19 +579,27 @@ test.describe('updates', () => {
     await expect(page.locator('.toast', { hasText: 'Update available' })).toHaveCount(0);
   });
 
-  it('reloads into new client code after an update', async ({ page, host }) => {
-    await open(page, host);
-    const { version } = await host.get('/config.json');
-    // Simulate an update by bumping a web file's modification time.
-    const { utimesSync } = await import('node:fs');
-    const file = new URL('../../web/icon.svg', import.meta.url);
-    const now = new Date();
-    utimesSync(file, now, now);
-    expect((await host.get('/config.json')).version).not.toBe(version);
-    const reloaded = page.waitForEvent('load', { timeout: 20_000 });
-    await host.stop();
-    await host.start();
-    await reloaded;
-    await expectVideo(page);
+  test('reloads into new client code after an update', async ({ page }) => {
+    // Its own copy of the web files: touching the shared ones would reload every other test's page.
+    const { cpSync, mkdtempSync, utimesSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const webDir = mkdtempSync(`${tmpdir()}/glass-web-`);
+    cpSync(new URL('../../web', import.meta.url), webDir, { recursive: true });
+    const host = await new Host({ webDir }).start();
+    try {
+      await open(page, host);
+      const { version } = await host.get('/config.json');
+      // Simulate an update by bumping a web file's modification time.
+      const now = new Date(Date.now() + 5000);
+      utimesSync(`${webDir}/icon.svg`, now, now);
+      expect((await host.get('/config.json')).version).not.toBe(version);
+      const reloaded = page.waitForEvent('load', { timeout: 20_000 });
+      await host.stop();
+      await host.start();
+      await reloaded;
+      await expectVideo(page);
+    } finally {
+      await host.stop();
+    }
   });
 });

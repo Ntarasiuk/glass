@@ -28,29 +28,38 @@ fn token_path() -> std::path::PathBuf {
 /// Blocks until the user approves (or cancels) the share dialog.
 pub fn start() -> Result<Cast> {
     let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new().name("glass-portal".into()).spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(r) => r,
-            Err(e) => return drop(tx.send(Err(anyhow::Error::from(e)))),
-        };
-        runtime.block_on(async move {
-            let proxy = match Screencast::new().await {
-                Ok(p) => p,
-                Err(e) => return drop(tx.send(Err(anyhow::Error::from(e).context("screen-cast portal unavailable")))),
+    std::thread::Builder::new()
+        .name("glass-portal".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(r) => r,
+                Err(e) => return drop(tx.send(Err(anyhow::Error::from(e)))),
             };
-            match open(&proxy).await {
-                Ok((cast, session)) => {
-                    let _ = tx.send(Ok(cast));
-                    // Dropping the session would end the cast; hold it forever.
-                    let _session = session;
-                    std::future::pending::<()>().await;
+            runtime.block_on(async move {
+                let proxy = match Screencast::new().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return drop(tx.send(Err(
+                            anyhow::Error::from(e).context("screen-cast portal unavailable"),
+                        )));
+                    }
+                };
+                match open(&proxy).await {
+                    Ok((cast, session)) => {
+                        let _ = tx.send(Ok(cast));
+                        // Dropping the session would end the cast; hold it forever.
+                        let _session = session;
+                        std::future::pending::<()>().await;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                    }
                 }
-                Err(e) => {
-                    let _ = tx.send(Err(e));
-                }
-            }
-        });
-    })?;
+            });
+        })?;
     rx.recv().context("portal thread exited")?
 }
 
@@ -80,9 +89,15 @@ async fn open(proxy: &Screencast) -> Result<(Cast, ashpd::desktop::Session<Scree
     let streams = response
         .streams()
         .iter()
-        .map(|s| PortalStream { node_id: s.pipe_wire_node_id(), position: s.position(), size: s.size() })
+        .map(|s| PortalStream {
+            node_id: s.pipe_wire_node_id(),
+            position: s.position(),
+            size: s.size(),
+        })
         .collect::<Vec<_>>();
     anyhow::ensure!(!streams.is_empty(), "no screens were shared");
-    let fd = proxy.open_pipe_wire_remote(&session, Default::default()).await?;
+    let fd = proxy
+        .open_pipe_wire_remote(&session, Default::default())
+        .await?;
     Ok((Cast { fd, streams }, session))
 }

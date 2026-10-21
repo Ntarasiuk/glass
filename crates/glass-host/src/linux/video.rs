@@ -14,10 +14,10 @@ use pw::spa::pod::Pod;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
-use crate::soft_encode::{Encoder, Frame, PixelFormat};
 use super::{audio, clock::now_us, permissions, portal};
-pub use crate::media::{AudioPackets, DisplayInfo, EncodedFrame, Layout};
 use crate::media::VideoSource;
+pub use crate::media::{AudioPackets, DisplayInfo, EncodedFrame, Layout};
+use crate::soft_encode::{Encoder, Frame, PixelFormat};
 
 /// How long an encoder waits for a new frame before checking for a keyframe request it
 /// can satisfy by re-encoding the last one (static screens produce no new frames).
@@ -57,20 +57,43 @@ pub fn rect_of(id: u32) -> Option<Rect> {
 /// Bounding box of every monitor (what an absolute pointer device spans).
 pub fn layout_rect() -> Rect {
     let monitors = hyprland_monitors();
-    let rects = if monitors.is_empty() { RECTS.lock().unwrap().clone() } else { monitors };
+    let rects = if monitors.is_empty() {
+        RECTS.lock().unwrap().clone()
+    } else {
+        monitors
+    };
     let x0 = rects.iter().map(|r| r.x).fold(f64::INFINITY, f64::min);
     let y0 = rects.iter().map(|r| r.y).fold(f64::INFINITY, f64::min);
-    let x1 = rects.iter().map(|r| r.x + r.w).fold(f64::NEG_INFINITY, f64::max);
-    let y1 = rects.iter().map(|r| r.y + r.h).fold(f64::NEG_INFINITY, f64::max);
+    let x1 = rects
+        .iter()
+        .map(|r| r.x + r.w)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let y1 = rects
+        .iter()
+        .map(|r| r.y + r.h)
+        .fold(f64::NEG_INFINITY, f64::max);
     if rects.is_empty() {
-        return Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+        return Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        };
     }
-    Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    }
 }
 
 /// Logical monitor rects from `hyprctl monitors -j`, if running under Hyprland.
 fn hyprland_monitors() -> Vec<Rect> {
-    let Ok(out) = std::process::Command::new("hyprctl").args(["monitors", "-j"]).output() else {
+    let Ok(out) = std::process::Command::new("hyprctl")
+        .args(["monitors", "-j"])
+        .output()
+    else {
         return Vec::new();
     };
     let Ok(list) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else {
@@ -83,7 +106,12 @@ fn hyprland_monitors() -> Vec<Rect> {
             if m["transform"].as_i64().unwrap_or(0) % 2 == 1 {
                 std::mem::swap(&mut w, &mut h);
             }
-            Some(Rect { x: m["x"].as_f64()?, y: m["y"].as_f64()?, w, h })
+            Some(Rect {
+                x: m["x"].as_f64()?,
+                y: m["y"].as_f64()?,
+                w,
+                h,
+            })
         })
         .collect()
 }
@@ -96,15 +124,32 @@ pub struct Video {
 }
 
 impl Video {
-    pub fn new(config: VideoConfig, frames: broadcast::Sender<Arc<EncodedFrame>>, audio: AudioPackets) -> Self {
+    pub fn new(
+        config: VideoConfig,
+        frames: broadcast::Sender<Arc<EncodedFrame>>,
+        audio: AudioPackets,
+    ) -> Self {
         audio::start(audio);
-        Self { config, frames, monitors: Mutex::new(None), shown: Mutex::new(Vec::new()) }
+        Self {
+            config,
+            frames,
+            monitors: Mutex::new(None),
+            shown: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn streams(&self) -> Vec<DisplayInfo> {
         let monitors = self.monitors.lock().unwrap();
-        let Some(monitors) = monitors.as_ref() else { return Vec::new() };
-        self.shown.lock().unwrap().iter().filter_map(|&id| monitors.get(id as usize)).map(|m| m.info.lock().unwrap().clone()).collect()
+        let Some(monitors) = monitors.as_ref() else {
+            return Vec::new();
+        };
+        self.shown
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|&id| monitors.get(id as usize))
+            .map(|m| m.info.lock().unwrap().clone())
+            .collect()
     }
 
     pub fn request_keyframe(&self, stream: Option<u8>) {
@@ -147,15 +192,26 @@ impl Video {
             m.slot.store(-1, Ordering::Relaxed);
         }
         for (slot, &id) in ids.iter().enumerate() {
-            monitors[id as usize].slot.store(slot as i32, Ordering::Relaxed);
-            monitors[id as usize].keyframe.store(true, Ordering::Relaxed);
+            monitors[id as usize]
+                .slot
+                .store(slot as i32, Ordering::Relaxed);
+            monitors[id as usize]
+                .keyframe
+                .store(true, Ordering::Relaxed);
         }
         *self.shown.lock().unwrap() = ids.clone();
-        Ok(ids.iter().map(|&id| monitors[id as usize].info.lock().unwrap().clone()).collect())
+        Ok(ids
+            .iter()
+            .map(|&id| monitors[id as usize].info.lock().unwrap().clone())
+            .collect())
     }
 
     pub fn displays(&self) -> Result<Vec<DisplayInfo>> {
-        Ok(self.ensure_started()?.iter().map(|m| m.info.lock().unwrap().clone()).collect())
+        Ok(self
+            .ensure_started()?
+            .iter()
+            .map(|m| m.info.lock().unwrap().clone())
+            .collect())
     }
 
     fn ensure_started(&self) -> Result<Vec<Arc<Monitor>>> {
@@ -172,12 +228,19 @@ impl Video {
         let mut monitors = Vec::new();
         let mut captures = Vec::new();
         for (i, s) in cast.streams.iter().enumerate() {
-            let (w, h) = s.size.map(|(w, h)| (w as f64, h as f64)).unwrap_or((1920.0, 1080.0));
+            let (w, h) = s
+                .size
+                .map(|(w, h)| (w as f64, h as f64))
+                .unwrap_or((1920.0, 1080.0));
             // Prefer the portal's position; otherwise match a Hyprland monitor by size.
             let (x, y) = s
                 .position
                 .map(|(x, y)| (x as f64, y as f64))
-                .or_else(|| hypr.iter().find(|r| (r.w - w).abs() < 1.0 && (r.h - h).abs() < 1.0).map(|r| (r.x, r.y)))
+                .or_else(|| {
+                    hypr.iter()
+                        .find(|r| (r.w - w).abs() < 1.0 && (r.h - h).abs() < 1.0)
+                        .map(|r| (r.x, r.y))
+                })
                 .unwrap_or((0.0, 0.0));
             rects.push(Rect { x, y, w, h });
             let monitor = Arc::new(Monitor {
@@ -199,7 +262,11 @@ impl Video {
             // One-slot queue: if encoding falls behind, newer frames replace nothing and
             // are simply dropped until the encoder is free.
             let (tx, rx) = sync_channel::<(Frame, u64)>(1);
-            let (fps, bitrate, scale) = (self.config.fps as u32, self.config.bitrate as u32, self.config.scale);
+            let (fps, bitrate, scale) = (
+                self.config.fps as u32,
+                self.config.bitrate as u32,
+                self.config.scale,
+            );
             let (frames, m) = (self.frames.clone(), monitor.clone());
             std::thread::Builder::new()
                 .name(format!("glass-encode-{i}"))
@@ -254,13 +321,21 @@ fn encode_loop(
         if !has_fresh && !wants_key {
             continue;
         }
-        let Some((frame, captured_us)) = last.as_ref() else { continue };
+        let Some((frame, captured_us)) = last.as_ref() else {
+            continue;
+        };
         monitor.keyframe.store(false, Ordering::Relaxed);
 
         let size = (frame.width, frame.height);
         let mut force = wants_key;
         if encoder.as_ref().is_none_or(|e| e.source_size() != size) {
-            match Encoder::new(frame.width, frame.height, fps, monitor.bitrate.load(Ordering::Relaxed), scale) {
+            match Encoder::new(
+                frame.width,
+                frame.height,
+                fps,
+                monitor.bitrate.load(Ordering::Relaxed),
+                scale,
+            ) {
                 Ok(e) => encoder = Some(e),
                 Err(e) => {
                     warn!("encoder: {e:#}");
@@ -279,7 +354,12 @@ fn encode_loop(
         let capture_us = if has_fresh { *captured_us } else { now_us() };
         match encoder.as_mut().unwrap().encode(frame, force) {
             Ok(Some((data, keyframe))) => {
-                let _ = frames.send(Arc::new(EncodedFrame { stream: slot as u8, data, keyframe, capture_us }));
+                let _ = frames.send(Arc::new(EncodedFrame {
+                    stream: slot as u8,
+                    data,
+                    keyframe,
+                    capture_us,
+                }));
             }
             Ok(None) => {}
             Err(e) => warn!("encode: {e:#}"),
@@ -295,7 +375,10 @@ struct StreamState {
     id: usize,
 }
 
-fn run_pipewire(fd: std::os::fd::OwnedFd, captures: Vec<(u32, Arc<Monitor>, SyncSender<(Frame, u64)>)>) -> Result<()> {
+fn run_pipewire(
+    fd: std::os::fd::OwnedFd,
+    captures: Vec<(u32, Arc<Monitor>, SyncSender<(Frame, u64)>)>,
+) -> Result<()> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
@@ -312,7 +395,13 @@ fn run_pipewire(fd: std::os::fd::OwnedFd, captures: Vec<(u32, Arc<Monitor>, Sync
                 *pw::keys::MEDIA_ROLE => "Screen",
             },
         )?;
-        let state = StreamState { format: Default::default(), pixel: None, tx, first: true, id: i };
+        let state = StreamState {
+            format: Default::default(),
+            pixel: None,
+            tx,
+            first: true,
+            id: i,
+        };
         let listener = stream
             .add_local_listener_with_user_data(state)
             .param_changed(|_, st, id, param| {
@@ -333,15 +422,25 @@ fn run_pipewire(fd: std::os::fd::OwnedFd, captures: Vec<(u32, Arc<Monitor>, Sync
                     }
                 };
                 let size = st.format.size();
-                info!("screen {}: {}x{} {:?}", st.id, size.width, size.height, st.format.format());
+                info!(
+                    "screen {}: {}x{} {:?}",
+                    st.id,
+                    size.width,
+                    size.height,
+                    st.format.format()
+                );
             })
             .process(|stream, st| {
-                let Some(mut buffer) = stream.dequeue_buffer() else { return };
+                let Some(mut buffer) = stream.dequeue_buffer() else {
+                    return;
+                };
                 let Some(pixel) = st.pixel else { return };
                 let size = st.format.size();
                 let (width, height) = (size.width as usize, size.height as usize);
                 let datas = buffer.datas_mut();
-                let Some(data) = datas.first_mut() else { return };
+                let Some(data) = datas.first_mut() else {
+                    return;
+                };
                 let chunk = data.chunk();
                 let (offset, stride) = (chunk.offset() as usize, chunk.stride().max(0) as usize);
                 let stride = if stride == 0 { width * 4 } else { stride };
@@ -354,7 +453,13 @@ fn run_pipewire(fd: std::os::fd::OwnedFd, captures: Vec<(u32, Arc<Monitor>, Sync
                     st.first = false;
                     info!("screen {}: first frame", st.id);
                 }
-                let frame = Frame { width, height, stride, format: pixel, data: bytes[offset..needed].to_vec() };
+                let frame = Frame {
+                    width,
+                    height,
+                    stride,
+                    format: pixel,
+                    data: bytes[offset..needed].to_vec(),
+                };
                 // Encoder busy: drop this frame rather than queue latency.
                 let _ = st.tx.try_send((frame, now_us()));
             })
@@ -400,9 +505,18 @@ fn format_params() -> Vec<u8> {
             Choice,
             Range,
             Rectangle,
-            spa::utils::Rectangle { width: 1920, height: 1080 },
-            spa::utils::Rectangle { width: 1, height: 1 },
-            spa::utils::Rectangle { width: 8192, height: 8192 }
+            spa::utils::Rectangle {
+                width: 1920,
+                height: 1080
+            },
+            spa::utils::Rectangle {
+                width: 1,
+                height: 1
+            },
+            spa::utils::Rectangle {
+                width: 8192,
+                height: 8192
+            }
         ),
         spa::pod::property!(
             FormatProperties::VideoFramerate,
@@ -414,10 +528,13 @@ fn format_params() -> Vec<u8> {
             spa::utils::Fraction { num: 240, denom: 1 }
         ),
     );
-    spa::pod::serialize::PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &spa::pod::Value::Object(obj))
-        .expect("serialize format pod")
-        .0
-        .into_inner()
+    spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(obj),
+    )
+    .expect("serialize format pod")
+    .0
+    .into_inner()
 }
 
 impl VideoSource for Video {

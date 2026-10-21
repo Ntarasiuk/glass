@@ -27,6 +27,8 @@ const textDecoder = new TextDecoder();
 let url;
 let certHash;
 let token;
+let link; // magic link code; traded for a guest pass on first sign-in
+let pass; // guest pass
 let rejected = false;
 let controlWriter;
 let audioPort; // MessagePort of the main thread's AudioWorkletNode
@@ -66,7 +68,7 @@ function videoStream(index) {
 
 self.onmessage = async ({ data }) => {
   if (data.type === 'init') {
-    ({ url, certHash, token } = data);
+    ({ url, certHash, token, link, pass } = data);
     setDecoderStep(data.decoderStep ?? 0);
     await probeDecoders(log);
     setInterval(() => datagramWriter?.write(ping(performance.now())).catch(() => {}), PING_INTERVAL_MS);
@@ -173,7 +175,7 @@ async function connect() {
   // Control stream first: the host ignores everything else until hello is accepted.
   const control = await transport.createBidirectionalStream();
   controlWriter = control.writable.getWriter();
-  sendControl({ t: 'hello', token });
+  sendControl({ t: 'hello', token, link, pass });
   if (audioOn) sendControl({ t: 'audio', on: true });
   if (!visible) sendControl({ t: 'video', on: false });
   readControl(control.readable).catch((e) => log('warn', `control read ended: ${e.message ?? e}`));
@@ -272,8 +274,15 @@ async function readControl(readable) {
     const body = await r.read(new DataView(len.buffer).getUint32(0, true));
     if (!body) return;
     const msg = JSON.parse(textDecoder.decode(body));
+    if (msg.t === 'pass') {
+      // The link is used up; reconnects sign in with the pass.
+      pass = msg.pass;
+      link = undefined;
+    }
     if (msg.t === 'error' && msg.msg === 'unauthorized') {
       rejected = true;
+      link = undefined;
+      pass = undefined;
       self.postMessage({ type: 'unauthorized' });
     }
     self.postMessage({ type: 'control', msg });

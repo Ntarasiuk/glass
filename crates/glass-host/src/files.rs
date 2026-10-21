@@ -21,7 +21,10 @@ pub fn set_downloads_dir(dir: PathBuf) {
 }
 
 pub fn downloads_dir() -> PathBuf {
-    DOWNLOADS.get().cloned().unwrap_or_else(|| crate::home().join("Downloads"))
+    DOWNLOADS
+        .get()
+        .cloned()
+        .unwrap_or_else(|| crate::home().join("Downloads"))
 }
 
 /// Lets the remote user pick files on the host to send to their device.
@@ -49,7 +52,9 @@ pub async fn receive(stream: &mut RecvStream) -> Result<(String, PathBuf)> {
     let dest = unique_path(&dir, &header.name);
     let partial = dest.with_extension(format!(
         "{}glass-partial",
-        dest.extension().map(|e| format!("{}.", e.to_string_lossy())).unwrap_or_default()
+        dest.extension()
+            .map(|e| format!("{}.", e.to_string_lossy()))
+            .unwrap_or_default()
     ));
     let mut file = tokio::fs::File::create(&partial).await?;
     let mut buf = vec![0u8; CHUNK];
@@ -57,7 +62,10 @@ pub async fn receive(stream: &mut RecvStream) -> Result<(String, PathBuf)> {
     let result: Result<()> = async {
         while received < header.size {
             let want = CHUNK.min((header.size - received) as usize);
-            let n = stream.read(&mut buf[..want]).await?.context("upload cut short")?;
+            let n = stream
+                .read(&mut buf[..want])
+                .await?
+                .context("upload cut short")?;
             file.write_all(&buf[..n]).await?;
             received += n as u64;
         }
@@ -84,7 +92,11 @@ repeat with f in picked
     set out to out & POSIX path of f & linefeed
 end repeat
 return out"#;
-    let output = tokio::process::Command::new("osascript").arg("-e").arg(script).output().await?;
+    let output = tokio::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .await?;
     if !output.status.success() {
         // -128 is "User canceled".
         return Ok(Vec::new());
@@ -107,8 +119,14 @@ async fn pick_native() -> Result<Vec<PathBuf>> {
         .await?
         .response();
     // Cancelled dialogs come back as an error response.
-    let Ok(files) = response else { return Ok(Vec::new()) };
-    Ok(files.uris().iter().filter_map(|u| file_uri_to_path(u.as_str())).collect())
+    let Ok(files) = response else {
+        return Ok(Vec::new());
+    };
+    Ok(files
+        .uris()
+        .iter()
+        .filter_map(|u| file_uri_to_path(u.as_str()))
+        .collect())
 }
 
 /// `file:///home/me/My%20File.txt` → `/home/me/My File.txt`.
@@ -138,8 +156,14 @@ mod tests {
 
     #[test]
     fn decodes_file_uris() {
-        assert_eq!(file_uri_to_path("file:///home/me/My%20File.txt"), Some(PathBuf::from("/home/me/My File.txt")));
-        assert_eq!(file_uri_to_path("file:///tmp/a"), Some(PathBuf::from("/tmp/a")));
+        assert_eq!(
+            file_uri_to_path("file:///home/me/My%20File.txt"),
+            Some(PathBuf::from("/home/me/My File.txt"))
+        );
+        assert_eq!(
+            file_uri_to_path("file:///tmp/a"),
+            Some(PathBuf::from("/tmp/a"))
+        );
         assert_eq!(file_uri_to_path("https://x"), None);
     }
 }
@@ -147,7 +171,11 @@ mod tests {
 pub async fn send(conn: &Connection, path: &Path) -> Result<()> {
     let mut file = tokio::fs::File::open(path).await?;
     let size = file.metadata().await?.len();
-    let name = path.file_name().context("no file name")?.to_string_lossy().into_owned();
+    let name = path
+        .file_name()
+        .context("no file name")?
+        .to_string_lossy()
+        .into_owned();
     let header = serde_json::to_vec(&FileHeader { name, size })?;
 
     let mut stream = conn.open_uni().await?.await?;

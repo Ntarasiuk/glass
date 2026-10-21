@@ -139,8 +139,14 @@ impl Injector {
             }
         }
         for keycode in [
-            KVK_COMMAND, KVK_SHIFT, KVK_OPTION, KVK_CONTROL, KVK_RIGHT_COMMAND, KVK_RIGHT_SHIFT,
-            KVK_RIGHT_OPTION, KVK_RIGHT_CONTROL,
+            KVK_COMMAND,
+            KVK_SHIFT,
+            KVK_OPTION,
+            KVK_CONTROL,
+            KVK_RIGHT_COMMAND,
+            KVK_RIGHT_SHIFT,
+            KVK_RIGHT_OPTION,
+            KVK_RIGHT_CONTROL,
         ] {
             if modifier_flag(keycode).is_some_and(|f| self.flags.0 & f.0 != 0) {
                 self.handle(InputEvent::KeyUp { keycode });

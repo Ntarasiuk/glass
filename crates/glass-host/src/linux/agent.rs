@@ -31,8 +31,16 @@ pub fn is_installed() -> bool {
 }
 
 fn systemctl(args: &[&str]) -> Result<()> {
-    let status = Command::new("systemctl").arg("--user").args(args).status().context("systemctl")?;
-    anyhow::ensure!(status.success(), "systemctl --user {} failed", args.join(" "));
+    let status = Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .status()
+        .context("systemctl")?;
+    anyhow::ensure!(
+        status.success(),
+        "systemctl --user {} failed",
+        args.join(" ")
+    );
     Ok(())
 }
 
@@ -58,7 +66,11 @@ pub fn install(start_at_login: bool) -> Result<()> {
     std::fs::write(unit_path(), unit)?;
 
     // Most sessions (uwsm on Omarchy) already export these; importing is harmless if so.
-    let present: Vec<&str> = SESSION_ENV.iter().copied().filter(|v| std::env::var_os(v).is_some()).collect();
+    let present: Vec<&str> = SESSION_ENV
+        .iter()
+        .copied()
+        .filter(|v| std::env::var_os(v).is_some())
+        .collect();
     if !present.is_empty() {
         let mut args = vec!["import-environment"];
         args.extend(present);

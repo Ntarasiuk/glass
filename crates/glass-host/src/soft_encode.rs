@@ -7,7 +7,8 @@
 use anyhow::{Result, anyhow};
 use openh264::OpenH264API;
 use openh264::encoder::{
-    BitRate, Encoder as H264, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, RateControlMode, UsageType,
+    BitRate, Encoder as H264, EncoderConfig, FrameRate, FrameType, IntraFramePeriod,
+    RateControlMode, UsageType,
 };
 use openh264::formats::YUVSlices;
 
@@ -46,7 +47,11 @@ pub struct Encoder {
 impl Encoder {
     /// `scale` (from --scale) of 0.5 or less also halves the frame.
     pub fn new(width: usize, height: usize, fps: u32, bitrate: u32, scale: f64) -> Result<Self> {
-        let div = if width * height > MAX_PIXELS || scale <= 0.5 { 2 } else { 1 };
+        let div = if width * height > MAX_PIXELS || scale <= 0.5 {
+            2
+        } else {
+            1
+        };
         let out = ((width / div) & !1, (height / div) & !1);
         let config = EncoderConfig::new()
             .usage_type(UsageType::ScreenContentRealTime)
@@ -56,7 +61,8 @@ impl Encoder {
             .intra_frame_period(IntraFramePeriod::from_num_frames(MAX_GOP_FRAMES))
             .skip_frames(false)
             .num_threads(4);
-        let h264 = H264::with_api_config(OpenH264API::from_source(), config).map_err(|e| anyhow!("openh264: {e}"))?;
+        let h264 = H264::with_api_config(OpenH264API::from_source(), config)
+            .map_err(|e| anyhow!("openh264: {e}"))?;
         let (w, h) = out;
         Ok(Self {
             h264,
@@ -71,11 +77,17 @@ impl Encoder {
 
     /// Changes the target bitrate on the fly (no new keyframe).
     pub fn set_bitrate(&mut self, bps: u32) {
-        let mut info = openh264_sys2::TagBitrateInfo { iLayer: openh264_sys2::SPATIAL_LAYER_ALL, iBitrate: bps as i32 };
+        let mut info = openh264_sys2::TagBitrateInfo {
+            iLayer: openh264_sys2::SPATIAL_LAYER_ALL,
+            iBitrate: bps as i32,
+        };
         // SAFETY: SetOption(ENCODER_OPTION_BITRATE) takes a pointer to SBitrateInfo, which
         // lives for the duration of the call.
         unsafe {
-            self.h264.raw_api().set_option(openh264_sys2::ENCODER_OPTION_BITRATE, (&raw mut info).cast());
+            self.h264.raw_api().set_option(
+                openh264_sys2::ENCODER_OPTION_BITRATE,
+                (&raw mut info).cast(),
+            );
         }
     }
 
@@ -85,8 +97,19 @@ impl Encoder {
     }
 
     /// Returns Annex B data and whether it's a keyframe, or None if nothing was produced.
-    pub fn encode(&mut self, frame: &Frame, force_keyframe: bool) -> Result<Option<(Vec<u8>, bool)>> {
-        to_i420(frame, self.div, self.out, &mut self.y, &mut self.u, &mut self.v);
+    pub fn encode(
+        &mut self,
+        frame: &Frame,
+        force_keyframe: bool,
+    ) -> Result<Option<(Vec<u8>, bool)>> {
+        to_i420(
+            frame,
+            self.div,
+            self.out,
+            &mut self.y,
+            &mut self.u,
+            &mut self.v,
+        );
         if force_keyframe {
             self.h264.force_intra_frame();
         }
@@ -100,7 +123,14 @@ impl Encoder {
 }
 
 /// BT.601 limited range, 2x2-averaged chroma; `div` box-filters the source down.
-fn to_i420(f: &Frame, div: usize, (w, h): (usize, usize), y: &mut [u8], u: &mut [u8], v: &mut [u8]) {
+fn to_i420(
+    f: &Frame,
+    div: usize,
+    (w, h): (usize, usize),
+    y: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+) {
     let (ri, gi, bi) = match f.format {
         PixelFormat::Bgrx => (2, 1, 0),
         PixelFormat::Rgbx => (0, 1, 2),
@@ -144,9 +174,22 @@ mod tests {
 
     #[test]
     fn white_and_black_to_i420() {
-        let frame = |px: [u8; 4]| Frame { width: 2, height: 2, stride: 8, format: PixelFormat::Bgrx, data: px.repeat(4) };
+        let frame = |px: [u8; 4]| Frame {
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: PixelFormat::Bgrx,
+            data: px.repeat(4),
+        };
         let (mut y, mut u, mut v) = (vec![0; 4], vec![0; 1], vec![0; 1]);
-        to_i420(&frame([255, 255, 255, 0]), 1, (2, 2), &mut y, &mut u, &mut v);
+        to_i420(
+            &frame([255, 255, 255, 0]),
+            1,
+            (2, 2),
+            &mut y,
+            &mut u,
+            &mut v,
+        );
         assert_eq!((y[0], u[0], v[0]), (235, 128, 128));
         to_i420(&frame([0, 0, 0, 0]), 1, (2, 2), &mut y, &mut u, &mut v);
         assert_eq!((y[0], u[0], v[0]), (16, 128, 128));
@@ -159,22 +202,43 @@ mod tests {
             height: 64,
             stride: 64 * 4,
             format: PixelFormat::Bgrx,
-            data: (0..64 * 64).flat_map(|i| [(i % 251) as u8, (i % 7 * 30) as u8, 200, 0]).collect(),
+            data: (0..64 * 64)
+                .flat_map(|i| [(i % 251) as u8, (i % 7 * 30) as u8, 200, 0])
+                .collect(),
         };
         let mut enc = Encoder::new(64, 64, 30, 1_000_000, 1.0).unwrap();
         let (data, keyframe) = enc.encode(&frame, true).unwrap().expect("output");
         assert!(keyframe);
         assert_eq!(&data[..4], &[0, 0, 0, 1], "Annex B");
-        let nal_types: Vec<u8> = data.windows(5).filter(|w| w[..4] == [0, 0, 0, 1]).map(|w| w[4] & 0x1f).collect();
-        assert!(nal_types.contains(&7) && nal_types.contains(&8) && nal_types.contains(&5), "{nal_types:?}");
+        let nal_types: Vec<u8> = data
+            .windows(5)
+            .filter(|w| w[..4] == [0, 0, 0, 1])
+            .map(|w| w[4] & 0x1f)
+            .collect();
+        assert!(
+            nal_types.contains(&7) && nal_types.contains(&8) && nal_types.contains(&5),
+            "{nal_types:?}"
+        );
         let mut dec = openh264::decoder::Decoder::new().unwrap();
         assert!(dec.decode(&data).unwrap().is_some(), "decodes");
     }
 
     #[test]
     fn red_differs_by_channel_order() {
-        let bgrx = Frame { width: 2, height: 2, stride: 8, format: PixelFormat::Bgrx, data: [0, 0, 255, 0].repeat(4) };
-        let rgbx = Frame { width: 2, height: 2, stride: 8, format: PixelFormat::Rgbx, data: [255, 0, 0, 0].repeat(4) };
+        let bgrx = Frame {
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: PixelFormat::Bgrx,
+            data: [0, 0, 255, 0].repeat(4),
+        };
+        let rgbx = Frame {
+            width: 2,
+            height: 2,
+            stride: 8,
+            format: PixelFormat::Rgbx,
+            data: [255, 0, 0, 0].repeat(4),
+        };
         let (mut y1, mut u1, mut v1) = (vec![0; 4], vec![0; 1], vec![0; 1]);
         let (mut y2, mut u2, mut v2) = (vec![0; 4], vec![0; 1], vec![0; 1]);
         to_i420(&bgrx, 1, (2, 2), &mut y1, &mut u1, &mut v1);

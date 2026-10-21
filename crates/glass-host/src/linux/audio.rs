@@ -21,11 +21,13 @@ struct State {
 }
 
 pub fn start(packets: AudioPackets) {
-    let spawned = std::thread::Builder::new().name("glass-audio".into()).spawn(move || {
-        if let Err(e) = run(packets) {
-            tracing::warn!("audio capture stopped: {e:#}");
-        }
-    });
+    let spawned = std::thread::Builder::new()
+        .name("glass-audio".into())
+        .spawn(move || {
+            if let Err(e) = run(packets) {
+                tracing::warn!("audio capture stopped: {e:#}");
+            }
+        });
     if let Err(e) = spawned {
         tracing::warn!("audio thread: {e}");
     }
@@ -46,13 +48,21 @@ fn run(packets: AudioPackets) -> anyhow::Result<()> {
     props.insert(*pw::keys::STREAM_CAPTURE_SINK, "true");
     let stream = pw::stream::StreamBox::new(&core, "glass-audio", props)?;
 
-    let state = State { packets, pending: Vec::new(), seq: 0 };
+    let state = State {
+        packets,
+        pending: Vec::new(),
+        seq: 0,
+    };
     let _listener = stream
         .add_local_listener_with_user_data(state)
         .process(|stream, st| {
-            let Some(mut buffer) = stream.dequeue_buffer() else { return };
+            let Some(mut buffer) = stream.dequeue_buffer() else {
+                return;
+            };
             let datas = buffer.datas_mut();
-            let Some(data) = datas.first_mut() else { return };
+            let Some(data) = datas.first_mut() else {
+                return;
+            };
             let size = data.chunk().size() as usize;
             let Some(bytes) = data.data() else { return };
             let bytes = &bytes[..size.min(bytes.len())];
@@ -63,7 +73,12 @@ fn run(packets: AudioPackets) -> anyhow::Result<()> {
             let per_packet = AUDIO_FRAMES_PER_PACKET * CHANNELS;
             let mut offset = 0;
             while st.pending.len() - offset >= per_packet {
-                let packet = audio_packet(st.seq, now_us(), CHANNELS as u8, &st.pending[offset..offset + per_packet]);
+                let packet = audio_packet(
+                    st.seq,
+                    now_us(),
+                    CHANNELS as u8,
+                    &st.pending[offset..offset + per_packet],
+                );
                 // No receivers (nobody listening) is fine.
                 let _ = st.packets.send(Arc::new(packet));
                 st.seq = st.seq.wrapping_add(1);
@@ -82,9 +97,12 @@ fn run(packets: AudioPackets) -> anyhow::Result<()> {
         id: spa::param::ParamType::EnumFormat.as_raw(),
         properties: info.into(),
     };
-    let values = spa::pod::serialize::PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &spa::pod::Value::Object(obj))?
-        .0
-        .into_inner();
+    let values = spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(obj),
+    )?
+    .0
+    .into_inner();
     let mut params = [Pod::from_bytes(&values).ok_or_else(|| anyhow::anyhow!("audio format pod"))?];
     stream.connect(
         spa::utils::Direction::Input,

@@ -2,6 +2,8 @@
 // host's /test/* hooks. Each host gets its own ports, config dir, downloads and logs.
 
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
+import { createSocket } from 'node:dgram';
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -10,21 +12,52 @@ import { expect } from '@playwright/test';
 const ROOT = resolve(import.meta.dirname, '../..');
 export const BINARY = process.env.GLASS_BIN ?? join(ROOT, 'target/release/glass-host');
 
-let nextPort = 21000 + (Number(process.env.TEST_PARALLEL_INDEX ?? 0) * 20);
+// Each parallel worker gets its own block of ports, below the OS's ephemeral range (so the
+// browser's own sockets can't take one between our check and the host binding it).
+const PORTS_PER_WORKER = 400;
+const firstPort = 21000 + Number(process.env.TEST_PARALLEL_INDEX ?? 0) * PORTS_PER_WORKER;
+let nextOffset = 0;
+
+function isFree(port, kind) {
+  return new Promise((resolve) => {
+    if (kind === 'udp') {
+      const sock = createSocket({ type: 'udp6' });
+      sock.once('error', () => resolve(false));
+      sock.bind(port, '::', () => sock.close(() => resolve(true)));
+    } else {
+      const server = createServer();
+      server.once('error', () => resolve(false));
+      server.listen(port, '::', () => server.close(() => resolve(true)));
+    }
+  });
+}
+
+/** The next port in this worker's block that's free for `kind` (tcp or udp). */
+async function freePort(kind) {
+  for (let i = 0; i < PORTS_PER_WORKER; i++) {
+    const port = firstPort + (nextOffset++ % PORTS_PER_WORKER);
+    if (await isFree(port, kind)) return port;
+  }
+  throw new Error('no free test ports');
+}
 
 export class Host {
   /** `os`: what the host reports itself as (macos or linux). */
-  constructor({ configDir, os = 'macos', latest } = {}) {
+  constructor({ configDir, os = 'macos', latest, webDir } = {}) {
+    this.webDir = webDir;
     this.os = os;
     this.latest = latest;
     this.dir = mkdtempSync(join(tmpdir(), 'glass-e2e-'));
     this.configDir = configDir ?? join(this.dir, 'config');
-    this.http = nextPort++;
-    this.wt = nextPort++;
-    this.base = `http://localhost:${this.http}`;
   }
 
   async start() {
+    // Ports are picked once and kept, so a restarted host comes back at the same address.
+    if (!this.http) {
+      this.http = await freePort('tcp');
+      this.wt = await freePort('udp');
+      this.base = `http://localhost:${this.http}`;
+    }
     this.proc = spawn(
       BINARY,
       [
@@ -34,6 +67,7 @@ export class Host {
         '--log-dir', join(this.dir, 'logs'),
         '--downloads-dir', join(this.dir, 'downloads'),
         '--fps', '30',
+        ...(this.webDir ? ['--web-dir', this.webDir] : []),
       ],
       {
         env: { ...process.env, GLASS_CONFIG_DIR: this.configDir, GLASS_TEST_OS: this.os, ...(this.latest && { GLASS_TEST_LATEST: this.latest }) },

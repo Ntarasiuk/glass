@@ -9,11 +9,11 @@ use dispatch2::{DispatchQueue, DispatchQueueAttr};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send};
+use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayIsBuiltin, CGDisplayIsMain, CGDisplayPixelsHigh,
     CGDisplayPixelsWide,
 };
-use objc2_core_foundation::CFRetained;
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::CVImageBuffer;
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
@@ -120,7 +120,6 @@ impl StreamOutput {
     }
 }
 
-
 /// Keeps the stream and its output alive; capture stops when dropped.
 pub struct Capture {
     stream: Retained<SCStream>,
@@ -139,9 +138,13 @@ impl Capture {
     pub fn refresh(&self) {
         let state = self.state.clone();
         self.queue.exec_async(move || {
-            let Some(image) = state.last.lock().unwrap().0.clone() else { return };
+            let Some(image) = state.last.lock().unwrap().0.clone() else {
+                return;
+            };
             let now = now_us();
-            state.encoder.encode(&image, unsafe { CMTime::new(now as i64, 1_000_000) }, now);
+            state
+                .encoder
+                .encode(&image, unsafe { CMTime::new(now as i64, 1_000_000) }, now);
         });
     }
 }
@@ -179,9 +182,9 @@ pub fn list_displays() -> Result<Vec<Display>> {
         let _ = tx.send(result);
     });
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
-    let content = rx
-        .recv()?
-        .context("Screen Recording permission is required (System Settings → Privacy & Security)")?;
+    let content = rx.recv()?.context(
+        "Screen Recording permission is required (System Settings → Privacy & Security)",
+    )?;
 
     let mut displays: Vec<Display> = unsafe { content.displays() }
         .iter()
@@ -243,7 +246,10 @@ pub fn start(
     let stream = unsafe {
         SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &config, None)
     };
-    let state = Arc::new(FrameState { encoder, last: std::sync::Mutex::new(LastFrame(None)) });
+    let state = Arc::new(FrameState {
+        encoder,
+        last: std::sync::Mutex::new(LastFrame(None)),
+    });
     let output = StreamOutput::new(state.clone(), audio, unsafe { display.displayID() });
     let queue = DispatchQueue::new("glass.capture", DispatchQueueAttr::SERIAL);
     // Separate queue so audio never waits behind a frame being encoded.
@@ -276,5 +282,11 @@ pub fn start(
         bail!("startCapture: {err}");
     }
 
-    Ok(Capture { stream, state, _output: output, queue, _audio_queue: audio_queue })
+    Ok(Capture {
+        stream,
+        state,
+        _output: output,
+        queue,
+        _audio_queue: audio_queue,
+    })
 }

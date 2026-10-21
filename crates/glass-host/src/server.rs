@@ -8,10 +8,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::Json;
+use axum::http::{HeaderValue, header};
 use axum::routing::{get, post};
 use glass_proto::{INPUT_EVENT_LEN, InputEvent, KIND_KEYFRAME_REQUEST, KIND_PING, MAX_STREAMS};
 use tokio::sync::{broadcast, mpsc};
-use axum::http::{HeaderValue, header};
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{info, warn};
@@ -23,9 +23,9 @@ use crate::audio::AudioPackets;
 use crate::clock::now_us;
 use crate::control::{self, ClientMsg, STREAM_FILE, STREAM_INPUT, ServerMsg};
 use crate::files;
-use crate::tailscale;
-use crate::media::{Clipboard, InputSink, Layout, VideoSource};
 use crate::media::EncodedFrame;
+use crate::media::{Clipboard, InputSink, Layout, VideoSource};
+use crate::tailscale;
 
 pub struct Shared {
     pub frames: broadcast::Sender<Arc<EncodedFrame>>,
@@ -37,7 +37,8 @@ pub struct Shared {
     /// Read on every sign-in, so `glass token --reset` takes effect without a restart.
     pub token_file: PathBuf,
     /// Failed sign-ins per address, for brute-force protection.
-    pub auth_failures: Mutex<std::collections::HashMap<std::net::IpAddr, (u32, std::time::Instant)>>,
+    pub auth_failures:
+        Mutex<std::collections::HashMap<std::net::IpAddr, (u32, std::time::Instant)>>,
     /// Tailnet login of this Mac's owner; their devices skip the token.
     pub tailnet_owner: Option<String>,
     pub audio: AudioPackets,
@@ -65,7 +66,9 @@ pub async fn run(
     };
     // Only meaningful for the self-signed identity; a real cert validates normally.
     let cert_hash = tls.is_none().then(|| {
-        identity.certificate_chain().as_slice()[0].hash().fmt(Sha256DigestFmt::BytesArray)
+        identity.certificate_chain().as_slice()[0]
+            .hash()
+            .fmt(Sha256DigestFmt::BytesArray)
     });
 
     let config = ServerConfig::builder()
@@ -95,8 +98,14 @@ pub async fn run(
     let app = axum::Router::new()
         .merge(extra_routes.unwrap_or_default())
         .route("/config.json", get(client_config))
-        .route("/machines.json", get(move || machines(machines_cache.clone(), http_port, wt_port)))
-        .route("/log", post(move |body: String| append_client_log(client_log.clone(), body)))
+        .route(
+            "/machines.json",
+            get(move || machines(machines_cache.clone(), http_port, wt_port)),
+        )
+        .route(
+            "/log",
+            post(move |body: String| append_client_log(client_log.clone(), body)),
+        )
         .fallback_service(ServeDir::new(web_dir))
         // The client is tiny and changes often; never let a stale worker linger.
         .layer(SetResponseHeaderLayer::overriding(
@@ -110,7 +119,9 @@ pub async fn run(
                 let rustls =
                     axum_server::tls_rustls::RustlsConfig::from_pem_file(&t.cert, &t.key).await?;
                 info!("web client at https://<host>:{http_port}");
-                axum_server::bind_rustls(addr, rustls).serve(app.into_make_service()).await
+                axum_server::bind_rustls(addr, rustls)
+                    .serve(app.into_make_service())
+                    .await
             }
             None => {
                 info!("web client at http://localhost:{http_port}");
@@ -263,52 +274,170 @@ async fn control(
     let peer = ctx.conn.remote_address().ip().to_canonical();
     if auth_blocked(shared, peer) {
         warn!("{peer}: rejected (too many failed sign-ins)");
-        control::write_json(&mut send, &ServerMsg::Error { msg: "unauthorized".into() }).await?;
+        control::write_json(
+            &mut send,
+            &ServerMsg::Error {
+                msg: "unauthorized".into(),
+            },
+        )
+        .await?;
         // Let the message arrive before closing, so the client shows the token prompt.
         tokio::time::sleep(Duration::from_millis(200)).await;
         ctx.conn.close(1u32.into(), b"too many attempts");
         return Ok(());
     }
+    let hello_ok = matches!(hello, Ok(Some(ClientMsg::Hello { .. })));
+    let (token, link, pass) = match hello {
+        Ok(Some(ClientMsg::Hello { token, link, pass })) => (token, link, pass),
+        _ => (None, None, None),
+    };
     let expected = control::load_or_create_token(&shared.token_file).unwrap_or_default();
-    let token_ok = !expected.is_empty()
-        && matches!(&hello, Ok(Some(ClientMsg::Hello { token: Some(t) })) if control::token_matches(t, &expected));
-    let tailnet_ok = !token_ok
-        && matches!(hello, Ok(Some(ClientMsg::Hello { .. })))
-        && match &shared.tailnet_owner {
-            Some(owner) => tailscale::is_trusted(peer, owner).await,
-            None => false,
-        };
-    if !(token_ok || tailnet_ok) {
+    let access_file = crate::access::file_for(&shared.token_file);
+    // Owner credentials first, so a tailnet device opening a link doesn't use it up.
+    let mut auth = None;
+    if !expected.is_empty()
+        && token
+            .as_deref()
+            .is_some_and(|t| control::token_matches(t, &expected))
+    {
+        auth = Some(Auth::Token);
+    }
+    if auth.is_none()
+        && hello_ok
+        && let Some(owner) = &shared.tailnet_owner
+        && tailscale::is_trusted(peer, owner).await
+    {
+        auth = Some(Auth::Tailnet);
+    }
+    if auth.is_none()
+        && let Some(p) = &pass
+        && let Some(expires) = crate::access::pass_expiry(&access_file, p)
+    {
+        auth = Some(Auth::Guest {
+            pass: p.clone(),
+            expires,
+            new: false,
+        });
+    }
+    let mut link_failed = false;
+    if auth.is_none()
+        && let Some(code) = &link
+    {
+        match crate::access::redeem_link(&access_file, code) {
+            Ok(Some(g)) => {
+                auth = Some(Auth::Guest {
+                    pass: g.pass,
+                    expires: g.expires,
+                    new: true,
+                })
+            }
+            Ok(None) => link_failed = true,
+            Err(e) => warn!("{peer}: magic link check failed: {e:#}"),
+        }
+    }
+    let Some(auth) = auth else {
         record_auth_failure(shared, peer);
-        warn!("{}: rejected (bad or missing token)", ctx.conn.remote_address());
-        control::write_json(&mut send, &ServerMsg::Error { msg: "unauthorized".into() }).await?;
+        warn!(
+            "{}: rejected (bad or missing token)",
+            ctx.conn.remote_address()
+        );
+        if link_failed {
+            let msg = "This link has expired or was already used. Ask for a new one.".into();
+            control::write_json(&mut send, &ServerMsg::Error { msg }).await?;
+        }
+        control::write_json(
+            &mut send,
+            &ServerMsg::Error {
+                msg: "unauthorized".into(),
+            },
+        )
+        .await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
         ctx.conn.close(1u32.into(), b"unauthorized");
         return Ok(());
-    }
+    };
     ctx.authed.store(true, Ordering::Relaxed);
     shared.video.request_keyframe(None);
-    info!(
-        "{}: authenticated via {}",
-        ctx.conn.remote_address(),
-        if token_ok { "token" } else { "tailnet identity" }
-    );
+    let guest = matches!(auth, Auth::Guest { .. });
+    match &auth {
+        Auth::Token => info!("{}: authenticated via token", ctx.conn.remote_address()),
+        Auth::Tailnet => info!(
+            "{}: authenticated via tailnet identity",
+            ctx.conn.remote_address()
+        ),
+        Auth::Guest { expires, new, .. } => {
+            let left = crate::access::describe(Duration::from_secs(
+                expires.saturating_sub(crate::access::now()),
+            ));
+            let how = if *new { "magic link" } else { "guest pass" };
+            info!(
+                "{}: authenticated via {how} ({left} left)",
+                ctx.conn.remote_address()
+            );
+        }
+    }
+    if let Auth::Guest {
+        pass,
+        expires,
+        new: true,
+    } = &auth
+    {
+        control::write_json(
+            &mut send,
+            &ServerMsg::Pass {
+                pass: pass.clone(),
+                expires: *expires,
+            },
+        )
+        .await?;
+    }
+    if let Auth::Guest { pass, .. } = &auth {
+        // A guest is cut off when its pass expires or is revoked (`glass link --revoke`).
+        let (conn, pass, file) = (ctx.conn.clone(), pass.clone(), access_file.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = conn.closed() => return,
+                    _ = tokio::time::sleep(GUEST_RECHECK) => {}
+                }
+                if crate::access::pass_expiry(&file, &pass).is_none() {
+                    info!("{}: guest access ended", conn.remote_address());
+                    conn.close(1u32.into(), b"access ended");
+                    return;
+                }
+            }
+        });
+    }
 
     let displays = {
         let shared = shared.clone();
-        tokio::task::spawn_blocking(move || shared.video.displays()).await?.unwrap_or_default()
+        tokio::task::spawn_blocking(move || shared.video.displays())
+            .await?
+            .unwrap_or_default()
     };
     let welcome = ServerMsg::Welcome {
         displays,
         streams: shared.video.streams(),
         audio: crate::audio::SUPPORTED,
-        host_os: if crate::testmode::enabled() { crate::testmode::host_os() } else { crate::platform::OS },
+        host_os: if crate::testmode::enabled() {
+            crate::testmode::host_os()
+        } else {
+            crate::platform::OS
+        },
+        guest,
     };
     control::write_json(&mut send, &welcome).await?;
     let bps = shared.rate.lock().unwrap().target();
     control::write_json(&mut send, &ServerMsg::Bitrate { bps }).await?;
     if let Some(version) = crate::update::available() {
-        control::write_json(&mut send, &ServerMsg::UpdateAvailable { current: crate::update::CURRENT, version }).await?;
+        control::write_json(
+            &mut send,
+            &ServerMsg::UpdateAvailable {
+                current: crate::update::CURRENT,
+                version,
+            },
+        )
+        .await?;
     }
 
     let mut events = shared.events.subscribe();
@@ -353,17 +482,28 @@ async fn control(
                 if on {
                     shared.video.request_keyframe(None);
                 }
-                info!("{}: video {}", ctx.conn.remote_address(), if on { "resumed" } else { "paused" });
+                info!(
+                    "{}: video {}",
+                    ctx.conn.remote_address(),
+                    if on { "resumed" } else { "paused" }
+                );
             }
+            ClientMsg::Update if guest => warn!("{peer}: guest asked to update the host; ignored"),
             ClientMsg::Update => {
                 if crate::testmode::enabled() {
                     crate::testmode::record_update();
                 } else if let Err(e) = crate::update::start_self_update() {
-                    let _ = ctx.ctl_tx.send(ServerMsg::Error { msg: format!("update: {e:#}") });
+                    let _ = ctx.ctl_tx.send(ServerMsg::Error {
+                        msg: format!("update: {e:#}"),
+                    });
                 }
             }
             ClientMsg::NetStats(report) => {
-                let changed = shared.rate.lock().unwrap().report(report, std::time::Instant::now());
+                let changed = shared
+                    .rate
+                    .lock()
+                    .unwrap()
+                    .report(report, std::time::Instant::now());
                 if let Some(bps) = changed {
                     info!("bitrate → {:.1} Mbps", bps as f64 / 1e6);
                     shared.video.set_bitrate(bps);
@@ -372,7 +512,11 @@ async fn control(
             }
             ClientMsg::Audio { on } => {
                 ctx.audio_on.store(on, Ordering::Relaxed);
-                info!("{}: audio {}", ctx.conn.remote_address(), if on { "on" } else { "off" });
+                info!(
+                    "{}: audio {}",
+                    ctx.conn.remote_address(),
+                    if on { "on" } else { "off" }
+                );
             }
             ClientMsg::PickFiles => {
                 let ctx = ctx.clone();
@@ -388,7 +532,9 @@ async fn control(
                             }
                         }
                         Err(e) => {
-                            let _ = ctx.ctl_tx.send(ServerMsg::Error { msg: format!("pick files: {e:#}") });
+                            let _ = ctx.ctl_tx.send(ServerMsg::Error {
+                                msg: format!("pick files: {e:#}"),
+                            });
                         }
                     }
                 });
@@ -411,30 +557,50 @@ async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
         }
         Err(e) => {
             warn!("{peer}: switch display failed: {e:#}");
-            let _ = ctx.ctl_tx.send(ServerMsg::Error { msg: format!("switch display: {e:#}") });
+            let _ = ctx.ctl_tx.send(ServerMsg::Error {
+                msg: format!("switch display: {e:#}"),
+            });
         }
     }
     Ok(())
 }
 
 /// Failed sign-ins allowed per address within `AUTH_WINDOW` before it's locked out.
+/// How a session signed in.
+enum Auth {
+    Token,
+    Tailnet,
+    /// Via a magic link: `new` when the link was opened just now (the pass is sent back).
+    Guest {
+        pass: String,
+        expires: u64,
+        new: bool,
+    },
+}
+
+/// How often a guest session re-checks that its pass is still valid.
+const GUEST_RECHECK: Duration = Duration::from_secs(10);
+
 const AUTH_MAX_FAILURES: u32 = 10;
 const AUTH_WINDOW: Duration = Duration::from_secs(600);
 
 fn auth_blocked(shared: &Shared, peer: std::net::IpAddr) -> bool {
     let mut failures = shared.auth_failures.lock().unwrap();
     failures.retain(|_, (_, since)| since.elapsed() < AUTH_WINDOW);
-    failures.get(&peer).is_some_and(|(n, _)| *n >= AUTH_MAX_FAILURES)
+    failures
+        .get(&peer)
+        .is_some_and(|(n, _)| *n >= AUTH_MAX_FAILURES)
 }
 
 fn record_auth_failure(shared: &Shared, peer: std::net::IpAddr) {
     let mut failures = shared.auth_failures.lock().unwrap();
-    let entry = failures.entry(peer).or_insert((0, std::time::Instant::now()));
+    let entry = failures
+        .entry(peer)
+        .or_insert((0, std::time::Instant::now()));
     entry.0 += 1;
 }
 
 const AUTH_WAIT: Duration = Duration::from_secs(10);
-
 
 async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
     let mut tag = [0u8; 1];
@@ -459,11 +625,17 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
                     events += 1;
                 }
             }
-            info!("{}: input stream closed after {events} events", ctx.conn.remote_address());
+            info!(
+                "{}: input stream closed after {events} events",
+                ctx.conn.remote_address()
+            );
         }
         STREAM_FILE => {
             let (name, path) = files::receive(&mut stream).await?;
-            let _ = ctx.ctl_tx.send(ServerMsg::FileSaved { name, path: path.display().to_string() });
+            let _ = ctx.ctl_tx.send(ServerMsg::FileSaved {
+                name,
+                path: path.display().to_string(),
+            });
         }
         other => warn!("unknown stream type {other:#x}"),
     }
@@ -471,7 +643,11 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
 }
 
 /// Frame ids are per session so the client sees a gap only when this session lost a frame.
-fn send_frame(conn: &wtransport::Connection, frame: &EncodedFrame, next_id: &mut u32) -> Result<()> {
+fn send_frame(
+    conn: &wtransport::Connection,
+    frame: &EncodedFrame,
+    next_id: &mut u32,
+) -> Result<()> {
     let max = conn.max_datagram_size().unwrap_or(1200);
     let id = *next_id;
     *next_id = next_id.wrapping_add(1);
@@ -479,7 +655,14 @@ fn send_frame(conn: &wtransport::Connection, frame: &EncodedFrame, next_id: &mut
     if crate::testmode::take_drop() {
         return Ok(());
     }
-    let mut dgrams = glass_proto::fragment(&frame.data, frame.stream, id, frame.keyframe, frame.capture_us, max);
+    let mut dgrams = glass_proto::fragment(
+        &frame.data,
+        frame.stream,
+        id,
+        frame.keyframe,
+        frame.capture_us,
+        max,
+    );
     if crate::testmode::take_corrupt()
         && let Some(last) = dgrams.last_mut()
         && let Some(byte) = last.last_mut()
@@ -527,7 +710,11 @@ async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_j
                         } else {
                             None
                         };
-                        MachineEntry { glass: wt_port.is_some(), machine: m, wt_port }
+                        MachineEntry {
+                            glass: wt_port.is_some(),
+                            machine: m,
+                            wt_port,
+                        }
                     })
                 })
                 .collect();
@@ -551,7 +738,11 @@ async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_j
 /// If a Glass host answers at `https://<dns>:<port>/config.json`, its WebTransport port.
 async fn probe_glass(dns: &str, port: u16) -> Option<u16> {
     let url = format!("https://{dns}:{port}/config.json");
-    let out = tokio::process::Command::new("curl").args(["-fsS", "--max-time", "1.5", &url]).output().await.ok()?;
+    let out = tokio::process::Command::new("curl")
+        .args(["-fsS", "--max-time", "1.5", &url])
+        .output()
+        .await
+        .ok()?;
     let config: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     config["wtPort"].as_u64().map(|p| p as u16)
 }
@@ -569,7 +760,10 @@ async fn self_signed_identity(wt_host: Option<&str>) -> Result<Identity> {
     if fresh && let Ok(identity) = Identity::load_pemfiles(&cert, &key).await {
         return Ok(identity);
     }
-    let names = ["localhost", "127.0.0.1", "::1"].map(String::from).into_iter().chain(wt_host.map(String::from));
+    let names = ["localhost", "127.0.0.1", "::1"]
+        .map(String::from)
+        .into_iter()
+        .chain(wt_host.map(String::from));
     let identity = Identity::self_signed(names)?;
     tokio::fs::create_dir_all(&dir).await?;
     identity.certificate_chain().store_pemfile(&cert).await?;
@@ -614,6 +808,8 @@ async fn append_client_log(path: PathBuf, body: String) {
 }
 
 fn unix_now() -> String {
-    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     format!("{}.{:03}", d.as_secs(), d.subsec_millis())
 }

@@ -24,7 +24,13 @@ pub struct Packetizer {
 
 impl Packetizer {
     pub fn new(packets: AudioPackets) -> Self {
-        Self { packets, channels: 2, pending: Vec::new(), pending_us: 0, seq: 0 }
+        Self {
+            packets,
+            channels: 2,
+            pending: Vec::new(),
+            pending_us: 0,
+            seq: 0,
+        }
     }
 
     pub fn push(&mut self, sample: &CMSampleBuffer) {
@@ -33,7 +39,10 @@ impl Packetizer {
         };
         let (samples, channels) = pcm;
         if self.seq == 0 && self.pending.is_empty() {
-            tracing::info!("audio: first buffer ({} frames, {channels} ch)", samples.len() / channels.max(1));
+            tracing::info!(
+                "audio: first buffer ({} frames, {channels} ch)",
+                samples.len() / channels.max(1)
+            );
         }
         if channels != self.channels {
             self.pending.clear();
@@ -66,8 +75,15 @@ unsafe fn to_interleaved_s16(sample: &CMSampleBuffer) -> Option<(Vec<i16>, usize
     let asbd = unsafe { CMAudioFormatDescriptionGetStreamBasicDescription(&format).as_ref() }?;
     let frames = unsafe { sample.num_samples() } as usize;
     let channels = asbd.mChannelsPerFrame as usize;
-    if asbd.mFormatFlags & kAudioFormatFlagIsFloat == 0 || asbd.mBitsPerChannel != 32 || channels == 0 {
-        tracing::warn!("unsupported audio format: flags {:#x}, {} bits", asbd.mFormatFlags, asbd.mBitsPerChannel);
+    if asbd.mFormatFlags & kAudioFormatFlagIsFloat == 0
+        || asbd.mBitsPerChannel != 32
+        || channels == 0
+    {
+        tracing::warn!(
+            "unsupported audio format: flags {:#x}, {} bits",
+            asbd.mFormatFlags,
+            asbd.mBitsPerChannel
+        );
         return None;
     }
 
@@ -87,7 +103,11 @@ unsafe fn to_interleaved_s16(sample: &CMSampleBuffer) -> Option<(Vec<i16>, usize
     for f in 0..frames {
         for c in 0..channels {
             // Planar buffers store each channel's samples back to back.
-            let idx = if planar { c * frames + f } else { f * channels + c };
+            let idx = if planar {
+                c * frames + f
+            } else {
+                f * channels + c
+            };
             out.push(to_s16(float(idx)));
         }
     }

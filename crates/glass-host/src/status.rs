@@ -49,21 +49,23 @@ pub fn start(url: Option<String>) {
         url,
         ..Default::default()
     });
-    std::thread::spawn(|| loop {
-        let snapshot = CURRENT.lock().unwrap().as_mut().map(|s| {
-            s.accessibility = crate::input::has_accessibility();
-            s.screen_recording = s.capturing || crate::permissions::has_screen_recording();
-            s.updated = unix_now();
-            s.clone()
-        });
-        if let Some(s) = snapshot {
-            let _ = std::fs::create_dir_all(path().parent().unwrap());
-            let tmp = path().with_extension("tmp");
-            if std::fs::write(&tmp, serde_json::to_vec_pretty(&s).unwrap()).is_ok() {
-                let _ = std::fs::rename(&tmp, path());
+    std::thread::spawn(|| {
+        loop {
+            let snapshot = CURRENT.lock().unwrap().as_mut().map(|s| {
+                s.accessibility = crate::input::has_accessibility();
+                s.screen_recording = s.capturing || crate::permissions::has_screen_recording();
+                s.updated = unix_now();
+                s.clone()
+            });
+            if let Some(s) = snapshot {
+                let _ = std::fs::create_dir_all(path().parent().unwrap());
+                let tmp = path().with_extension("tmp");
+                if std::fs::write(&tmp, serde_json::to_vec_pretty(&s).unwrap()).is_ok() {
+                    let _ = std::fs::rename(&tmp, path());
+                }
             }
+            std::thread::sleep(REFRESH);
         }
-        std::thread::sleep(REFRESH);
     });
 }
 
@@ -74,5 +76,8 @@ pub fn set_capturing(capturing: bool) {
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

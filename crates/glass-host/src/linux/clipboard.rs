@@ -17,7 +17,11 @@ static LAST: Mutex<Option<String>> = Mutex::new(None);
 pub fn set_text(text: &str) {
     *LAST.lock().unwrap() = Some(text.to_owned());
     // wl-copy forks a process that keeps serving the selection after we return.
-    let child = Command::new("wl-copy").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    let child = Command::new("wl-copy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
     match child {
         Ok(mut child) => {
             if let Some(mut stdin) = child.stdin.take() {
@@ -35,7 +39,9 @@ fn read_text() -> Option<String> {
         .stderr(Stdio::null())
         .output()
         .ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Broadcasts clipboard text when it changes.

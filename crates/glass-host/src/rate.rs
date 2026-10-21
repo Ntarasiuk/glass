@@ -36,7 +36,12 @@ pub struct RateControl {
 
 impl RateControl {
     pub fn new(max: u32) -> Self {
-        Self { max, target: max, last_decrease: None, latencies: VecDeque::new() }
+        Self {
+            max,
+            target: max,
+            last_decrease: None,
+            latencies: VecDeque::new(),
+        }
     }
 
     pub fn target(&self) -> u32 {
@@ -52,21 +57,28 @@ impl RateControl {
                 self.latencies.pop_front();
             }
         }
-        let latency_climbing = r.latency_ms.is_some_and(|l| baseline.is_finite() && l > baseline + LATENCY_SLACK_MS);
+        let latency_climbing = r
+            .latency_ms
+            .is_some_and(|l| baseline.is_finite() && l > baseline + LATENCY_SLACK_MS);
         let congested = r.dropped > 0 || latency_climbing;
 
         let min = (self.max as f64 * MIN_FRACTION) as u32;
         let next = if congested {
             self.last_decrease = Some(now);
             ((self.target as f64 * DECREASE) as u32).max(min)
-        } else if self.last_decrease.is_none_or(|t| now.duration_since(t) >= HOLD_AFTER_DECREASE) && r.frames > 0 {
+        } else if self
+            .last_decrease
+            .is_none_or(|t| now.duration_since(t) >= HOLD_AFTER_DECREASE)
+            && r.frames > 0
+        {
             (self.target + (self.max as f64 * INCREASE) as u32).min(self.max)
         } else {
             self.target
         };
         // Back off on any congestion; ignore increases under 5% so encoders aren't poked
         // every second near the cap.
-        let changed = next < self.target || next as f64 - self.target as f64 >= self.target as f64 * 0.05;
+        let changed =
+            next < self.target || next as f64 - self.target as f64 >= self.target as f64 * 0.05;
         if changed {
             self.target = next;
             Some(next)
@@ -82,7 +94,11 @@ mod tests {
 
     const MAX: u32 = 30_000_000;
     fn clean() -> Report {
-        Report { dropped: 0, frames: 60, latency_ms: Some(20.0) }
+        Report {
+            dropped: 0,
+            frames: 60,
+            latency_ms: Some(20.0),
+        }
     }
 
     #[test]
@@ -90,10 +106,22 @@ mod tests {
         let mut rc = RateControl::new(MAX);
         let t0 = Instant::now();
         assert_eq!(rc.report(clean(), t0), None, "already at max");
-        assert_eq!(rc.report(Report { dropped: 3, ..clean() }, t0), Some(21_000_000));
+        assert_eq!(
+            rc.report(
+                Report {
+                    dropped: 3,
+                    ..clean()
+                },
+                t0
+            ),
+            Some(21_000_000)
+        );
         // Held right after a decrease.
         assert_eq!(rc.report(clean(), t0 + Duration::from_secs(1)), None);
-        assert_eq!(rc.report(clean(), t0 + Duration::from_secs(2)), Some(24_000_000));
+        assert_eq!(
+            rc.report(clean(), t0 + Duration::from_secs(2)),
+            Some(24_000_000)
+        );
         for i in 3..10 {
             rc.report(clean(), t0 + Duration::from_secs(i));
         }
@@ -107,8 +135,14 @@ mod tests {
         for i in 0..5 {
             rc.report(clean(), t0 + Duration::from_secs(i));
         }
-        let slow = Report { latency_ms: Some(90.0), ..clean() };
-        assert_eq!(rc.report(slow, t0 + Duration::from_secs(6)), Some(21_000_000));
+        let slow = Report {
+            latency_ms: Some(90.0),
+            ..clean()
+        };
+        assert_eq!(
+            rc.report(slow, t0 + Duration::from_secs(6)),
+            Some(21_000_000)
+        );
     }
 
     #[test]
@@ -116,7 +150,13 @@ mod tests {
         let mut rc = RateControl::new(MAX);
         let t0 = Instant::now();
         for _ in 0..50 {
-            rc.report(Report { dropped: 1, ..clean() }, t0);
+            rc.report(
+                Report {
+                    dropped: 1,
+                    ..clean()
+                },
+                t0,
+            );
         }
         assert_eq!(rc.target(), (MAX as f64 * MIN_FRACTION) as u32);
     }

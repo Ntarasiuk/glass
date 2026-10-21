@@ -38,8 +38,18 @@ pub fn log_dir() -> std::path::PathBuf {
 /// which releases the inhibitor.
 pub fn keep_awake() -> Option<std::process::Child> {
     Command::new("systemd-inhibit")
-        .args(["--what=idle:sleep", "--who=Glass", "--why=Remote desktop host", "--mode=block"])
-        .args(["tail", &format!("--pid={}", std::process::id()), "-f", "/dev/null"])
+        .args([
+            "--what=idle:sleep",
+            "--who=Glass",
+            "--why=Remote desktop host",
+            "--mode=block",
+        ])
+        .args([
+            "tail",
+            &format!("--pid={}", std::process::id()),
+            "-f",
+            "/dev/null",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -49,7 +59,10 @@ pub fn keep_awake() -> Option<std::process::Child> {
 
 /// Turns monitors back on if the compositor powered them off (Hyprland).
 pub fn wake_displays() {
-    let _ = Command::new("hyprctl").args(["dispatch", "dpms", "on"]).stdout(Stdio::null()).status();
+    let _ = Command::new("hyprctl")
+        .args(["dispatch", "dpms", "on"])
+        .stdout(Stdio::null())
+        .status();
 }
 
 pub fn has_command(name: &str) -> bool {

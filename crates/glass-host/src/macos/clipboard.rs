@@ -18,7 +18,9 @@ pub fn set_text(text: &str) {
 
 fn snapshot() -> (isize, Option<String>) {
     let pb = NSPasteboard::generalPasteboard();
-    let text = pb.stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string());
+    let text = pb
+        .stringForType(unsafe { NSPasteboardTypeString })
+        .map(|s| s.to_string());
     (pb.changeCount(), text)
 }
 

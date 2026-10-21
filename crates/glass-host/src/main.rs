@@ -1,3 +1,4 @@
+mod access;
 mod control;
 mod files;
 mod media;
@@ -6,8 +7,8 @@ mod server;
 mod setup;
 mod soft_encode;
 mod status;
-mod testmode;
 mod tailscale;
+mod testmode;
 mod update;
 
 #[cfg(target_os = "macos")]
@@ -33,7 +34,11 @@ use tracing_subscriber::fmt::writer::MakeWriterExt;
 use crate::media::VideoSource;
 
 #[derive(Parser)]
-#[command(name = "glass", about = "Low-latency remote desktop for your Mac", version)]
+#[command(
+    name = "glass",
+    about = "Low-latency remote desktop for your Mac",
+    version
+)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -106,6 +111,18 @@ enum Command {
     Uninstall,
     /// Install the latest release (and restart the service onto it).
     Update,
+    /// Make a one-time magic link that lets a device in without the token.
+    Link {
+        /// How long the access lasts once the link is opened (e.g. 30m, 24h, 7d).
+        #[arg(long = "for", value_name = "DURATION", default_value = "24h", value_parser = access::parse_duration)]
+        grant: std::time::Duration,
+        /// Cut off every device let in with a magic link, and void unused links.
+        #[arg(long)]
+        revoke: bool,
+        /// Print JSON ({url, link_expires, grant_secs, summary}) for scripts and agents.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show the access token for devices outside your tailnet.
     Token {
         /// Replace it with a new one; devices using the old token must sign in again.
@@ -117,6 +134,40 @@ enum Command {
     },
 }
 
+/// `glass link`: a one-time link (and QR code) to the running host.
+fn print_link(grant: std::time::Duration, json: bool) -> Result<()> {
+    let base = status::read()
+        .filter(|s| s.is_fresh())
+        .and_then(|s| s.url)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Glass isn't running here. Start it (glass setup), then try again.")
+        })?;
+    let link = access::create_link(&access::file_for(&default_token_file()), grant)?;
+    let url = format!(
+        "{}#l={}",
+        base.trim_end_matches('/').to_owned() + "/",
+        link.code
+    );
+    if json {
+        let out = serde_json::json!({
+            "url": url,
+            "link_expires": link.expires,
+            "grant_secs": link.grant.as_secs(),
+            "summary": format!("Works once, within {}. Gives that device {} of access.", access::describe(access::LINK_TTL), access::describe(link.grant)),
+        });
+        println!("{out}");
+        return Ok(());
+    }
+    println!("{}", setup::qr(&url));
+    println!("{url}\n");
+    println!(
+        "Works once, within {}. Gives that device {} of access.\nCut off everyone let in this way: glass link --revoke",
+        access::describe(access::LINK_TTL),
+        access::describe(link.grant),
+    );
+    Ok(())
+}
+
 /// `glass token --set`: prompts on a terminal, otherwise reads one line from stdin.
 fn set_token(path: &std::path::Path) -> Result<()> {
     use std::io::IsTerminal;
@@ -125,7 +176,9 @@ fn set_token(path: &std::path::Path) -> Result<()> {
             .mask('•')
             .validate(|t: &String| control::validate_token(t).map_err(|e| e.to_string()))
             .interact()?;
-        let again = cliclack::password("Again, to confirm").mask('•').interact()?;
+        let again = cliclack::password("Again, to confirm")
+            .mask('•')
+            .interact()?;
         anyhow::ensure!(first == again, "the tokens don't match; nothing changed");
         first
     } else {
@@ -134,7 +187,9 @@ fn set_token(path: &std::path::Path) -> Result<()> {
         line.trim().to_string()
     };
     control::save_token(path, &token)?;
-    eprintln!("Token saved. The running host uses it for new connections right away; devices using the old token must sign in again.");
+    eprintln!(
+        "Token saved. The running host uses it for new connections right away; devices using the old token must sign in again."
+    );
     Ok(())
 }
 
@@ -150,14 +205,30 @@ async fn main() -> Result<()> {
         Some(Command::Status { json: false }) => print_status(),
         Some(Command::Status { json: true }) => {
             let status = status::read().filter(|s| s.is_fresh());
-            println!("{}", serde_json::json!({ "running": status.is_some(), "status": status }));
+            println!(
+                "{}",
+                serde_json::json!({ "running": status.is_some(), "status": status })
+            );
             Ok(())
         }
         Some(Command::Feedback { message }) => send_feedback(&message.join(" ")),
         Some(Command::Update) => update::run_cli(),
-        Some(Command::Token { set: true, .. }) => {
-            set_token(&default_token_file())
+        Some(Command::Link {
+            revoke: true, json, ..
+        }) => {
+            let n = access::revoke_all(&access::file_for(&default_token_file()))?;
+            if *json {
+                println!("{}", serde_json::json!({ "revoked": n }));
+            } else {
+                println!(
+                    "Revoked. {n} device{} signed in with a magic link lost access; unused links no longer work.",
+                    if n == 1 { "" } else { "s" }
+                );
+            }
+            Ok(())
         }
+        Some(Command::Link { grant, json, .. }) => print_link(*grant, *json),
+        Some(Command::Token { set: true, .. }) => set_token(&default_token_file()),
         Some(Command::Token { reset, .. }) => {
             let path = default_token_file();
             if *reset {
@@ -166,13 +237,17 @@ async fn main() -> Result<()> {
             let token = control::load_or_create_token(&path)?;
             println!("{token}");
             if *reset {
-                eprintln!("New token saved. The running host uses it for new connections right away.");
+                eprintln!(
+                    "New token saved. The running host uses it for new connections right away."
+                );
             }
             Ok(())
         }
         Some(Command::Uninstall) => {
             agent::uninstall()?;
-            println!("Glass service removed. Delete ~/.glass and ~/.config/glass to remove everything.");
+            println!(
+                "Glass service removed. Delete ~/.glass and ~/.config/glass to remove everything."
+            );
             Ok(())
         }
     }
@@ -192,14 +267,21 @@ fn print_status() -> Result<()> {
         }
         None => println!(
             "Glass isn't running.{}",
-            if agent::is_installed() { agent::LOG_HINT } else { " Run `glass setup`." }
+            if agent::is_installed() {
+                agent::LOG_HINT
+            } else {
+                " Run `glass setup`."
+            }
         ),
     }
     Ok(())
 }
 
 fn send_feedback(message: &str) -> Result<()> {
-    anyhow::ensure!(!message.trim().is_empty(), "usage: glass feedback \"what happened or what you'd like\"");
+    anyhow::ensure!(
+        !message.trim().is_empty(),
+        "usage: glass feedback \"what happened or what you'd like\""
+    );
     let body = serde_json::json!({
         "message": message,
         "source": "cli",
@@ -207,7 +289,14 @@ fn send_feedback(message: &str) -> Result<()> {
         "os": platform::os_version(),
     });
     let status = std::process::Command::new("curl")
-        .args(["-fsS", "-X", "POST", "-H", "content-type: application/json", "--data-binary"])
+        .args([
+            "-fsS",
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "--data-binary",
+        ])
         .arg(body.to_string())
         .arg(FEEDBACK_URL)
         .stdout(std::process::Stdio::null())
@@ -268,15 +357,29 @@ async fn run_host(args: Args) -> Result<()> {
         _,
         _,
     ) = if args.test {
-        let video = Arc::new(testmode::TestVideo::new(frames.clone(), args.fps as u32, (args.mbps * 1_000_000) as u32));
+        let video = Arc::new(testmode::TestVideo::new(
+            frames.clone(),
+            args.fps as u32,
+            (args.mbps * 1_000_000) as u32,
+        ));
         video.set_layout(media::Layout::Single(None))?;
         testmode::start_tone(audio.clone());
-        (video, Box::new(testmode::FakeInput), Arc::new(testmode::FakeClipboard), None, None)
+        (
+            video,
+            Box::new(testmode::FakeInput),
+            Arc::new(testmode::FakeClipboard),
+            None,
+            None,
+        )
     } else {
         // Keep displays (and the system) awake for as long as the host runs.
         let awake = platform::keep_awake();
         let video = Arc::new(video::Video::new(
-            video::VideoConfig { fps: args.fps, bitrate: args.mbps * 1_000_000, scale: args.scale },
+            video::VideoConfig {
+                fps: args.fps,
+                bitrate: args.mbps * 1_000_000,
+                scale: args.scale,
+            },
             frames.clone(),
             audio.clone(),
         ));
@@ -310,14 +413,20 @@ async fn run_host(args: Args) -> Result<()> {
                 None
             }
         };
-        (video, Box::new(input::Injector::new(display.id)), Arc::new(clipboard::SystemClipboard), tailnet_owner, awake)
+        (
+            video,
+            Box::new(input::Injector::new(display.id)),
+            Arc::new(clipboard::SystemClipboard),
+            tailnet_owner,
+            awake,
+        )
     };
     status::set_capturing(true);
     update::watch();
 
-    let test_routes = args.test.then(|| {
-        testmode::routes(events.clone(), files::downloads_dir())
-    });
+    let test_routes = args
+        .test
+        .then(|| testmode::routes(events.clone(), files::downloads_dir()));
     let shared = Arc::new(server::Shared {
         frames,
         injector: Mutex::new(injector),
@@ -345,12 +454,16 @@ async fn run_host(args: Args) -> Result<()> {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
 }
 
 /// ~/.config/glass, or $GLASS_CONFIG_DIR (tests use it to stay out of the real config).
 pub fn config_dir() -> PathBuf {
-    std::env::var_os("GLASS_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".config/glass"))
+    std::env::var_os("GLASS_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".config/glass"))
 }
 
 pub fn default_token_file() -> PathBuf {
@@ -368,10 +481,20 @@ impl Paths {
     fn resolve(web_dir: Option<PathBuf>, log_dir: Option<PathBuf>) -> Self {
         let installed = std::env::current_exe()
             .ok()
-            .and_then(|exe| Some(exe.canonicalize().ok()?.parent()?.parent()?.join("share/glass/web")))
+            .and_then(|exe| {
+                Some(
+                    exe.canonicalize()
+                        .ok()?
+                        .parent()?
+                        .parent()?
+                        .join("share/glass/web"),
+                )
+            })
             .filter(|dir| dir.is_dir());
         let source = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
-        let web_dir = web_dir.or(installed.clone()).unwrap_or_else(|| source.join("web"));
+        let web_dir = web_dir
+            .or(installed.clone())
+            .unwrap_or_else(|| source.join("web"));
         let log_dir = log_dir.unwrap_or_else(|| match installed {
             Some(_) => platform::log_dir(),
             None => source.join("logs"),

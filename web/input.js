@@ -278,7 +278,11 @@ export function attachInput({
     if (shift) send(Input.KEY_UP, { keycode: KVK_SHIFT });
   }
 
+  // Typing in Glass's own fields (token prompt, share link) stays local.
+  const localField = (el) => el !== keySink && el?.matches?.('input, textarea');
+
   window.addEventListener('keydown', (e) => {
+    if (localField(e.target)) return;
     if (e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey && ['KeyF', 'KeyH'].includes(e.code)) {
       e.preventDefault();
       onLocalShortcut(e.code);
@@ -326,6 +330,7 @@ export function attachInput({
   });
 
   window.addEventListener('keyup', (e) => {
+    if (localField(e.target)) return;
     const code = codeOf(e);
     const keycode = MAC_KEYCODES[code];
     if (keycode === undefined) return;
@@ -347,6 +352,7 @@ export function attachInput({
   });
 
   document.addEventListener('paste', (e) => {
+    if (localField(e.target)) return;
     e.preventDefault();
     pasteHandled = true;
     const text = e.clipboardData?.getData('text/plain');

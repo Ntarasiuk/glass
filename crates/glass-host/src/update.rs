@@ -48,7 +48,11 @@ pub fn watch() {
 
 async fn fetch_latest() -> Option<String> {
     let url = format!("{}/version.json", base_url());
-    let out = tokio::process::Command::new("curl").args(["-fsS", "--max-time", "10", &url]).output().await.ok()?;
+    let out = tokio::process::Command::new("curl")
+        .args(["-fsS", "--max-time", "10", &url])
+        .output()
+        .await
+        .ok()?;
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     json["version"].as_str().map(str::to_owned)
 }
@@ -84,7 +88,11 @@ pub fn run_cli() -> anyhow::Result<()> {
 
 /// Semver-ish comparison of dotted numeric versions ("0.10.1" > "0.9.3").
 pub fn newer(a: &str, b: &str) -> bool {
-    let parse = |v: &str| v.split(['.', '-']).map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let parse = |v: &str| {
+        v.split(['.', '-'])
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
     parse(a) > parse(b)
 }
 

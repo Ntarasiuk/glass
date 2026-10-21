@@ -10,7 +10,9 @@ pub const LABEL: &str = "dev.glassdesk.host";
 pub const LOG_HINT: &str = " Check ~/Library/Logs/Glass/agent.log.";
 
 pub fn plist_path() -> PathBuf {
-    crate::home().join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
+    crate::home()
+        .join("Library/LaunchAgents")
+        .join(format!("{LABEL}.plist"))
 }
 
 fn domain() -> String {
@@ -57,7 +59,11 @@ pub fn install(start_at_login: bool) -> Result<()> {
     std::fs::write(plist_path(), plist)?;
 
     stop();
-    let status = Command::new("launchctl").arg("bootstrap").arg(domain()).arg(plist_path()).status()?;
+    let status = Command::new("launchctl")
+        .arg("bootstrap")
+        .arg(domain())
+        .arg(plist_path())
+        .status()?;
     anyhow::ensure!(status.success(), "launchctl bootstrap failed");
     restart()
 }

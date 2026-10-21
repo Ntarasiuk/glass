@@ -11,8 +11,8 @@ use anyhow::{Result, bail};
 use block2::RcBlock;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_media::{
-    CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
-    kCMTimeInvalid, kCMVideoCodecType_H264,
+    CMFormatDescription, CMSampleBuffer, CMTime,
+    CMVideoFormatDescriptionGetH264ParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_H264,
 };
 use objc2_core_video::CVImageBuffer;
 use objc2_video_toolbox::{
@@ -86,23 +86,48 @@ impl Encoder {
         };
         unsafe {
             set(kVTCompressionPropertyKey_RealTime, yes);
-            set(kVTCompressionPropertyKey_AllowFrameReordering, CFBoolean::new(false));
-            set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel);
-            set(kVTCompressionPropertyKey_AverageBitRate, &CFNumber::new_i32(bitrate));
-            set(kVTCompressionPropertyKey_ExpectedFrameRate, &CFNumber::new_i32(fps));
+            set(
+                kVTCompressionPropertyKey_AllowFrameReordering,
+                CFBoolean::new(false),
+            );
+            set(
+                kVTCompressionPropertyKey_ProfileLevel,
+                kVTProfileLevel_H264_High_AutoLevel,
+            );
+            set(
+                kVTCompressionPropertyKey_AverageBitRate,
+                &CFNumber::new_i32(bitrate),
+            );
+            set(
+                kVTCompressionPropertyKey_ExpectedFrameRate,
+                &CFNumber::new_i32(fps),
+            );
             // Keyframes on demand (new client or reported loss), plus one before H.264's
             // frame_num wraps at 1024: Safari's hardware decoder fails on the wrap.
-            set(kVTCompressionPropertyKey_MaxKeyFrameInterval, &CFNumber::new_i32(MAX_GOP_FRAMES));
+            set(
+                kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                &CFNumber::new_i32(MAX_GOP_FRAMES),
+            );
             session.prepare_to_encode_frames();
         }
 
-        Ok(Self { session, force_keyframe, on_frame })
+        Ok(Self {
+            session,
+            force_keyframe,
+            on_frame,
+        })
     }
 
     /// Changes the target bitrate on the fly; low-latency rate control adapts within frames.
     pub fn set_bitrate(&self, bps: u32) {
         let value = CFNumber::new_i32(bps as i32);
-        let status = unsafe { VTSessionSetProperty(&self.session, kVTCompressionPropertyKey_AverageBitRate, Some(&value)) };
+        let status = unsafe {
+            VTSessionSetProperty(
+                &self.session,
+                kVTCompressionPropertyKey_AverageBitRate,
+                Some(&value),
+            )
+        };
         if status != 0 {
             tracing::warn!("set bitrate {bps}: {status}");
         }
@@ -121,7 +146,10 @@ impl Encoder {
                     return;
                 }
                 if let Some(frame) = unsafe { annex_b(&*sample) } {
-                    on_frame(EncodedFrame { capture_us, ..frame });
+                    on_frame(EncodedFrame {
+                        capture_us,
+                        ..frame
+                    });
                 }
             },
         );
@@ -187,7 +215,12 @@ unsafe fn annex_b(sample: &CMSampleBuffer) -> Option<EncodedFrame> {
         out.splice(0..0, params);
     }
 
-    Some(EncodedFrame { stream: 0, data: out, keyframe, capture_us: 0 })
+    Some(EncodedFrame {
+        stream: 0,
+        data: out,
+        keyframe,
+        capture_us: 0,
+    })
 }
 
 /// Index 0 is the SPS, 1 the PPS.

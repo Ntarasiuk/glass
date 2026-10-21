@@ -1,6 +1,6 @@
 ---
 name: glass
-description: Install, set up, check or troubleshoot Glass (glassdesk.dev), a low-latency browser remote desktop, on any Mac or Linux machine in the user's Tailscale tailnet, over SSH. Use when the user wants to control another computer from an iPad or browser, add a machine to Glass, set Glass up remotely, or find out why Glass isn't working on a machine.
+description: Install, set up, check or troubleshoot Glass (glassdesk.dev), a low-latency browser remote desktop, on any Mac or Linux machine in the user's Tailscale tailnet, over SSH; and hand out one-time Glass access links. Use when the user wants to control another computer from an iPad or browser, add a machine to Glass, set Glass up remotely, find out why Glass isn't working, or asks for a Glass link / access link / magic link (for themselves or someone else), or to revoke one.
 ---
 
 # Glass: set up any machine on the tailnet
@@ -105,6 +105,18 @@ curl -fsS https://<host>:8080/config.json
 ```
 
 Finish by telling the user the URL (`https://<host>:8080/`). It also appears in the **Machines** menu of any Glass tab, and devices on their tailnet connect without a token.
+
+## Get someone a link
+
+When the user asks for a link to a machine (for a device that isn't on their tailnet, or for someone else), make a one-time magic link on that machine. Run it locally if the machine is this one, otherwise over SSH as in step 2:
+
+```sh
+glass link --json            # or ~/.glass/bin/glass; add --for 1h / 7d to change how long access lasts (default 24h)
+```
+
+It prints `{"url": …, "link_expires": …, "grant_secs": …, "summary": …}`. Give the user the `url` and the `summary` ("Works once, within 15 minutes. Gives that device 24 hours of access."). The link is a credential: send it only to the user, in this conversation, never anywhere else, and don't store it. If the command says Glass isn't running, check `glass status` (section 6).
+
+To cut off everyone who was let in with a link: `glass link --revoke --json`. The user's own token and tailnet devices are unaffected.
 
 ## Troubleshooting
 

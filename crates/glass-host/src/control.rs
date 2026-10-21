@@ -21,13 +21,25 @@ const MAX_MESSAGE: usize = 16 << 20;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
 pub enum ClientMsg {
-    Hello { token: Option<String> },
+    Hello {
+        token: Option<String>,
+        /// A magic link's code, from a `#l=` URL.
+        #[serde(default)]
+        link: Option<String>,
+        /// A guest pass a link was traded for earlier.
+        #[serde(default)]
+        pass: Option<String>,
+    },
     /// Stream just this display.
     SelectDisplay { id: u32 },
     /// Stream every display side by side.
     ShowAll,
     /// Client clipboard text; with `paste`, the host also presses Cmd+V after setting it.
-    Clipboard { text: String, #[serde(default)] paste: bool },
+    Clipboard {
+        text: String,
+        #[serde(default)]
+        paste: bool,
+    },
     /// Opens a file chooser on the Mac; chosen files are streamed back.
     PickFiles,
     /// Start or stop sending system audio to this session.
@@ -44,14 +56,40 @@ pub enum ClientMsg {
 #[serde(tag = "t", rename_all = "camelCase")]
 pub enum ServerMsg {
     /// `streams[i]` is the display carried by video stream `i`.
-    Welcome { displays: Vec<DisplayInfo>, streams: Vec<DisplayInfo>, audio: bool, host_os: &'static str },
-    Layout { streams: Vec<DisplayInfo> },
+    /// `guest`: signed in with a magic link, so it can't update the host.
+    Welcome {
+        displays: Vec<DisplayInfo>,
+        streams: Vec<DisplayInfo>,
+        audio: bool,
+        host_os: &'static str,
+        guest: bool,
+    },
+    /// A guest pass for this device, traded for the link it opened (unix-seconds expiry).
+    Pass {
+        pass: String,
+        expires: u64,
+    },
+    Layout {
+        streams: Vec<DisplayInfo>,
+    },
     /// Current adaptive target bitrate per stream.
-    Bitrate { bps: u32 },
-    UpdateAvailable { current: &'static str, version: String },
-    Clipboard { text: String },
-    FileSaved { name: String, path: String },
-    Error { msg: String },
+    Bitrate {
+        bps: u32,
+    },
+    UpdateAvailable {
+        current: &'static str,
+        version: String,
+    },
+    Clipboard {
+        text: String,
+    },
+    FileSaved {
+        name: String,
+        path: String,
+    },
+    Error {
+        msg: String,
+    },
 }
 
 /// Header that follows the `STREAM_FILE` tag in either direction.
@@ -79,7 +117,10 @@ pub async fn read_frame(stream: &mut RecvStream) -> Result<Option<Vec<u8>>> {
         bail!("control message too large: {len}");
     }
     let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await.context("truncated control message")?;
+    stream
+        .read_exact(&mut buf)
+        .await
+        .context("truncated control message")?;
     Ok(Some(buf))
 }
 
@@ -120,7 +161,9 @@ pub fn validate_token(token: &str) -> Result<()> {
     anyhow::ensure!(token.len() >= 12, "use at least 12 characters");
     anyhow::ensure!(token.len() <= 128, "use at most 128 characters");
     anyhow::ensure!(
-        token.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)),
+        token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)),
         "use only letters, digits and - . _ ~"
     );
     Ok(())
@@ -157,13 +200,24 @@ fn getrandom(buf: &mut [u8]) -> Result<()> {
 /// Constant-time comparison so the token can't be guessed byte by byte from timing.
 pub fn token_matches(given: &str, expected: &str) -> bool {
     given.len() == expected.len()
-        && given.bytes().zip(expected.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+        && given
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
 }
 
 /// Picks a non-existing path in `dir` for `name`, stripping any path components.
 pub fn unique_path(dir: &Path, name: &str) -> std::path::PathBuf {
-    let name = Path::new(name).file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let name = if name.starts_with('.') || name.is_empty() { "file" } else { name };
+    let name = Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let name = if name.starts_with('.') || name.is_empty() {
+        "file"
+    } else {
+        name
+    };
     let candidate = dir.join(name);
     if !candidate.exists() {
         return candidate;
@@ -200,10 +254,17 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         assert!(save_token(&path, "bad").is_err());
-        assert_eq!(load_or_create_token(&path).unwrap(), "my-chosen-token-123", "a rejected token changes nothing");
+        assert_eq!(
+            load_or_create_token(&path).unwrap(),
+            "my-chosen-token-123",
+            "a rejected token changes nothing"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

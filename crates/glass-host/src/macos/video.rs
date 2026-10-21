@@ -10,10 +10,10 @@ use tokio::sync::broadcast;
 use tracing::info;
 
 use super::audio::{AudioPackets, Packetizer};
-pub use crate::media::Layout;
-use crate::media::VideoSource;
 use super::capture::{self, Capture, Display, DisplayInfo};
 use super::encode::{EncodedFrame, Encoder};
+pub use crate::media::Layout;
+use crate::media::VideoSource;
 
 const MAX_MACROBLOCKS: f64 = 36864.0;
 
@@ -49,12 +49,23 @@ impl Video {
     ) -> Self {
         let audio = Arc::new(Mutex::new(Packetizer::new(audio)));
         let bitrate = std::sync::atomic::AtomicU32::new(config.bitrate as u32);
-        Self { config, frames, audio, streams: Mutex::new(Vec::new()), bitrate }
+        Self {
+            config,
+            frames,
+            audio,
+            streams: Mutex::new(Vec::new()),
+            bitrate,
+        }
     }
 
     /// The displays being streamed; index = stream number.
     pub fn streams(&self) -> Vec<DisplayInfo> {
-        self.streams.lock().unwrap().iter().map(|s| s.display.clone()).collect()
+        self.streams
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.display.clone())
+            .collect()
     }
 
     /// Requests a keyframe on one stream, or all of them.
@@ -73,13 +84,23 @@ impl Video {
         let displays = capture::list_displays()?;
         let chosen: Vec<&Display> = match layout {
             Layout::Single(Some(id)) => {
-                vec![displays.iter().find(|d| d.info.id == id).context("unknown display")?]
+                vec![
+                    displays
+                        .iter()
+                        .find(|d| d.info.id == id)
+                        .context("unknown display")?,
+                ]
             }
             Layout::Single(None) => vec![&displays[0]],
             Layout::All => {
                 // Match System Settings › Displays › Arrange: left to right, then top to bottom.
                 let mut all: Vec<&Display> = displays.iter().take(MAX_STREAMS).collect();
-                all.sort_by(|a, b| a.info.x.total_cmp(&b.info.x).then(a.info.y.total_cmp(&b.info.y)));
+                all.sort_by(|a, b| {
+                    a.info
+                        .x
+                        .total_cmp(&b.info.x)
+                        .then(a.info.y.total_cmp(&b.info.y))
+                });
                 all
             }
         };
@@ -94,11 +115,19 @@ impl Video {
         Ok(streams.iter().map(|s| s.display.clone()).collect())
     }
 
-    fn start(&self, index: u8, display: &Display, audio: Option<Arc<Mutex<Packetizer>>>) -> Result<Stream> {
+    fn start(
+        &self,
+        index: u8,
+        display: &Display,
+        audio: Option<Arc<Mutex<Packetizer>>>,
+    ) -> Result<Stream> {
         let (w, h) = (display.info.width as f64, display.info.height as f64);
         // H.264 level 5.2 caps a frame at 36864 macroblocks (e.g. 4096x2304), so a 5K
         // display is downscaled until HEVC lands.
-        let scale = self.config.scale.min((MAX_MACROBLOCKS * 256.0 / (w * h)).sqrt());
+        let scale = self
+            .config
+            .scale
+            .min((MAX_MACROBLOCKS * 256.0 / (w * h)).sqrt());
         let width = ((w * scale) as usize) & !1;
         let height = ((h * scale) as usize) & !1;
 
@@ -111,19 +140,40 @@ impl Video {
             self.config.bitrate,
             keyframe.clone(),
             Arc::new(move |frame| {
-                let _ = frames.send(Arc::new(EncodedFrame { stream: index, ..frame }));
+                let _ = frames.send(Arc::new(EncodedFrame {
+                    stream: index,
+                    ..frame
+                }));
             }),
         )?;
         let encoder = Arc::new(encoder);
         encoder.set_bitrate(self.bitrate.load(Ordering::Relaxed));
-        let capture = capture::start(&display.sc, width, height, self.config.fps, encoder.clone(), audio)?;
+        let capture = capture::start(
+            &display.sc,
+            width,
+            height,
+            self.config.fps,
+            encoder.clone(),
+            audio,
+        )?;
         let id = display.info.id;
-        info!("stream {index}: display {id} at {width}x{height} @ {}fps", self.config.fps);
-        Ok(Stream { capture, encoder, display: display.info.clone(), keyframe })
+        info!(
+            "stream {index}: display {id} at {width}x{height} @ {}fps",
+            self.config.fps
+        );
+        Ok(Stream {
+            capture,
+            encoder,
+            display: display.info.clone(),
+            keyframe,
+        })
     }
 
     pub fn displays(&self) -> Result<Vec<DisplayInfo>> {
-        Ok(capture::list_displays()?.into_iter().map(|d| d.info).collect())
+        Ok(capture::list_displays()?
+            .into_iter()
+            .map(|d| d.info)
+            .collect())
     }
 }
 

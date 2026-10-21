@@ -52,8 +52,13 @@ fn input_access_step() -> Result<()> {
              logged-in session access ({UDEV_RULE}). This needs your password once."
         ),
     )?;
-    if !confirm("Install the rule now?").initial_value(true).interact()? {
-        log::warning("Skipped: viewing works, but remote mouse and keyboard won't until this is set up.")?;
+    if !confirm("Install the rule now?")
+        .initial_value(true)
+        .interact()?
+    {
+        log::warning(
+            "Skipped: viewing works, but remote mouse and keyboard won't until this is set up.",
+        )?;
         return Ok(());
     }
     let script = format!(
@@ -61,24 +66,38 @@ fn input_access_step() -> Result<()> {
          echo uinput > {MODULES_LOAD} && modprobe uinput && \
          udevadm control --reload-rules && udevadm trigger --name-match=uinput"
     );
-    let ok = Command::new("sudo").args(["sh", "-c", &script]).status().is_ok_and(|s| s.success());
+    let ok = Command::new("sudo")
+        .args(["sh", "-c", &script])
+        .status()
+        .is_ok_and(|s| s.success());
     std::thread::sleep(Duration::from_millis(500));
     if ok && input::has_accessibility() {
         log::success("Input access granted")?;
     } else {
-        log::warning("Still no access to /dev/uinput. Log out and back in, then run `glass setup` again.")?;
+        log::warning(
+            "Still no access to /dev/uinput. Log out and back in, then run `glass setup` again.",
+        )?;
     }
     Ok(())
 }
 
 fn sudo_n(script: &str) -> bool {
-    Command::new("sudo").args(["-n", "sh", "-c", script]).status().is_ok_and(|s| s.success())
+    Command::new("sudo")
+        .args(["-n", "sh", "-c", script])
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 fn missing_dependencies() -> Vec<&'static str> {
-    let portal = std::path::Path::new("/usr/share/xdg-desktop-portal/portals").read_dir().is_ok_and(|mut d| {
-        d.any(|e| e.is_ok_and(|e| std::fs::read_to_string(e.path()).is_ok_and(|s| s.contains("ScreenCast"))))
-    });
+    let portal = std::path::Path::new("/usr/share/xdg-desktop-portal/portals")
+        .read_dir()
+        .is_ok_and(|mut d| {
+            d.any(|e| {
+                e.is_ok_and(|e| {
+                    std::fs::read_to_string(e.path()).is_ok_and(|s| s.contains("ScreenCast"))
+                })
+            })
+        });
     [
         (!has_command("pipewire")).then_some("pipewire"),
         (!portal).then_some("xdg-desktop-portal-hyprland"),
@@ -93,7 +112,12 @@ fn missing_dependencies() -> Vec<&'static str> {
 pub fn prepare_unattended() -> Vec<crate::setup::Need> {
     let mut needs = Vec::new();
     let missing = missing_dependencies();
-    if !missing.is_empty() && !sudo_n(&format!("pacman -S --needed --noconfirm {}", missing.join(" "))) {
+    if !missing.is_empty()
+        && !sudo_n(&format!(
+            "pacman -S --needed --noconfirm {}",
+            missing.join(" ")
+        ))
+    {
         needs.push(crate::setup::Need {
             step: "dependencies",
             action: format!("Install: sudo pacman -S --needed {}", missing.join(" ")),
@@ -134,7 +158,8 @@ pub fn permission_needs(status: &Status) -> Vec<crate::setup::Need> {
     if !status.accessibility {
         needs.push(crate::setup::Need {
             step: "input-access",
-            action: "Log out and back in so the uinput rule applies, or run `glass setup` there".into(),
+            action: "Log out and back in so the uinput rule applies, or run `glass setup` there"
+                .into(),
             on_screen: false,
         });
     }
@@ -162,7 +187,9 @@ pub fn permissions(status: Status) -> Result<()> {
         sp.stop("Screen sharing approved");
     }
     if !status::read().is_some_and(|s| s.accessibility) {
-        log::warning("The service can't open /dev/uinput yet, so remote input is off. Re-run `glass setup` after logging out and in.")?;
+        log::warning(
+            "The service can't open /dev/uinput yet, so remote input is off. Re-run `glass setup` after logging out and in.",
+        )?;
     }
     Ok(())
 }

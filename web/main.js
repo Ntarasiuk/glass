@@ -22,6 +22,7 @@ const SHORTCUTS = [
 ];
 
 const TOKEN_KEY = 'glass.token';
+const PASS_KEY = 'glass.pass'; // guest pass from a magic link: { pass, expires }
 const SWAP_KEY = 'glass.swapCmdOption';
 const CTRL_AS_CMD_KEY = 'glass.ctrlAsCmd';
 const DECODER_STEP_KEY = 'glass.decoderStep';
@@ -47,12 +48,20 @@ function storage(fn) {
 }
 
 // The host prints a link with `#t=<token>`; remember it and drop it from the URL.
-const hashToken = new URLSearchParams(location.hash.slice(1)).get('t');
-if (hashToken) {
-  storage((s) => s.setItem(TOKEN_KEY, hashToken));
-  history.replaceState(null, '', location.pathname + location.search);
-}
+// A magic link carries `#l=<code>` instead: single use, so it's never stored.
+const hashParams = new URLSearchParams(location.hash.slice(1));
+const hashToken = hashParams.get('t');
+const link = hashParams.get('l') ?? undefined;
+if (hashToken) storage((s) => s.setItem(TOKEN_KEY, hashToken));
+if (hashToken || link) history.replaceState(null, '', location.pathname + location.search);
 const token = hashToken ?? storage((s) => s.getItem(TOKEN_KEY));
+const savedPass = (() => {
+  try {
+    const p = JSON.parse(storage((s) => s.getItem(PASS_KEY)) ?? 'null');
+    return p && p.expires * 1000 > Date.now() ? p.pass : undefined;
+  } catch { return undefined; }
+})();
+let guest = false; // signed in with a magic link: no switching machines, no updating the host
 
 const config = await fetch('config.json').then((r) => r.json());
 
@@ -189,6 +198,8 @@ worker.postMessage({
   url: wtUrl(currentHost),
   certHash: config.certHash,
   token,
+  link,
+  pass: savedPass,
   decoderStep: Number(storage((s) => s.getItem(DECODER_STEP_KEY)) ?? 0),
 });
 armMachineTimeout();
@@ -258,6 +269,7 @@ worker.onmessage = ({ data }) => {
       break;
     case 'unauthorized':
       storage((s) => s.removeItem(TOKEN_KEY));
+      storage((s) => s.removeItem(PASS_KEY));
       log('warn', 'token rejected');
       hideStatus();
       ui.showAuth({ rejected: tokenTried });
@@ -290,11 +302,18 @@ function onControl(msg) {
       ui.setAudioAvailable(msg.audio);
       input.setHostOs(msg.host_os ?? 'macos');
       ui.setHostOs(msg.host_os ?? 'macos');
+      guest = Boolean(msg.guest);
+      ui.setGuest(guest);
       onLayout(msg.streams);
       log('info', 'welcome', { displays: displays.length, streams: msg.streams.map((d) => d.id), audio: msg.audio });
       break;
     case 'layout':
       onLayout(msg.streams);
+      break;
+    case 'pass':
+      storage((s) => s.setItem(PASS_KEY, JSON.stringify({ pass: msg.pass, expires: msg.expires })));
+      ui.toast({ text: `You're in. This device has access until ${formatExpiry(msg.expires)}.`, icon: 'link', timeout: 6000 });
+      log('info', 'signed in with a magic link', { expires: msg.expires });
       break;
     case 'bitrate':
       targetMbps = msg.bps / 1e6;
@@ -413,8 +432,19 @@ function arrangement(list) {
 }
 
 let updateOffered = false;
+/** "6:40 PM" today, "Tue 6:40 PM" this week, else "Oct 28, 6:40 PM". */
+function formatExpiry(unixSecs) {
+  const d = new Date(unixSecs * 1000);
+  const days = (d - Date.now()) / 86400e3;
+  const opts = days < 1 && d.getDate() === new Date().getDate()
+    ? { hour: 'numeric', minute: '2-digit' }
+    : days < 6 ? { weekday: 'short', hour: 'numeric', minute: '2-digit' }
+    : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+  return d.toLocaleString(undefined, opts);
+}
+
 function offerUpdate({ current, version }) {
-  if (updateOffered) return;
+  if (updateOffered || guest) return;
   updateOffered = true;
   ui.toast({
     text: `Update available: Glass ${version} (you have ${current})`,

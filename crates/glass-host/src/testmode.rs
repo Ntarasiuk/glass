@@ -12,12 +12,16 @@ use anyhow::Result;
 use axum::Json;
 use axum::extract::Query;
 use axum::routing::{get, post};
-use glass_proto::{AUDIO_FRAMES_PER_PACKET, AUDIO_SAMPLE_RATE, InputEvent, MAX_STREAMS, audio_packet};
+use glass_proto::{
+    AUDIO_FRAMES_PER_PACKET, AUDIO_SAMPLE_RATE, InputEvent, MAX_STREAMS, audio_packet,
+};
 use tokio::sync::broadcast;
 
 use crate::clock::now_us;
 use crate::control::ServerMsg;
-use crate::media::{AudioPackets, Clipboard, DisplayInfo, EncodedFrame, InputSink, Layout, VideoSource};
+use crate::media::{
+    AudioPackets, Clipboard, DisplayInfo, EncodedFrame, InputSink, Layout, VideoSource,
+};
 use crate::soft_encode::{Encoder, Frame, PixelFormat};
 
 const WIDTH: usize = 640;
@@ -101,19 +105,33 @@ impl TestVideo {
                 builtin: false,
             })
             .collect();
-        let slots: Vec<_> = (0..DISPLAYS).map(|_| Arc::new(AtomicI32::new(-1))).collect();
-        let keyframes: Vec<_> = (0..DISPLAYS).map(|_| Arc::new(AtomicBool::new(true))).collect();
+        let slots: Vec<_> = (0..DISPLAYS)
+            .map(|_| Arc::new(AtomicI32::new(-1)))
+            .collect();
+        let keyframes: Vec<_> = (0..DISPLAYS)
+            .map(|_| Arc::new(AtomicBool::new(true)))
+            .collect();
         for i in 0..DISPLAYS {
             let (slot, keyframe, frames) = (slots[i].clone(), keyframes[i].clone(), frames.clone());
             std::thread::spawn(move || pattern_loop(i, slot, keyframe, frames, fps));
         }
-        Self { displays, slots, keyframes, shown: Mutex::new(Vec::new()) }
+        Self {
+            displays,
+            slots,
+            keyframes,
+            shown: Mutex::new(Vec::new()),
+        }
     }
 }
 
 impl VideoSource for TestVideo {
     fn streams(&self) -> Vec<DisplayInfo> {
-        self.shown.lock().unwrap().iter().map(|&i| self.displays[i as usize].clone()).collect()
+        self.shown
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|&i| self.displays[i as usize].clone())
+            .collect()
     }
 
     fn request_keyframe(&self, stream: Option<u8>) {
@@ -142,7 +160,10 @@ impl VideoSource for TestVideo {
             self.keyframes[id as usize].store(true, Ordering::Relaxed);
         }
         *self.shown.lock().unwrap() = ids.clone();
-        Ok(ids.iter().map(|&i| self.displays[i as usize].clone()).collect())
+        Ok(ids
+            .iter()
+            .map(|&i| self.displays[i as usize].clone())
+            .collect())
     }
 
     fn displays(&self) -> Result<Vec<DisplayInfo>> {
@@ -180,7 +201,12 @@ fn pattern_loop(
         let frame = render(display, n);
         let force = keyframe.swap(false, Ordering::Relaxed);
         if let Ok(Some((data, key))) = encoder.encode(&frame, force) {
-            let _ = frames.send(Arc::new(EncodedFrame { stream: s as u8, data, keyframe: key, capture_us: now_us() }));
+            let _ = frames.send(Arc::new(EncodedFrame {
+                stream: s as u8,
+                data,
+                keyframe: key,
+                capture_us: now_us(),
+            }));
         }
     }
 }
@@ -189,7 +215,11 @@ fn pattern_loop(
 fn render(display: usize, n: u64) -> Frame {
     let mut data = vec![0u8; WIDTH * HEIGHT * 4];
     let bar = (n as usize * 8) % WIDTH;
-    let bg = if display == 0 { [200, 80, 30] } else { [30, 160, 90] };
+    let bg = if display == 0 {
+        [200, 80, 30]
+    } else {
+        [30, 160, 90]
+    };
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let p = &mut data[(y * WIDTH + x) * 4..][..4];
@@ -198,14 +228,22 @@ fn render(display: usize, n: u64) -> Frame {
             p.copy_from_slice(&[b, g, r, 255]);
         }
     }
-    Frame { width: WIDTH, height: HEIGHT, stride: WIDTH * 4, format: PixelFormat::Bgrx, data }
+    Frame {
+        width: WIDTH,
+        height: HEIGHT,
+        stride: WIDTH * 4,
+        format: PixelFormat::Bgrx,
+        data,
+    }
 }
 
 // ---- Audio: a 440 Hz tone ----
 
 pub fn start_tone(packets: AudioPackets) {
     std::thread::spawn(move || {
-        let per_packet = Duration::from_micros(AUDIO_FRAMES_PER_PACKET as u64 * 1_000_000 / AUDIO_SAMPLE_RATE as u64);
+        let per_packet = Duration::from_micros(
+            AUDIO_FRAMES_PER_PACKET as u64 * 1_000_000 / AUDIO_SAMPLE_RATE as u64,
+        );
         let mut next = Instant::now();
         let mut t = 0u64;
         for seq in 0u32.. {
@@ -214,7 +252,9 @@ pub fn start_tone(packets: AudioPackets) {
             let pcm: Vec<i16> = (0..AUDIO_FRAMES_PER_PACKET)
                 .flat_map(|_| {
                     t += 1;
-                    let v = ((t as f64 * 440.0 * std::f64::consts::TAU / AUDIO_SAMPLE_RATE as f64).sin() * 8000.0) as i16;
+                    let v = ((t as f64 * 440.0 * std::f64::consts::TAU / AUDIO_SAMPLE_RATE as f64)
+                        .sin()
+                        * 8000.0) as i16;
                     [v, v]
                 })
                 .collect();
@@ -231,18 +271,25 @@ struct Recorded {
     pastes: u32,
 }
 
-static INPUT: Mutex<Recorded> = Mutex::new(Recorded { events: Vec::new(), pastes: 0 });
+static INPUT: Mutex<Recorded> = Mutex::new(Recorded {
+    events: Vec::new(),
+    pastes: 0,
+});
 
 pub struct FakeInput;
 
 impl InputSink for FakeInput {
     fn handle(&mut self, ev: InputEvent) {
         let json = match ev {
-            InputEvent::MouseMove { x, y, stream } => serde_json::json!({"t": "move", "x": x, "y": y, "stream": stream}),
+            InputEvent::MouseMove { x, y, stream } => {
+                serde_json::json!({"t": "move", "x": x, "y": y, "stream": stream})
+            }
             InputEvent::MouseDown { button } => serde_json::json!({"t": "down", "button": button}),
             InputEvent::MouseUp { button } => serde_json::json!({"t": "up", "button": button}),
             InputEvent::Scroll { dx, dy } => serde_json::json!({"t": "scroll", "dx": dx, "dy": dy}),
-            InputEvent::KeyDown { keycode } => serde_json::json!({"t": "keydown", "keycode": keycode}),
+            InputEvent::KeyDown { keycode } => {
+                serde_json::json!({"t": "keydown", "keycode": keycode})
+            }
             InputEvent::KeyUp { keycode } => serde_json::json!({"t": "keyup", "keycode": keycode}),
         };
         INPUT.lock().unwrap().events.push(json);

@@ -38,5 +38,7 @@ pub fn keep_awake() -> Option<std::process::Child> {
 
 /// Asleep displays aren't listed; declaring user activity wakes them.
 pub fn wake_displays() {
-    let _ = std::process::Command::new("caffeinate").args(["-u", "-t", "1"]).status();
+    let _ = std::process::Command::new("caffeinate")
+        .args(["-u", "-t", "1"])
+        .status();
 }

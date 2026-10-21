@@ -107,4 +107,3 @@ fn accessibility_step(mut status: Status) -> Result<Status> {
     sp.stop("Accessibility allowed, remote mouse and keyboard enabled");
     Ok(status)
 }
-
