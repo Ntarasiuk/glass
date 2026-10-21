@@ -55,3 +55,12 @@ pub fn watch(events: broadcast::Sender<ServerMsg>) {
         }
     });
 }
+
+/// The real system clipboard.
+pub struct SystemClipboard;
+
+impl crate::media::Clipboard for SystemClipboard {
+    fn set_text(&self, text: &str) {
+        set_text(text)
+    }
+}

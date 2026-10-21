@@ -1,0 +1,54 @@
+// The browser's wire format must match crates/glass-proto byte for byte.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  fletcher16, inputEvent, Input, INPUT_EVENT_LEN, ping, readPong, readVideoHeader, KIND_PING, KIND_PONG, VIDEO_HEADER_LEN,
+} from '../../web/proto.js';
+
+test('fletcher16 matches the Rust implementation', () => {
+  const enc = new TextEncoder();
+  assert.equal(fletcher16(enc.encode('abcde')), 0xc8f0);
+  assert.equal(fletcher16(enc.encode('abcdef')), 0x2057);
+  assert.equal(fletcher16(new Uint8Array(0)), 0);
+  // Long inputs cross the 4096-byte reduction boundary.
+  const big = new Uint8Array(10_000).fill(255);
+  assert.ok(fletcher16(big) >= 0 && fletcher16(big) <= 0xffff);
+});
+
+test('input events are 12 bytes, little-endian', () => {
+  const e = inputEvent(Input.MOVE, { button: 1, a: 0.25, b: 0.75 });
+  assert.equal(e.length, INPUT_EVENT_LEN);
+  const v = new DataView(e.buffer);
+  assert.equal(v.getUint8(0), 1);
+  assert.equal(v.getUint8(1), 1);
+  assert.equal(v.getFloat32(4, true), 0.25);
+  assert.equal(v.getFloat32(8, true), 0.75);
+  const k = new DataView(inputEvent(Input.KEY_DOWN, { keycode: 0x37 }).buffer);
+  assert.equal(k.getUint8(0), 5);
+  assert.equal(k.getUint16(2, true), 0x37);
+});
+
+test('video header parses kind, stream nibble, ids and checksum', () => {
+  const buf = new Uint8Array(VIDEO_HEADER_LEN);
+  const v = new DataView(buf.buffer);
+  v.setUint8(0, 1);
+  v.setUint8(1, (2 << 4) | 1); // stream 2, keyframe
+  v.setUint16(2, 3, true);
+  v.setUint16(4, 9, true);
+  v.setUint16(6, 0xbeef, true);
+  v.setUint32(8, 77, true);
+  v.setBigUint64(12, 123456789n, true);
+  assert.deepEqual(readVideoHeader(v), {
+    flags: 1, stream: 2, fragIdx: 3, fragCount: 9, checksum: 0xbeef, frameId: 77, captureUs: 123456789,
+  });
+});
+
+test('ping / pong round trip', () => {
+  const p = ping(1234.5);
+  assert.equal(p[0], KIND_PING);
+  const pong = new Uint8Array(24);
+  pong[0] = KIND_PONG;
+  pong.set(p.subarray(8, 16), 8);
+  new DataView(pong.buffer).setBigUint64(16, 99n, true);
+  assert.deepEqual(readPong(new DataView(pong.buffer)), { clientMs: 1234.5, hostUs: 99 });
+});

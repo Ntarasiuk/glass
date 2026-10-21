@@ -201,3 +201,18 @@ fn modifier_flag(keycode: u16) -> Option<CGEventFlags> {
         _ => return None,
     })
 }
+
+impl crate::media::InputSink for Injector {
+    fn handle(&mut self, ev: glass_proto::InputEvent) {
+        Injector::handle(self, ev)
+    }
+    fn paste(&mut self) {
+        Injector::paste(self)
+    }
+    fn release_all(&mut self) {
+        Injector::release_all(self)
+    }
+    fn set_displays(&mut self, displays: &[u32]) {
+        Injector::set_displays(self, displays)
+    }
+}

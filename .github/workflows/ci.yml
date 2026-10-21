@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS host + end-to-end
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: cargo test --workspace
+      - run: cargo build --release -p glass-host
+      - run: node --test tests/unit/*.test.mjs
+      - name: End-to-end (Chrome, glass --test)
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npx playwright install chrome || true
+          npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-macos
+          path: tests/e2e/test-results
+
+  linux:
+    name: Linux host + end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libpipewire-0.3-dev libclang-dev pkg-config nasm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: cargo test --workspace
+      - run: cargo build --release -p glass-host
+      - name: End-to-end (Chrome, glass --test)
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chrome
+          npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-linux
+          path: tests/e2e/test-results
+
+  site:
+    name: Site and API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - working-directory: site
+        run: npm ci
+      - run: node --test tests/site/site.test.mjs

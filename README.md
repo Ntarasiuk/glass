@@ -54,6 +54,15 @@ scripts/linux/build.sh [test]               # Linux x86_64 build/tests in an Arc
 cd site && npm install && npm run dev       # site locally (wrangler dev)
 ```
 
+## Testing
+
+```sh
+scripts/test.sh            # everything: Rust, JS, end-to-end, site, Linux (if Docker is running)
+scripts/test.sh e2e        # just the browser end-to-end suite
+```
+
+`glass --test` runs the host with fakes: a test pattern on two 640×360 displays instead of screen capture, recorded input instead of injection, an in-memory clipboard and file chooser, and `/test/*` hooks to drop or corrupt frames. It never touches your real screen, mouse or clipboard, so the Playwright suite in `tests/e2e` (real Chrome) can exercise connection, auth, input, touch, keyboard modes, clipboard, files, audio, display layouts, loss and corruption recovery, reconnects, machine switching and updates. CI runs it on macOS and Linux.
+
 ## Status
 
 Early but daily-driven. Known rough edges:

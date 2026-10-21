@@ -3,7 +3,9 @@ mod files;
 mod media;
 mod server;
 mod setup;
+mod soft_encode;
 mod status;
+mod testmode;
 mod tailscale;
 
 #[cfg(target_os = "macos")]
@@ -25,6 +27,8 @@ use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
+
+use crate::media::VideoSource;
 
 #[derive(Parser)]
 #[command(name = "glass", about = "Low-latency remote desktop for your Mac", version)]
@@ -57,6 +61,13 @@ struct Args {
     /// host (e.g. page served through a tunnel, video direct over the LAN).
     #[arg(long)]
     wt_host: Option<String>,
+    /// Test mode: a generated test pattern instead of screen capture, recorded input, an
+    /// in-memory clipboard, no Tailscale, and /test/* hooks. Never touches the real desktop.
+    #[arg(long)]
+    test: bool,
+    /// Where received files are saved (default ~/Downloads).
+    #[arg(long)]
+    downloads_dir: Option<PathBuf>,
     /// Web client files. Defaults to the installed copy next to the binary, or the source tree.
     #[arg(long)]
     web_dir: Option<PathBuf>,
@@ -151,32 +162,26 @@ async fn run_host(args: Args) -> Result<()> {
         .with_ansi(false)
         .with_writer(std::io::stdout.and(Mutex::new(host_log)))
         .init();
-
-    // Keep displays (and the system) awake for as long as the host runs.
-    let _awake = platform::keep_awake();
     // wtransport and axum-server pull in different rustls crypto backends; pick one.
     let _ = rustls::crypto::ring::default_provider().install_default();
+
+    if args.test {
+        testmode::enable();
+        info!("TEST MODE: test pattern, recorded input, in-memory clipboard");
+    }
+    if let Some(dir) = &args.downloads_dir {
+        files::set_downloads_dir(dir.clone());
+    }
 
     let (frames, _) = broadcast::channel(8);
     // ~80 ms of 5 ms packets; a session that falls further behind just skips ahead.
     let (audio, _) = broadcast::channel(16);
-    let video = video::Video::new(
-        video::VideoConfig { fps: args.fps, bitrate: args.mbps * 1_000_000, scale: args.scale },
-        frames.clone(),
-        audio.clone(),
-    );
-    if input::has_accessibility() {
-        info!("accessibility: granted (input injection enabled)");
-    } else {
-        tracing::warn!(
-            "accessibility: NOT granted; remote input will be ignored. Run `glass setup`, or allow \
-             Glass in System Settings → Privacy & Security → Accessibility"
-        );
-    }
+    let (events, _) = broadcast::channel(32);
 
     let token = control::load_or_create_token(&args.token_file)?;
     let tls = match args.cert.clone().zip(args.key.clone()) {
         Some((cert, key)) => Some(server::TlsFiles { cert, key }),
+        None if args.test => None,
         None => tailscale::ensure_cert(&config_dir().join("certs"))
             .await
             .map(|(cert, key)| server::TlsFiles { cert, key }),
@@ -188,39 +193,68 @@ async fn run_host(args: Args) -> Result<()> {
         .unwrap_or_else(|| "localhost".into());
     let scheme = if tls.is_some() { "https" } else { "http" };
     status::start(Some(format!("{scheme}://{host}:{}/", args.http_port)));
-    permissions::request_missing();
 
-    let display = loop {
-        match video.set_layout(video::Layout::Single(None)) {
-            Ok(streams) => break streams[0].clone(),
-            Err(e) => {
-                tracing::warn!("{e:#}; waking displays and retrying");
-                platform::wake_displays();
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
+    let (video, injector, clipboard, tailnet_owner, _awake): (
+        Arc<dyn media::VideoSource>,
+        Box<dyn media::InputSink>,
+        Arc<dyn media::Clipboard>,
+        _,
+        _,
+    ) = if args.test {
+        let video = Arc::new(testmode::TestVideo::new(frames.clone(), args.fps as u32));
+        video.set_layout(media::Layout::Single(None))?;
+        testmode::start_tone(audio.clone());
+        (video, Box::new(testmode::FakeInput), Arc::new(testmode::FakeClipboard), None, None)
+    } else {
+        // Keep displays (and the system) awake for as long as the host runs.
+        let awake = platform::keep_awake();
+        let video = Arc::new(video::Video::new(
+            video::VideoConfig { fps: args.fps, bitrate: args.mbps * 1_000_000, scale: args.scale },
+            frames.clone(),
+            audio.clone(),
+        ));
+        if input::has_accessibility() {
+            info!("accessibility: granted (input injection enabled)");
+        } else {
+            tracing::warn!(
+                "accessibility: NOT granted; remote input will be ignored. Run `glass setup`, or allow \
+                 Glass in System Settings → Privacy & Security → Accessibility"
+            );
         }
+        permissions::request_missing();
+        let display = loop {
+            match video.set_layout(media::Layout::Single(None)) {
+                Ok(streams) => break streams[0].clone(),
+                Err(e) => {
+                    tracing::warn!("{e:#}; waking displays and retrying");
+                    platform::wake_displays();
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        };
+        clipboard::watch(events.clone());
+        let tailnet_owner = match tailscale::self_login().await {
+            Ok(login) => {
+                info!("tailnet devices owned by {login} connect without a token");
+                Some(login)
+            }
+            Err(e) => {
+                info!("tailscale unavailable ({e:#}); token required for all clients");
+                None
+            }
+        };
+        (video, Box::new(input::Injector::new(display.id)), Arc::new(clipboard::SystemClipboard), tailnet_owner, awake)
     };
-
     status::set_capturing(true);
 
-    let (events, _) = broadcast::channel(32);
-    clipboard::watch(events.clone());
-
-    let tailnet_owner = match tailscale::self_login().await {
-        Ok(login) => {
-            info!("tailnet devices owned by {login} connect without a token");
-            Some(login)
-        }
-        Err(e) => {
-            info!("tailscale unavailable ({e:#}); token required for all clients");
-            None
-        }
-    };
-
+    let test_routes = args.test.then(|| {
+        testmode::routes(events.clone(), files::downloads_dir())
+    });
     let shared = Arc::new(server::Shared {
         frames,
-        injector: Mutex::new(input::Injector::new(display.id)),
+        injector: Mutex::new(injector),
         video,
+        clipboard,
         events,
         token: token.clone(),
         tailnet_owner,
@@ -235,6 +269,7 @@ async fn run_host(args: Args) -> Result<()> {
         args.wt_host,
         tls,
         paths.log_dir.join("client.log"),
+        test_routes,
     )
     .await
 }
@@ -243,8 +278,9 @@ pub fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
+/// ~/.config/glass, or $GLASS_CONFIG_DIR (tests use it to stay out of the real config).
 pub fn config_dir() -> PathBuf {
-    home().join(".config/glass")
+    std::env::var_os("GLASS_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".config/glass"))
 }
 
 pub fn default_token_file() -> PathBuf {

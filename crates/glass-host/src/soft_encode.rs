@@ -1,5 +1,8 @@
-//! Software H.264 (OpenH264, screen-content real-time mode). Output is Annex B with
+//! Software H.264 (OpenH264, screen-content real-time mode), used by the Linux host and
+//! by the test pattern on every platform. Output is Annex B with
 //! SPS/PPS in every IDR, which the browser decodes without an out-of-band description.
+// Off Linux only the test pattern uses this, so the capture-facing parts go unused.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use anyhow::{Result, anyhow};
 use openh264::OpenH264API;

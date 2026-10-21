@@ -10,6 +10,8 @@ use tokio::sync::broadcast;
 use tracing::info;
 
 use super::audio::{AudioPackets, Packetizer};
+pub use crate::media::Layout;
+use crate::media::VideoSource;
 use super::capture::{self, Capture, Display, DisplayInfo};
 use super::encode::{EncodedFrame, Encoder};
 
@@ -22,12 +24,6 @@ pub struct VideoConfig {
 }
 
 /// What to stream: one display (main when `None`) or every display.
-#[derive(Debug, Clone, Copy)]
-pub enum Layout {
-    Single(Option<u32>),
-    All,
-}
-
 struct Stream {
     capture: Capture,
     display: DisplayInfo,
@@ -122,5 +118,20 @@ impl Video {
 
     pub fn displays(&self) -> Result<Vec<DisplayInfo>> {
         Ok(capture::list_displays()?.into_iter().map(|d| d.info).collect())
+    }
+}
+
+impl VideoSource for Video {
+    fn streams(&self) -> Vec<DisplayInfo> {
+        Video::streams(self)
+    }
+    fn request_keyframe(&self, stream: Option<u8>) {
+        Video::request_keyframe(self, stream)
+    }
+    fn set_layout(&self, layout: Layout) -> Result<Vec<DisplayInfo>> {
+        Video::set_layout(self, layout)
+    }
+    fn displays(&self) -> Result<Vec<DisplayInfo>> {
+        Video::displays(self)
     }
 }

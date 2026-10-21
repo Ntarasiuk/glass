@@ -13,8 +13,23 @@ use crate::control::{FileHeader, STREAM_FILE, unique_path};
 const MAX_HEADER: usize = 64 << 10;
 const CHUNK: usize = 256 << 10;
 
+static DOWNLOADS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_downloads_dir(dir: PathBuf) {
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = DOWNLOADS.set(dir);
+}
+
 pub fn downloads_dir() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Downloads")
+    DOWNLOADS.get().cloned().unwrap_or_else(|| crate::home().join("Downloads"))
+}
+
+/// Lets the remote user pick files on the host to send to their device.
+pub async fn pick() -> Result<Vec<PathBuf>> {
+    if crate::testmode::enabled() {
+        return Ok(crate::testmode::picked_files());
+    }
+    pick_native().await
 }
 
 /// Receives one uploaded file (tag already consumed) into ~/Downloads.
@@ -62,7 +77,7 @@ pub async fn receive(stream: &mut RecvStream) -> Result<(String, PathBuf)> {
 
 /// Shows a native file chooser on the host's screen (visible to the remote user).
 #[cfg(target_os = "macos")]
-pub async fn pick() -> Result<Vec<PathBuf>> {
+async fn pick_native() -> Result<Vec<PathBuf>> {
     let script = r#"set picked to choose file with prompt "Send to Glass client" with multiple selections allowed
 set out to ""
 repeat with f in picked
@@ -83,7 +98,7 @@ return out"#;
 
 /// Shows the desktop's file chooser through the portal.
 #[cfg(target_os = "linux")]
-pub async fn pick() -> Result<Vec<PathBuf>> {
+async fn pick_native() -> Result<Vec<PathBuf>> {
     use ashpd::desktop::file_chooser::SelectedFiles;
     let response = SelectedFiles::open_file()
         .title("Send to Glass client")

@@ -46,15 +46,17 @@ let inputWriter;
 // Host clock offset (µs), taken from the lowest-RTT recent ping.
 const clockSamples = [];
 let clockOffsetUs = 0;
+// Until the first pong, the host clock offset is unknown and latency can't be measured.
+let clockSynced = false;
 let rttMs = 0;
 
-const stats = { frames: 0, bytes: 0, latencySum: 0, latencyMax: 0, dropped: 0 };
+const stats = { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0 };
 
 const streamEnv = {
   log,
   post: (msg) => self.postMessage(msg),
   stats,
-  hostNowUs: () => performance.now() * 1000 + clockOffsetUs,
+  hostNowUs: () => (clockSynced ? performance.now() * 1000 + clockOffsetUs : undefined),
   requestKeyframe: (index) => datagramWriter?.write(new Uint8Array([KIND_KEYFRAME_REQUEST, index])).catch(() => {}),
 };
 const streams = []; // VideoStream per host stream number
@@ -81,6 +83,12 @@ self.onmessage = async ({ data }) => {
     sendControl(data.msg);
   } else if (data.type === 'sendFile') {
     sendFile(data.file).catch((e) => log('error', `send file failed: ${e.message ?? e}`));
+  } else if (data.type === 'switchHost') {
+    url = data.url;
+    rejected = false;
+    // End the current session; the reconnect loop picks up the new URL immediately.
+    kill?.('switching machine');
+    wake?.();
   } else if (data.type === 'token') {
     token = data.token;
     rejected = false;
@@ -135,6 +143,7 @@ function resetSession() {
   transport = datagramWriter = inputWriter = controlWriter = undefined;
   for (const s of streams) s?.reset();
   clockSamples.length = 0;
+  clockSynced = false;
 }
 
 /** Resolves when the session ends; throws if it never came up. */
@@ -158,6 +167,8 @@ async function connect() {
   // Current spec (Safari) uses createWritable(); Chromium still exposes `writable`.
   const writable = transport.datagrams.createWritable?.() ?? transport.datagrams.writable;
   datagramWriter = writable.getWriter();
+  // Sync the clock right away instead of waiting for the ping interval.
+  datagramWriter.write(ping(performance.now())).catch(() => {});
 
   // Control stream first: the host ignores everything else until hello is accepted.
   const control = await transport.createBidirectionalStream();
@@ -351,6 +362,7 @@ function onPong(view) {
   if (clockSamples.length > CLOCK_SAMPLES) clockSamples.shift();
   const best = clockSamples.reduce((a, b) => (b.rtt < a.rtt ? b : a));
   clockOffsetUs = best.offsetUs;
+  clockSynced = true;
   rttMs = rtt;
 }
 
@@ -367,7 +379,7 @@ function reportStats() {
     type: 'stats',
     fps: stats.frames,
     mbps: (stats.bytes * 8) / 1e6,
-    latencyAvg: stats.frames ? stats.latencySum / stats.frames : 0,
+    latencyAvg: stats.latencySamples ? stats.latencySum / stats.latencySamples : 0,
     latencyMax: stats.latencyMax,
     rtt: rttMs,
     dropped: stats.dropped,
@@ -377,5 +389,5 @@ function reportStats() {
   });
   audioPackets = 0;
   audioLost = 0;
-  Object.assign(stats, { frames: 0, bytes: 0, latencySum: 0, latencyMax: 0, dropped: 0 });
+  Object.assign(stats, { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0 });
 }

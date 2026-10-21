@@ -26,6 +26,10 @@ const SWAP_KEY = 'glass.swapCmdOption';
 const CTRL_AS_CMD_KEY = 'glass.ctrlAsCmd';
 const DECODER_STEP_KEY = 'glass.decoderStep';
 const PC_KEYBOARD_KEY = 'glass.pcKeyboard';
+const MACHINE_KEY = 'glass.machine';
+// Give up on a remembered machine after this many failed connects and return to the
+// machine that served this page.
+const MACHINE_MAX_FAILURES = 3;
 // Default to PC keyboard conventions on Linux, Windows and ChromeOS clients.
 const isPC = /Linux|Windows|CrOS/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
 const pcKeyboard = (storage((s) => s.getItem(PC_KEYBOARD_KEY)) ?? (isPC ? '1' : '0')) === '1';
@@ -98,6 +102,8 @@ const input = attachInput({
 });
 
 const ui = createUI({
+  onOpenMachines: loadMachines,
+  onSelectMachine: (m) => switchMachine(machineId(m), m.name),
   onSelectDisplay: (id) => control(id === 'all' ? { t: 'showAll' } : { t: 'selectDisplay', id }),
   shortcuts: SHORTCUTS,
   swapCmdOption: storage((s) => s.getItem(SWAP_KEY)) === '1',
@@ -141,9 +147,18 @@ log('info', 'display mode', { standalone: !!standalone });
 
 // No token is fine on your own tailnet; the host asks for one only if it can't identify us.
 
+// The page can drive any Glass host on the tailnet: same client, different WebTransport
+// endpoint. Start on the machine picked last time, if any.
+const homeHost = config.wtHost ?? location.hostname;
+let currentHost = storage((s) => s.getItem(MACHINE_KEY)) ?? homeHost;
+let machineFailures = 0;
+// A machine is "host" (default port) or "host:port".
+const wtUrl = (machine) => `https://${machine.includes(':') ? machine : `${machine}:${config.wtPort}`}/`;
+const machineId = (m) => (m.wt_port && m.wt_port !== config.wtPort ? `${m.dns}:${m.wt_port}` : m.dns);
+
 worker.postMessage({
   type: 'init',
-  url: `https://${config.wtHost ?? location.hostname}:${config.wtPort}/`,
+  url: wtUrl(currentHost),
   certHash: config.certHash,
   token,
   decoderStep: Number(storage((s) => s.getItem(DECODER_STEP_KEY)) ?? 0),
@@ -182,6 +197,12 @@ worker.onmessage = ({ data }) => {
       reloadIfUpdated('reconnect');
       break;
     case 'status':
+      if (data.level === 'error' && /connection failed/.test(data.text) && currentHost !== homeHost) {
+        if (++machineFailures >= MACHINE_MAX_FAILURES) {
+          ui.toast({ text: `Couldn't reach ${currentHost}; back to this machine`, kind: 'error' });
+          switchMachine(homeHost);
+        }
+      }
       status = data.text;
       hud.textContent = status;
       log(data.level ?? 'info', `status: ${status}`);
@@ -201,7 +222,7 @@ worker.onmessage = ({ data }) => {
       if (++statsCount % 5 === 0) log('info', 'stats', data);
       if (statsVisible) {
         hud.textContent =
-          `${status}  ${codec}  ${videoSizes.filter(Boolean).join(' + ')}\n` +
+          `${currentHost.split('.')[0]}  ${status}  ${codec}  ${videoSizes.filter(Boolean).join(' + ')}\n` +
           `latency ${data.latencyAvg.toFixed(1)} ms (max ${data.latencyMax.toFixed(1)})  rtt ${data.rtt.toFixed(1)} ms\n` +
           `${data.fps} fps  ${data.mbps.toFixed(1)} Mbps  dropped ${data.dropped}` +
           (data.audioPackets ? `\naudio ${data.audioPackets} pkt/s  lost ${data.audioLost}` : '');
@@ -235,6 +256,7 @@ worker.onmessage = ({ data }) => {
 function onControl(msg) {
   switch (msg.t) {
     case 'welcome':
+      machineFailures = 0;
       displays = msg.displays;
       // Nothing being streamed (e.g. capture failed): fall back to the first display.
       if (!msg.streams.length && displays.length) control({ t: 'selectDisplay', id: displays[0].id });
@@ -261,6 +283,26 @@ function onControl(msg) {
       log('error', `host: ${msg.msg}`);
       break;
   }
+}
+
+async function loadMachines() {
+  ui.renderMachines(undefined, currentHost);
+  try {
+    const { machines } = await fetch('machines.json').then((r) => r.json());
+    ui.renderMachines(machines.map((m) => ({ ...m, id: machineId(m) })), currentHost);
+  } catch {
+    ui.renderMachines([], currentHost);
+  }
+}
+
+function switchMachine(host, name = host) {
+  currentHost = host;
+  machineFailures = 0;
+  storage((s) => (host === homeHost ? s.removeItem(MACHINE_KEY) : s.setItem(MACHINE_KEY, host)));
+  displays = [];
+  worker.postMessage({ type: 'switchHost', url: wtUrl(host) });
+  log('info', 'switch machine', { host });
+  ui.toast({ text: `Connecting to ${name}…`, timeout: 2500 });
 }
 
 function onLayout(streams) {

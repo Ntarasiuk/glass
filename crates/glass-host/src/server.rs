@@ -20,19 +20,18 @@ use wtransport::tls::Sha256DigestFmt;
 use wtransport::{Endpoint, Identity, RecvStream, SendStream, ServerConfig};
 
 use crate::audio::AudioPackets;
-use crate::clipboard;
 use crate::clock::now_us;
 use crate::control::{self, ClientMsg, STREAM_FILE, STREAM_INPUT, ServerMsg};
 use crate::files;
 use crate::tailscale;
-use crate::video::{Layout, Video};
+use crate::media::{Clipboard, InputSink, Layout, VideoSource};
 use crate::media::EncodedFrame;
-use crate::input::Injector;
 
 pub struct Shared {
     pub frames: broadcast::Sender<Arc<EncodedFrame>>,
-    pub injector: Mutex<Injector>,
-    pub video: Video,
+    pub injector: Mutex<Box<dyn InputSink>>,
+    pub video: Arc<dyn VideoSource>,
+    pub clipboard: Arc<dyn Clipboard>,
     /// Host-wide events fanned out to every authenticated session's control stream.
     pub events: broadcast::Sender<ServerMsg>,
     pub token: String,
@@ -54,14 +53,11 @@ pub async fn run(
     wt_host: Option<String>,
     tls: Option<TlsFiles>,
     client_log: PathBuf,
+    extra_routes: Option<axum::Router>,
 ) -> Result<()> {
     let identity = match &tls {
         Some(t) => Identity::load_pemfiles(&t.cert, &t.key).await?,
-        // Browsers accept a self-signed cert via `serverCertificateHashes` only if it is
-        // ECDSA and valid for at most 14 days, which this is.
-        None => Identity::self_signed(
-            ["localhost", "127.0.0.1", "::1"].map(String::from).into_iter().chain(wt_host.clone()),
-        )?,
+        None => self_signed_identity(wt_host.as_deref()).await?,
     };
     // Only meaningful for the self-signed identity; a real cert validates normally.
     let cert_hash = tls.is_none().then(|| {
@@ -91,8 +87,11 @@ pub async fn run(
             }))
         }
     };
+    let machines_cache = Arc::new(tokio::sync::Mutex::new(None));
     let app = axum::Router::new()
+        .merge(extra_routes.unwrap_or_default())
         .route("/config.json", get(client_config))
+        .route("/machines.json", get(move || machines(machines_cache.clone(), http_port, wt_port)))
         .route("/log", post(move |body: String| append_client_log(client_log.clone(), body)))
         .fallback_service(ServeDir::new(web_dir))
         // The client is tiny and changes often; never let a stale worker linger.
@@ -318,7 +317,7 @@ async fn control(
             ClientMsg::SelectDisplay { id } => set_layout(&ctx, Layout::Single(Some(id))).await?,
             ClientMsg::ShowAll => set_layout(&ctx, Layout::All).await?,
             ClientMsg::Clipboard { text, paste } => {
-                clipboard::set_text(&text);
+                shared.clipboard.set_text(&text);
                 if paste {
                     shared.injector.lock().unwrap().paste();
                 }
@@ -415,11 +414,111 @@ fn send_frame(conn: &wtransport::Connection, frame: &EncodedFrame, next_id: &mut
     let max = conn.max_datagram_size().unwrap_or(1200);
     let id = *next_id;
     *next_id = next_id.wrapping_add(1);
-    let dgrams = glass_proto::fragment(&frame.data, frame.stream, id, frame.keyframe, frame.capture_us, max);
+    // Test-mode fault injection: a dropped frame leaves a gap in the ids.
+    if crate::testmode::take_drop() {
+        return Ok(());
+    }
+    let mut dgrams = glass_proto::fragment(&frame.data, frame.stream, id, frame.keyframe, frame.capture_us, max);
+    if crate::testmode::take_corrupt()
+        && let Some(last) = dgrams.last_mut()
+        && let Some(byte) = last.last_mut()
+    {
+        *byte ^= 0xff;
+    }
     for dgram in dgrams {
         conn.send_datagram(dgram)?;
     }
     Ok(())
+}
+
+#[derive(serde::Serialize, Clone)]
+struct MachineEntry {
+    #[serde(flatten)]
+    machine: tailscale::Machine,
+    /// Glass answered on this machine (so the client can connect to it).
+    glass: bool,
+    /// Its WebTransport port, from its /config.json.
+    wt_port: Option<u16>,
+}
+
+type MachinesCache = Arc<tokio::sync::Mutex<Option<(std::time::Instant, Vec<MachineEntry>)>>>;
+const MACHINES_TTL: Duration = Duration::from_secs(15);
+
+/// Your tailnet devices and which of them run Glass, for the client's machine switcher.
+async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_json::Value> {
+    let mut cache = cache.lock().await;
+    if let Some((at, list)) = cache.as_ref()
+        && at.elapsed() < MACHINES_TTL
+    {
+        return Json(serde_json::json!({ "machines": list }));
+    }
+    let list = match tailscale::machines().await {
+        Ok(found) => {
+            // Probe every machine at once; offline ones are skipped.
+            let probes: Vec<_> = found
+                .into_iter()
+                .map(|m| {
+                    tokio::spawn(async move {
+                        let wt_port = if m.is_self {
+                            Some(wt_port)
+                        } else if m.online {
+                            probe_glass(&m.dns, port).await
+                        } else {
+                            None
+                        };
+                        MachineEntry { glass: wt_port.is_some(), machine: m, wt_port }
+                    })
+                })
+                .collect();
+            let mut list = Vec::with_capacity(probes.len());
+            for p in probes {
+                if let Ok(entry) = p.await {
+                    list.push(entry);
+                }
+            }
+            list
+        }
+        Err(e) => {
+            warn!("machines: {e:#}");
+            Vec::new()
+        }
+    };
+    *cache = Some((std::time::Instant::now(), list.clone()));
+    Json(serde_json::json!({ "machines": list }))
+}
+
+/// If a Glass host answers at `https://<dns>:<port>/config.json`, its WebTransport port.
+async fn probe_glass(dns: &str, port: u16) -> Option<u16> {
+    let url = format!("https://{dns}:{port}/config.json");
+    let out = tokio::process::Command::new("curl").args(["-fsS", "--max-time", "1.5", &url]).output().await.ok()?;
+    let config: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    config["wtPort"].as_u64().map(|p| p as u16)
+}
+
+/// Browsers accept a self-signed cert via `serverCertificateHashes` only if it is ECDSA
+/// and valid for at most 14 days. It's saved and reused (and replaced before it expires)
+/// so its hash stays stable across restarts, and hosts sharing a config dir share it.
+async fn self_signed_identity(wt_host: Option<&str>) -> Result<Identity> {
+    const MAX_AGE: Duration = Duration::from_secs(10 * 86400);
+    let dir = crate::config_dir().join("certs");
+    let (cert, key) = (dir.join("self-signed.crt"), dir.join("self-signed.key"));
+    let fresh = std::fs::metadata(&cert)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| t.elapsed().unwrap_or(MAX_AGE) < MAX_AGE);
+    if fresh && let Ok(identity) = Identity::load_pemfiles(&cert, &key).await {
+        return Ok(identity);
+    }
+    let names = ["localhost", "127.0.0.1", "::1"].map(String::from).into_iter().chain(wt_host.map(String::from));
+    let identity = Identity::self_signed(names)?;
+    tokio::fs::create_dir_all(&dir).await?;
+    identity.certificate_chain().store_pemfile(&cert).await?;
+    identity.private_key().store_secret_pemfile(&key).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(identity)
 }
 
 /// Changes whenever a web client file changes, so open tabs know to reload.

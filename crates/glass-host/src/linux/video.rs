@@ -14,9 +14,10 @@ use pw::spa::pod::Pod;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
-use super::encode::{Encoder, Frame, PixelFormat};
+use crate::soft_encode::{Encoder, Frame, PixelFormat};
 use super::{audio, clock::now_us, permissions, portal};
-pub use crate::media::{AudioPackets, DisplayInfo, EncodedFrame};
+pub use crate::media::{AudioPackets, DisplayInfo, EncodedFrame, Layout};
+use crate::media::VideoSource;
 
 /// How long an encoder waits for a new frame before checking for a keyframe request it
 /// can satisfy by re-encoding the last one (static screens produce no new frames).
@@ -26,12 +27,6 @@ pub struct VideoConfig {
     pub fps: i32,
     pub bitrate: i32,
     pub scale: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Layout {
-    Single(Option<u32>),
-    All,
 }
 
 /// A rectangle in the compositor's logical (scaled) coordinates.
@@ -414,4 +409,19 @@ fn format_params() -> Vec<u8> {
         .expect("serialize format pod")
         .0
         .into_inner()
+}
+
+impl VideoSource for Video {
+    fn streams(&self) -> Vec<DisplayInfo> {
+        Video::streams(self)
+    }
+    fn request_keyframe(&self, stream: Option<u8>) {
+        Video::request_keyframe(self, stream)
+    }
+    fn set_layout(&self, layout: Layout) -> Result<Vec<DisplayInfo>> {
+        Video::set_layout(self, layout)
+    }
+    fn displays(&self) -> Result<Vec<DisplayInfo>> {
+        Video::displays(self)
+    }
 }

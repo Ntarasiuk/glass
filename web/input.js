@@ -99,7 +99,7 @@ export function attachInput({
     if (e.pointerType === 'touch') return touchDown(e, canvas);
     // Don't focus the key sink here: iPad Safari leaves fullscreen when a text field takes
     // focus, and hardware keys reach the window without it.
-    canvas.setPointerCapture(e.pointerId);
+    try { canvas.setPointerCapture(e.pointerId); } catch {}
     sendMove(e.clientX, e.clientY, canvas);
     send(Input.DOWN, { button: e.button });
   });
@@ -139,7 +139,9 @@ export function attachInput({
   }
 
   function touchDown(e, canvas) {
-    canvas.setPointerCapture(e.pointerId);
+    // Capture can throw (e.g. a pointer the browser already considers gone); tracking the
+    // gesture matters more than capture.
+    try { canvas.setPointerCapture(e.pointerId); } catch {}
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (touches.size === 1) {
       sendMove(e.clientX, e.clientY, canvas);

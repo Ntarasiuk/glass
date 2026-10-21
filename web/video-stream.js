@@ -195,11 +195,14 @@ export class VideoStream {
       }
       ctx.drawImage(videoFrame, 0, 0);
     }
-    const latencyMs = (this.env.hostNowUs() - videoFrame.timestamp) / 1000;
+    const hostNow = this.env.hostNowUs();
     videoFrame.close();
 
     const stats = this.env.stats;
     stats.frames++;
+    if (hostNow === undefined) return;
+    const latencyMs = (hostNow - videoFrame.timestamp) / 1000;
+    stats.latencySamples++;
     stats.latencySum += latencyMs;
     stats.latencyMax = Math.max(stats.latencyMax, latencyMs);
   }

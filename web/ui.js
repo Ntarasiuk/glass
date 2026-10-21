@@ -4,10 +4,11 @@ const $ = (id) => document.getElementById(id);
 
 const TOOLBAR_IDLE_MS = 3000;
 
-export function createUI({ onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken }) {
+export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
+    machines: { button: $('btn-machines'), panel: $('machines-panel') },
     displays: { button: $('btn-displays'), panel: $('displays-panel') },
     shortcuts: { button: $('btn-shortcuts'), panel: $('shortcuts-panel') },
   };
@@ -29,6 +30,10 @@ export function createUI({ onSelectDisplay, onShortcut, shortcuts, swapCmdOption
   // Toolbar buttons must not steal pointer events from the canvas logic or keep focus.
   const on = (id, fn) => $(id).addEventListener('click', (e) => { e.preventDefault(); wakeToolbar(); fn(e); });
 
+  on('btn-machines', () => {
+    toggleMenu('machines');
+    if (!menus.machines.panel.classList.contains('hidden')) onOpenMachines();
+  });
   on('btn-displays', () => toggleMenu('displays'));
   on('btn-shortcuts', () => toggleMenu('shortcuts'));
   on('btn-keyboard', onKeyboard);
@@ -127,6 +132,28 @@ export function createUI({ onSelectDisplay, onShortcut, shortcuts, swapCmdOption
     ),
   );
 
+  /** `current` is the id ("host" or "host:port") of the machine this session is on. */
+  function renderMachines(machines, current) {
+    if (!machines) {
+      menus.machines.panel.replaceChildren(menuItem('Looking for machines…', '', { onSelect: () => {} }));
+      return;
+    }
+    const status = (m) => (m.id === current ? 'connected' : !m.online ? 'offline' : !m.glass ? 'Glass not running' : m.os);
+    const items = machines.map((m) => {
+      const item = menuItem(m.name, status(m), {
+        checked: m.id === current,
+        onSelect: () => {
+          setMenuOpen('machines', false);
+          if (m.id !== current) onSelectMachine(m);
+        },
+      });
+      item.disabled = m.id !== current && (!m.online || !m.glass);
+      return item;
+    });
+    if (!items.length) items.push(menuItem('No machines found', 'needs Tailscale', { onSelect: () => {} }));
+    menus.machines.panel.replaceChildren(...items);
+  }
+
   /** `streamed` lists the display ids currently shown, in stream order. */
   function renderDisplays(displays, streamed) {
     const all = streamed.length > 1;
@@ -220,6 +247,7 @@ export function createUI({ onSelectDisplay, onShortcut, shortcuts, swapCmdOption
   });
 
   return {
+    renderMachines,
     renderDisplays,
     toast,
     showAuth() {

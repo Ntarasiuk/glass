@@ -5,7 +5,6 @@ pub mod agent;
 pub mod audio;
 pub mod clipboard;
 pub mod clock;
-pub mod encode;
 pub mod input;
 pub mod keymap;
 pub mod permissions;

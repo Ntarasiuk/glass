@@ -32,6 +32,38 @@ pub async fn self_login() -> Result<String> {
         .context("no login name for self")
 }
 
+/// A device on the tailnet that belongs to this Mac's owner.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Machine {
+    pub name: String,
+    /// MagicDNS name, e.g. `macbook.tail1234.ts.net` (no trailing dot).
+    pub dns: String,
+    pub os: String,
+    pub online: bool,
+    #[serde(rename = "self")]
+    pub is_self: bool,
+}
+
+/// This device plus every peer owned by the same user.
+pub async fn machines() -> Result<Vec<Machine>> {
+    let status = json(&["status", "--json"]).await?;
+    let me = status["Self"]["UserID"].as_u64();
+    let machine = |node: &Value, is_self: bool| Machine {
+        name: node["HostName"].as_str().unwrap_or_default().to_owned(),
+        dns: node["DNSName"].as_str().unwrap_or_default().trim_end_matches('.').to_owned(),
+        os: node["OS"].as_str().unwrap_or_default().to_owned(),
+        online: is_self || node["Online"].as_bool().unwrap_or(false),
+        is_self,
+    };
+    let mut out = vec![machine(&status["Self"], true)];
+    if let Some(peers) = status["Peer"].as_object() {
+        out.extend(peers.values().filter(|p| p["UserID"].as_u64() == me).map(|p| machine(p, false)));
+    }
+    // Phones and tablets can view but can't run the host.
+    out.retain(|m| !m.dns.is_empty() && !matches!(m.os.as_str(), "iOS" | "android"));
+    Ok(out)
+}
+
 pub enum Probe {
     Missing,
     LoggedOut,
