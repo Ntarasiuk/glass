@@ -3,21 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Glass: low-latency remote desktop for your Mac</title>
-  <meta name="description" content="Control your Mac from an iPad or any browser with 15–30 ms latency. Free, one-line install, multiple displays, audio, clipboard and file transfer, secure over Tailscale.">
+  <title>Glass: a remote desktop that feels local</title>
+  <meta name="description" content="Control your Mac or Linux computer from an iPad or any browser with about 20 ms of latency. Free and open source. One-line install, multiple displays, audio, clipboard and files, private over Tailscale.">
   <link rel="canonical" href="https://glassdesk.dev/">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="alternate" type="text/markdown" href="/docs.md" title="Glass documentation (Markdown)">
   <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://glassdesk.dev/">
-  <meta property="og:title" content="Glass: your Mac, in any browser">
-  <meta property="og:description" content="Low-latency remote desktop for macOS. 15–30 ms from your Mac's screen to your iPad. Nothing to install on the iPad.">
+  <meta property="og:title" content="Glass: your computer, in any browser">
+  <meta property="og:description" content="A remote desktop that feels local: about 20 ms from your Mac or Linux screen to your iPad. Free, open source, one-line install.">
   <meta name="twitter:card" content="summary">
-  <meta name="theme-color" content="#08090b">
+  <meta name="theme-color" content="#07080a">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   <script type="application/ld+json">
   {
@@ -25,7 +25,7 @@
     "@type": "SoftwareApplication",
     "name": "Glass",
     "url": "https://glassdesk.dev/",
-    "description": "Low-latency remote desktop for macOS. Install on a Mac with one command, then see and control it from a browser on an iPad, iPhone or another computer, with 15–30 ms latency.",
+    "description": "Low-latency remote desktop for macOS and Linux. Install with one command, then see and control the computer from a browser on an iPad, iPhone or another computer, with 15–30 ms latency.",
     "applicationCategory": "UtilitiesApplication",
     "operatingSystem": "macOS 13 or later, or Linux on Wayland (host); any browser with WebTransport and WebCodecs (viewer)",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -37,113 +37,204 @@
     "featureList": [
       "15–30 ms capture-to-display latency",
       "Browser viewer: no app on the iPad",
-      "Mouse, keyboard and touch control",
+      "Mouse, keyboard, touch and pinch-to-zoom",
       "Unlock a locked Mac remotely",
       "Multiple displays, side by side",
-      "System audio streaming",
-      "Clipboard sync",
-      "Peer-to-peer file transfer",
-      "Secure access over Tailscale"
+      "Switch between your machines",
+      "System audio, clipboard sync and file transfer",
+      "Adapts to bad networks",
+      "Secure access over Tailscale",
+      "Set up by an AI agent over SSH"
     ]
   }
   </script>
 </head>
 <body>
-  <div class="wrap">
-    <header class="site">
-      <a class="brand" href="/"><img src="/icon.svg" alt="" width="28" height="28">Glass</a>
-      <nav class="site" aria-label="Main">
-        <a href="/docs">Docs</a>
-        <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
-        <a href="#feedback">Feedback</a>
-        <a href="/llms.txt">llms.txt</a>
-      </nav>
-    </header>
+  <header class="site wrap">
+    <a class="brand" href="/"><img src="/icon.svg" alt="" width="26" height="26">Glass</a>
+    <nav aria-label="Main">
+      <a href="/docs">Docs</a>
+      <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
+      <a href="#feedback">Feedback</a>
+    </nav>
+  </header>
 
-    <main>
-      <div class="hero">
-        <h1>Your Mac, in <span>any browser</span>.</h1>
-        <p class="lede">A remote desktop that feels local. About 20&nbsp;ms from your Mac's screen to your iPad, with no app to install on the iPad.</p>
-
-        <div class="install">
-          <code id="cmd"><span class="dim">$</span> curl -fsSL glassdesk.dev | sh</code>
-          <button class="btn" id="copy" type="button">Copy</button>
+  <main>
+    <section class="hero wrap">
+      <div class="hero-copy">
+        <h1>Your computer, in any browser.</h1>
+        <p class="lede">Glass streams your Mac or Linux desktop to an iPad, phone or laptop with about 20&nbsp;milliseconds of delay. Nothing to install on the device in your hands.</p>
+        <div class="command" data-copy="curl -fsSL glassdesk.dev | sh">
+          <code><span class="prompt" aria-hidden="true">$</span> curl -fsSL glassdesk.dev | sh</code>
+          <button type="button" class="copy">Copy</button>
         </div>
-        <p class="hint">Run it on the computer you want to control. A guided setup takes about two minutes. macOS 13+ or Linux on Wayland (beta). Free and <a href="https://github.com/Ntarasiuk/glass">open source</a>.</p>
-
-        <ul class="stats">
-          <li><strong>15–30 ms</strong><span>screen to iPad</span></li>
-          <li><strong>60 fps</strong><span>hardware encoded</span></li>
-          <li><strong>MIT</strong><span>free and open source</span></li>
-        </ul>
+        <p class="hint">Run it on the computer you want to control. A guided setup does the rest in about two minutes. macOS 13+ or Linux on Wayland (beta). Free and <a href="https://github.com/Ntarasiuk/glass">open source</a>.</p>
       </div>
 
-      <section aria-labelledby="features">
-        <h2 id="features">Everything you reach for</h2>
-        <p class="sub">Built like a game-streaming tool, not a video call, so there's no buffering between you and your Mac.</p>
-        <div class="grid">
-          <div class="card"><h3>Truly low latency</h3><p>Hardware H.264, WebTransport datagrams, no jitter buffer. A live latency meter shows the real number.</p></div>
-          <div class="card"><h3>Just a browser</h3><p>Open a link on your iPad. Add it to the Home Screen for a fullscreen app.</p></div>
-          <div class="card"><h3>Every display</h3><p>Switch between screens, or show them all side by side, arranged like your desk.</p></div>
-          <div class="card"><h3>Full control</h3><p>Trackpad, keyboard and touch. Unlock a locked Mac. ⌘Tab works with Ctrl as ⌘.</p></div>
-          <div class="card"><h3>Sound</h3><p>Mac system audio streams to whichever device you're on.</p></div>
-          <div class="card"><h3>Clipboard and files</h3><p>Copy here, paste there. Send files both ways, directly between your devices.</p></div>
-          <div class="card"><h3>Private by default</h3><p>Runs over your own Tailscale network. Your devices get in automatically; nothing else does.</p></div>
-          <div class="card"><h3>Never stuck</h3><p>Reconnects by itself after sleep, network changes or a suspended tab.</p></div>
-        </div>
-      </section>
-
-      <section aria-labelledby="how">
-        <h2 id="how">Three steps</h2>
-        <p class="sub">Setup checks each step live and tells you exactly what to click.</p>
-        <ol class="steps">
-          <li><h3>Install on your Mac</h3><p>Paste the one-liner into Terminal. It verifies the download and starts setup.</p></li>
-          <li><h3>Follow the setup</h3><p>Connect Tailscale, then allow Screen Recording and Accessibility. Glass runs quietly in the background.</p></li>
-          <li><h3>Scan and go</h3><p>Scan the QR code with your iPad. That's it.</p></li>
-        </ol>
-      </section>
-
-      <section aria-labelledby="feedback">
-        <h2 id="feedback">Tell us what you think</h2>
-        <p class="sub">Bugs, ideas, what you'd use it for. It all goes straight to the people building Glass. You can also run <code>glass feedback "…"</code>.</p>
-        <form class="feedback" id="feedback-form">
-          <label class="visually-hidden" for="fb-message">Your feedback</label>
-          <textarea id="fb-message" name="message" required maxlength="4000" placeholder="What's working, what isn't, what you'd love…"></textarea>
-          <div class="row">
-            <label class="visually-hidden" for="fb-email">Email (optional)</label>
-            <input id="fb-email" name="email" type="email" maxlength="200" placeholder="Email, if you'd like a reply (optional)" autocomplete="email">
-            <button class="btn" type="submit">Send</button>
+      <figure class="demo" aria-label="Interactive latency comparison">
+        <div class="stage" id="stage">
+          <div class="stage-bar" aria-hidden="true"><i></i><i></i><i></i></div>
+          <p class="stage-hint" id="stage-hint">Move your pointer here</p>
+          <div class="cursor slow" id="cursor-slow" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M5 3l14 8-6.5 1.5L10 19z"/></svg>
+            <span>Typical remote desktop · 120 ms</span>
           </div>
-          <p class="form-status" id="fb-status" role="status"></p>
-        </form>
-      </section>
-    </main>
+          <div class="cursor fast" id="cursor-fast" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M5 3l14 8-6.5 1.5L10 19z"/></svg>
+            <span>Glass · 20 ms</span>
+          </div>
+        </div>
+        <figcaption>Delays are illustrative: 20 ms is what Glass measures on a home network; remote desktops built on video-call tech often sit above 100 ms.</figcaption>
+      </figure>
+    </section>
 
-    <footer class="site">
-      <span>Glass. A remote desktop for Mac.</span>
-      <nav aria-label="Footer">
-        <a href="/docs">Documentation</a>
-        <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
-        <a href="/docs.md">docs.md</a>
-        <a href="/llms.txt">llms.txt</a>
-        <a href="/llms-full.txt">llms-full.txt</a>
-        <a href="/install.sh">install.sh</a>
-      </nav>
-    </footer>
-  </div>
+    <section class="why wrap" aria-labelledby="why">
+      <div class="why-intro">
+        <h2 id="why">Built like a game stream, not a video call.</h2>
+        <p>Most remote desktops ride the same pipeline as video calls, which buffers to look smooth. Glass hands frames from the hardware encoder straight to your browser's hardware decoder and never waits. It feels like the computer is in front of you.</p>
+      </div>
+      <dl class="features">
+        <div><dt>Feels local</dt><dd>Hardware H.264 over WebTransport, decoded off the main thread. A live meter shows the real latency.</dd></div>
+        <div><dt>Just a browser</dt><dd>Open a link on your iPad. Add it to the Home Screen for a fullscreen app with your shortcuts intact.</dd></div>
+        <div><dt>Every display</dt><dd>Switch screens, or see them all side by side, arranged exactly like your desk.</dd></div>
+        <div><dt>Every machine</dt><dd>All your computers in one menu. Switch between them without leaving the page.</dd></div>
+        <div><dt>Full control</dt><dd>Trackpad, keyboard, touch and pinch to zoom. Unlock a locked Mac. ⌘Tab works.</dd></div>
+        <div><dt>Sound, clipboard, files</dt><dd>System audio, copy and paste both ways, and files sent directly between your devices.</dd></div>
+        <div><dt>Steady on bad Wi-Fi</dt><dd>Adapts its bitrate to the network, reconnects by itself, and never shows a corrupted frame.</dd></div>
+        <div><dt>Private by default</dt><dd>Runs over your own Tailscale network. Your devices get in; nothing else does.</dd></div>
+      </dl>
+    </section>
 
-  <style>.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }</style>
+    <section class="setup wrap" aria-labelledby="setup">
+      <h2 id="setup">Two minutes to set up.</h2>
+      <ol class="steps">
+        <li><strong>Install</strong><span>Paste the one-liner on the computer you want to control. It checks the download before installing.</span></li>
+        <li><strong>Follow along</strong><span>The setup connects Tailscale and walks you through the permissions, checking each one as you go.</span></li>
+        <li><strong>Scan and go</strong><span>Scan the QR code with your iPad. Glass starts with the computer from now on, and keeps itself up to date.</span></li>
+      </ol>
+    </section>
+
+    <section class="agent wrap" aria-labelledby="agent">
+      <div>
+        <h2 id="agent">Or let your agent do it.</h2>
+        <p>Glass comes with a skill for AI agents. Ask Claude Code to <q>set up Glass on my Mac mini</q> and it finds the machine on your tailnet, installs Glass over SSH, and tells you exactly which switch to click on that screen.</p>
+      </div>
+      <div class="command" data-copy="mkdir -p ~/.claude/skills/glass && curl -fsSL https://glassdesk.dev/skill.md -o ~/.claude/skills/glass/SKILL.md">
+        <code><span class="prompt" aria-hidden="true">$</span> mkdir -p ~/.claude/skills/glass &amp;&amp; curl -fsSL https://glassdesk.dev/skill.md -o ~/.claude/skills/glass/SKILL.md</code>
+        <button type="button" class="copy">Copy</button>
+      </div>
+    </section>
+
+    <section class="feedback wrap" aria-labelledby="feedback">
+      <div>
+        <h2 id="feedback">Tell us what you think.</h2>
+        <p>Bugs, ideas, what you'd use it for. It goes straight to the people building Glass. You can also run <code>glass feedback "…"</code> or open a <a href="https://github.com/Ntarasiuk/glass/issues">GitHub issue</a>.</p>
+      </div>
+      <form id="feedback-form">
+        <label for="fb-message">Your feedback</label>
+        <textarea id="fb-message" name="message" required maxlength="4000" placeholder="What's working, what isn't, what you'd love…"></textarea>
+        <label for="fb-email">Email <span>(optional, if you'd like a reply)</span></label>
+        <div class="row">
+          <input id="fb-email" name="email" type="email" maxlength="200" placeholder="you@example.com" autocomplete="email">
+          <button type="submit">Send</button>
+        </div>
+        <p class="form-status" id="fb-status" role="status"></p>
+      </form>
+    </section>
+  </main>
+
+  <footer class="site wrap">
+    <span>Glass is free and open source under the MIT license.</span>
+    <nav aria-label="Footer">
+      <a href="/docs">Documentation</a>
+      <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
+      <a href="/docs.md">docs.md</a>
+      <a href="/llms.txt">llms.txt</a>
+      <a href="/skill.md">skill.md</a>
+      <a href="/install.sh">install.sh</a>
+    </nav>
+  </footer>
+
   <script>
-    const copy = document.getElementById('copy');
-    copy.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText('curl -fsSL glassdesk.dev | sh');
-        copy.textContent = 'Copied';
-      } catch {
-        copy.textContent = 'Select it';
+    for (const block of document.querySelectorAll('.command')) {
+      const button = block.querySelector('.copy');
+      button.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(block.dataset.copy);
+          button.textContent = 'Copied';
+        } catch {
+          getSelection().selectAllChildren(block.querySelector('code'));
+          button.textContent = 'Press ⌘C';
+        }
+        setTimeout(() => { button.textContent = 'Copy'; }, 1600);
+      });
+    }
+
+    // Latency demo: two cursors replay the pointer's path with different delays.
+    (() => {
+      const stage = document.getElementById('stage');
+      const fast = document.getElementById('cursor-fast');
+      const slow = document.getElementById('cursor-slow');
+      const hint = document.getElementById('stage-hint');
+      const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const trail = [];
+      let user = false;
+      let lastUser = 0;
+      let rect = stage.getBoundingClientRect();
+      // Label widths, measured once fonts are in (not per frame: avoids forced layout).
+      const labelWidth = new Map();
+      const measure = () => { for (const el of [fast, slow]) labelWidth.set(el, el.lastElementChild.offsetWidth); };
+      measure();
+      document.fonts.ready.then(measure);
+      new ResizeObserver(() => { rect = stage.getBoundingClientRect(); }).observe(stage);
+      addEventListener('scroll', () => { rect = stage.getBoundingClientRect(); }, { passive: true });
+
+      stage.addEventListener('pointermove', (e) => {
+        if (e.pointerType === 'touch') return;
+        user = true;
+        lastUser = performance.now();
+        hint.classList.add('gone');
+        trail.push({ t: lastUser, x: e.clientX - rect.left, y: e.clientY - rect.top });
+      }, { passive: true });
+
+      function at(time) {
+        while (trail.length > 2 && trail[1].t <= time) trail.shift();
+        for (let i = trail.length - 1; i >= 0; i--) if (trail[i].t <= time) return trail[i];
+        return trail[0];
       }
-      setTimeout(() => { copy.textContent = 'Copy'; }, 1600);
-    });
+      function place(el, p) {
+        if (!p) return;
+        el.style.transform = `translate(${p.x}px, ${p.y}px)`;
+        const flip = p.x + 22 + (labelWidth.get(el) || 0) > rect.width - 8;
+        if (flip !== el.classList.contains('flip')) el.classList.toggle('flip', flip);
+      }
+      let visible = true;
+      new IntersectionObserver(([entry]) => {
+        const was = visible;
+        visible = entry.isIntersecting;
+        if (visible && !was) requestAnimationFrame(frame);
+      }).observe(stage);
+      function frame(now) {
+        if (!visible) return;
+        // With no pointer around (touch screens, or idle), trace a slow figure-eight.
+        if (!user || now - lastUser > 2500) {
+          if (user) { user = false; hint.classList.remove('gone'); }
+          const s = now / 1000;
+          const w = rect.width, h = rect.height;
+          trail.push({ t: now, x: w * (0.5 + 0.32 * Math.sin(s * 1.1)), y: h * (0.55 + 0.22 * Math.sin(s * 2.2)) });
+        }
+        if (trail.length > 400) trail.splice(0, trail.length - 400);
+        place(fast, at(now - 20));
+        place(slow, at(now - 120));
+        requestAnimationFrame(frame);
+      }
+      if (!reduced) requestAnimationFrame(frame);
+      else {
+        visible = false;
+        place(fast, { x: rect.width * 0.62, y: rect.height * 0.5 });
+        place(slow, { x: rect.width * 0.38, y: rect.height * 0.5 });
+      }
+    })();
 
     const form = document.getElementById('feedback-form');
     const status = document.getElementById('fb-status');
@@ -159,7 +250,7 @@
           body: JSON.stringify({ ...data, source: 'web' }),
         });
         const body = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(body.error || 'Something went wrong');
+        if (!res.ok) throw new Error(body.error || 'Something went wrong. Try again in a moment.');
         form.reset();
         status.className = 'form-status ok';
         status.textContent = 'Thank you, we got it.';

@@ -363,14 +363,14 @@ test.describe('clipboard and files', () => {
     // Uploads land under a .glass-partial name and are renamed when complete.
     await expect.poll(files, { timeout: 20_000 }).toEqual({ 'big.bin': body.length, 'escape.txt': 2 });
     // "../../escape.txt" had its path stripped: it landed in the downloads folder.
-    await expect(page.locator('.toast', { hasText: 'Saved to Mac' }).first()).toBeVisible();
+    await expect(page.locator('.toast', { hasText: 'Saved on' }).first()).toBeVisible();
   });
 
   it('downloads files picked on the host', async ({ page, host }) => {
     await open(page, host);
     await page.locator('#btn-download').click();
-    // The finished transfer's toast has the Save button (the progress toast doesn't).
-    const toast = page.locator('.toast', { hasText: 'glass-test-pick', has: page.locator('button') });
+    // The finished transfer's toast has the Save action (the progress toast doesn't).
+    const toast = page.locator('.toast', { hasText: 'glass-test-pick', has: page.locator('.action') });
     await expect(toast).toBeVisible({ timeout: 10_000 });
     await expect(toast.locator('button', { hasText: 'Save' })).toBeVisible();
   });
@@ -455,7 +455,7 @@ test.describe('updates', () => {
     const host = await new Host({ latest: '9.9.9' }).start();
     try {
       await open(page, host);
-      const toast = page.locator('.toast', { hasText: 'Glass 9.9.9 is available' });
+      const toast = page.locator('.toast', { hasText: 'Update available: Glass 9.9.9' });
       await expect(toast).toBeVisible();
       await toast.locator('button', { hasText: 'Update' }).click();
       await expect.poll(async () => (await host.get('/test/updates')).count).toBe(1);
@@ -468,7 +468,7 @@ test.describe('updates', () => {
   it('offers nothing when up to date', async ({ page, host }) => {
     await open(page, host);
     await page.waitForTimeout(1000);
-    await expect(page.locator('.toast', { hasText: 'is available' })).toHaveCount(0);
+    await expect(page.locator('.toast', { hasText: 'Update available' })).toHaveCount(0);
   });
 
   it('reloads into new client code after an update', async ({ page, host }) => {

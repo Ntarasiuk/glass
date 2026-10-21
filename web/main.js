@@ -91,7 +91,13 @@ function nextClipboard(timeoutMs) {
   });
 }
 
-let statsVisible = true;
+const statusEl = document.getElementById('status');
+// Friendly machine names from the last machines.json, by machine id.
+let machineNames = {};
+const STATS_KEY = 'glass.stats';
+let statsVisible = storage((s) => s.getItem(STATS_KEY)) === '1';
+hud.classList.toggle('hidden', !statsVisible);
+let tokenTried = Boolean(token);
 const input = attachInput({
   screens,
   keySink,
@@ -143,6 +149,8 @@ const ui = createUI({
   onFullscreen: toggleFullscreen,
   onToggleStats: toggleStats,
   onToken: (t) => {
+    tokenTried = true;
+    showStatus('connecting', 'Connecting', machineName(currentHost));
     storage((s) => s.setItem(TOKEN_KEY, t));
     worker.postMessage({ type: 'token', token: t });
   },
@@ -184,6 +192,8 @@ worker.postMessage({
   decoderStep: Number(storage((s) => s.getItem(DECODER_STEP_KEY)) ?? 0),
 });
 armMachineTimeout();
+showStatus('connecting', 'Connecting', machineName(currentHost));
+ui.setStatsPressed(statsVisible);
 
 // Canvases are created on demand (one per host stream) and handed to the worker once;
 // extras are hidden rather than destroyed so they can be reused.
@@ -223,7 +233,7 @@ worker.onmessage = ({ data }) => {
         if (++machineFailures >= MACHINE_MAX_FAILURES) giveUpOnMachine();
       }
       status = data.text;
-      hud.textContent = status;
+      onConnectionStatus(status);
       log(data.level ?? 'info', `status: ${status}`);
       break;
     case 'log':
@@ -236,18 +246,12 @@ worker.onmessage = ({ data }) => {
     case 'size':
       videoSizes[data.stream] = `${data.width}×${data.height}`;
       input.setVideoSize(data.stream, data.width, data.height);
+      hideStatus();
       break;
     case 'stats':
       if (++statsCount % 5 === 0) log('info', 'stats', data);
-      if (statsVisible) {
-        hud.textContent =
-          `${currentHost.split('.')[0]}  ${status}  ${codec}  ${videoSizes.filter(Boolean).join(' + ')}\n` +
-          `latency ${data.latencyAvg.toFixed(1)} ms (max ${data.latencyMax.toFixed(1)})  rtt ${data.rtt.toFixed(1)} ms\n` +
-          `${data.fps} fps  ${data.mbps.toFixed(1)} Mbps` +
-          (targetMbps ? ` (target ${targetMbps.toFixed(0)})` : '') +
-          `  dropped ${data.dropped}` +
-          (data.audioPackets ? `\naudio ${data.audioPackets} pkt/s  lost ${data.audioLost}` : '');
-      }
+      if (data.fps > 0) hideStatus();
+      renderHud(data);
       break;
     case 'decoderStep':
       storage((s) => s.setItem(DECODER_STEP_KEY, String(data.step)));
@@ -255,7 +259,8 @@ worker.onmessage = ({ data }) => {
     case 'unauthorized':
       storage((s) => s.removeItem(TOKEN_KEY));
       log('warn', 'token rejected');
-      ui.showAuth();
+      hideStatus();
+      ui.showAuth({ rejected: tokenTried });
       break;
     case 'control':
       onControl(data.msg);
@@ -304,7 +309,7 @@ function onControl(msg) {
       clipboardWaiters = [];
       break;
     case 'fileSaved':
-      ui.toast({ text: `Saved to Mac: ${msg.path.replace(/^\/Users\/[^/]+/, '~')}` });
+      ui.toast({ text: `Saved on ${machineName(currentHost)}: ${msg.path.replace(/^\/(Users|home)\/[^/]+/, '~')}`, icon: 'file' });
       break;
     case 'error':
       if (msg.msg !== 'unauthorized') ui.toast({ text: msg.msg, kind: 'error', timeout: 6000 });
@@ -313,10 +318,66 @@ function onControl(msg) {
   }
 }
 
+// ---- Connection state overlay and stats HUD ----
+
+
+function machineName(id) {
+  return machineNames[id] ?? id.split('.')[0].split(':')[0];
+}
+
+function showStatus(state, title, detail = '') {
+  statusEl.dataset.state = state;
+  document.getElementById('status-title').textContent = title;
+  document.getElementById('status-detail').textContent = detail;
+  statusEl.classList.remove('gone');
+}
+
+function hideStatus() {
+  statusEl.classList.add('gone');
+}
+
+/** Maps the worker's status text to what the person should see. */
+function onConnectionStatus(text) {
+  const name = machineName(currentHost);
+  if (text === 'connected') showStatus('connecting', `Connected to ${name}`, 'Waiting for the screen…');
+  else if (text.startsWith('disconnected')) showStatus('reconnecting', 'Reconnecting', `Lost the connection to ${name}. Trying again…`);
+  else if (text.startsWith('connection failed'))
+    showStatus('error', `Can't reach ${name}`, 'Retrying. Make sure Glass is running there and both devices are on Tailscale.');
+  else if (text.startsWith('waiting for access token')) hideStatus();
+}
+
+function hudLine(...parts) {
+  const div = document.createElement('div');
+  div.append(...parts);
+  return div;
+}
+
+function latencyClass(ms) {
+  return ms < 40 ? 'good' : ms < 80 ? 'warn' : 'bad';
+}
+
+function renderHud(d) {
+  const host = document.createElement('b');
+  host.textContent = machineName(currentHost);
+  const latency = document.createElement('span');
+  latency.className = latencyClass(d.latencyAvg);
+  latency.textContent = `${d.latencyAvg.toFixed(1)} ms`;
+  const lines = [
+    hudLine(host, `  ${status}  ${codec}  ${videoSizes.filter(Boolean).join(' + ')}`),
+    hudLine('latency ', latency, ` (max ${d.latencyMax.toFixed(1)})  rtt ${d.rtt.toFixed(1)} ms`),
+    hudLine(
+      `${d.fps} fps  ${d.mbps.toFixed(1)} Mbps` + (targetMbps ? ` (target ${targetMbps.toFixed(0)})` : '') + `  dropped ${d.dropped}`,
+    ),
+  ];
+  if (d.audioPackets) lines.push(hudLine(`audio ${d.audioPackets} pkt/s  lost ${d.audioLost}`));
+  hud.replaceChildren(...lines);
+}
+
 async function loadMachines() {
   ui.renderMachines(undefined, currentHost);
   try {
     const { machines } = await fetch('machines.json').then((r) => r.json());
+    machineNames = Object.fromEntries(machines.map((m) => [machineId(m), m.name]));
     ui.renderMachines(machines.map((m) => ({ ...m, id: machineId(m) })), currentHost);
   } catch {
     ui.renderMachines([], currentHost);
@@ -328,6 +389,7 @@ function switchMachine(host, name = host) {
   machineFailures = 0;
   storage((s) => (host === homeHost ? s.removeItem(MACHINE_KEY) : s.setItem(MACHINE_KEY, host)));
   displays = [];
+  showStatus('connecting', `Connecting to ${name}`);
   armMachineTimeout();
   worker.postMessage({ type: 'switchHost', url: wtUrl(host) });
   log('info', 'switch machine', { host });
@@ -355,7 +417,8 @@ function offerUpdate({ current, version }) {
   if (updateOffered) return;
   updateOffered = true;
   ui.toast({
-    text: `Glass ${version} is available (this machine has ${current})`,
+    text: `Update available: Glass ${version} (you have ${current})`,
+    icon: 'update',
     timeout: 0,
     action: {
       label: 'Update',
@@ -394,6 +457,7 @@ function onFileReceived({ id, file }) {
   // Saving needs a user gesture on iPad, so offer a button.
   ui.toast({
     text: `${file.name} (${formatBytes(file.size)})`,
+    icon: 'file',
     timeout: 0,
     action: { label: 'Save', run: () => saveFile(file) },
   });
@@ -450,6 +514,8 @@ function toggleAudio() {
 function toggleStats() {
   statsVisible = !statsVisible;
   hud.classList.toggle('hidden', !statsVisible);
+  ui.setStatsPressed(statsVisible);
+  storage((s) => s.setItem(STATS_KEY, statsVisible ? '1' : '0'));
 }
 
 async function toggleFullscreen() {

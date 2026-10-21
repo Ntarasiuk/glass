@@ -66,13 +66,13 @@ writeFileSync(
 <body>
   <div class="wrap">
     <header class="site">
-      <a class="brand" href="/"><img src="/icon.svg" alt="" width="28" height="28">Glass</a>
+      <a class="brand" href="/"><img src="/icon.svg" alt="" width="26" height="26">Glass</a>
       <nav class="site" aria-label="Main"><a href="/">Home</a><a href="/docs.md">Markdown</a><a href="/llms.txt">llms.txt</a></nav>
     </header>
     <main class="doc">
 ${body}
     </main>
-    <footer class="site"><span>Glass. A remote desktop for Mac.</span><nav aria-label="Footer"><a href="/">Home</a><a href="/#feedback">Feedback</a></nav></footer>
+    <footer class="site"><span>Glass. A remote desktop for Mac and Linux.</span><nav aria-label="Footer"><a href="/">Home</a><a href="/#feedback">Feedback</a></nav></footer>
   </div>
 </body>
 </html>

@@ -21,10 +21,20 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
   function wakeToolbar() {
     toolbar.classList.remove('idle');
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => toolbar.classList.add('idle'), TOOLBAR_IDLE_MS);
+    idleTimer = setTimeout(() => {
+      // Stay put while one of its menus is open.
+      const menuOpen = document.querySelector('.panel:not(.hidden)');
+      if (menuOpen) wakeToolbar();
+      else toolbar.classList.add('idle');
+    }, TOOLBAR_IDLE_MS);
   }
   toolbar.addEventListener('pointerenter', wakeToolbar);
   toolbar.addEventListener('pointerdown', wakeToolbar);
+  toolbar.addEventListener('focusin', wakeToolbar);
+  // A mouse heading for the top edge brings it back before it's reached.
+  addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'mouse' && e.clientY < 72 && toolbar.classList.contains('idle')) wakeToolbar();
+  }, { passive: true });
   wakeToolbar();
 
   // Toolbar buttons must not steal pointer events from the canvas logic or keep focus.
@@ -55,6 +65,16 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     const files = [...(e.dataTransfer?.files ?? [])];
     if (files.length) onUploadFiles(files);
   });
+
+  addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const open = Object.keys(menus).find((name) => !menus[name].panel.classList.contains('hidden'));
+    if (!open) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    setMenuOpen(open, false);
+    menus[open].button.focus();
+  }, { capture: true });
 
   function setMenuOpen(name, open) {
     const { button, panel } = menus[name];
@@ -202,12 +222,24 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     return names;
   }
 
-  function toast({ text, kind, action, timeout = 4000, progress }) {
+  const ICONS = {
+    info: '<path d="M12 16v-4M12 8h.01"/><circle cx="12" cy="12" r="9"/>',
+    error: '<path d="M12 8v4M12 16h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
+    file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+    update: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
+  };
+  const svg = (paths, cls) =>
+    `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+
+  function toast({ text, kind, icon, action, timeout = 4000, progress }) {
     const el = document.createElement('div');
-    el.className = `toast${kind === 'error' ? ' error' : ''}`;
+    el.className = `toast glass${kind === 'error' ? ' error' : ''}`;
+    el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+    el.insertAdjacentHTML('afterbegin', svg(ICONS[icon ?? (kind === 'error' ? 'error' : 'info')], 'icon'));
     const label = document.createElement('span');
     label.className = 'text';
     label.textContent = text;
+    label.title = text;
     el.append(label);
     let bar;
     if (progress !== undefined) {
@@ -216,22 +248,34 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
       bar.value = progress;
       el.append(bar);
     }
+    let timer;
+    const remove = () => {
+      clearTimeout(timer);
+      el.classList.add('leaving');
+      setTimeout(() => el.remove(), 180);
+    };
     if (action) {
       const b = document.createElement('button');
+      b.className = 'action';
       b.textContent = action.label;
-      b.addEventListener('click', () => { action.run(); el.remove(); });
+      b.addEventListener('click', () => { action.run(); remove(); });
       el.append(b);
     }
+    const close = document.createElement('button');
+    close.className = 'close';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.innerHTML = svg('<path d="M6 6l12 12M18 6 6 18"/>', '');
+    close.addEventListener('click', remove);
+    el.append(close);
     toasts.append(el);
-    let timer;
     const api = {
       update({ text: t, progress: p }) {
-        if (t !== undefined) label.textContent = t;
+        if (t !== undefined) label.textContent = label.title = t;
         if (bar && p !== undefined) bar.value = p;
       },
       dismiss(after = 0) {
         clearTimeout(timer);
-        timer = setTimeout(() => el.remove(), after);
+        timer = setTimeout(remove, after);
       },
     };
     if (timeout) api.dismiss(timeout);
@@ -250,9 +294,17 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     renderMachines,
     renderDisplays,
     toast,
-    showAuth() {
+    /** `rejected`: a token was tried and refused, so say so. */
+    showAuth({ rejected = false } = {}) {
       auth.classList.remove('hidden');
-      auth.querySelector('input').focus();
+      $('auth-error').classList.toggle('hidden', !rejected);
+      const input = auth.querySelector('input');
+      input.setAttribute('aria-invalid', String(rejected));
+      if (rejected) input.select();
+      input.focus();
+    },
+    setStatsPressed(on) {
+      $('btn-stats').setAttribute('aria-pressed', String(on));
     },
     /** The ⌘ menu (Mac shortcuts and key remaps) only applies to Mac hosts. */
     setHostOs(os) {
