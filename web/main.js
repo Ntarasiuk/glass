@@ -71,6 +71,11 @@ const savedPass = (() => {
   } catch { return undefined; }
 })();
 let guest = false; // signed in with a magic link: no switching machines, no updating the host
+// Remote video over WebRTC (see videoFor / showStreams): declared early, set up below.
+let rtc;
+let rtpVideo = false;
+let streamCount = 1;
+const videos = [];
 
 // Remote: no host serves this page, so there's no config to fetch.
 const config = remoteKey
@@ -212,7 +217,23 @@ let rtcPort;
 if (remoteKey) {
   const channel = new MessageChannel();
   const signalUrl = `${location.origin.replace(/^http/, 'ws')}/signal/connect/${remoteId}`;
-  serveRtc({ port: channel.port1, hostKey: remoteKey, signalUrl, log });
+  rtc = serveRtc({
+    port: channel.port1,
+    hostKey: remoteKey,
+    signalUrl,
+    log,
+    onVideo: (stream, track) => {
+      const v = videoFor(stream);
+      v.srcObject = new MediaStream([track]);
+      v.play().catch(() => {});
+    },
+    onMode: (rtp) => {
+      rtpVideo = rtp;
+      codec = rtp ? 'H.264 · WebRTC' : codec;
+      log('info', `remote video: ${rtp ? 'RTP tracks' : 'data channel'}`);
+      showStreams(streamCount);
+    },
+  });
   rtcPort = channel.port2;
 }
 
@@ -233,10 +254,49 @@ ui.setStatsPressed(statsVisible);
 // Canvases are created on demand (one per host stream) and handed to the worker once;
 // extras are hidden rather than destroyed so they can be reused.
 const canvases = [];
+// Remote viewers get video as WebRTC tracks, shown in <video> elements in place of the
+// worker's canvases (input maps onto either: both carry data-stream).
+
+function videoFor(stream) {
+  while (videos.length <= stream) {
+    const i = videos.length;
+    const v = document.createElement('video');
+    v.dataset.stream = String(i);
+    v.tabIndex = -1;
+    v.autoplay = true;
+    v.muted = true;
+    v.playsInline = true;
+    v.disablePictureInPicture = true;
+    v.disableRemotePlayback = true;
+    v.setAttribute('playsinline', '');
+    v.style.order = String(i);
+    v.classList.add('hidden');
+    v.addEventListener('resize', () => {
+      if (!v.videoWidth) return;
+      videoSizes[i] = `${v.videoWidth}×${v.videoHeight}`;
+      input.setVideoSize(i, v.videoWidth, v.videoHeight);
+      hideStatus();
+    });
+    screens.append(v);
+    input.observeCanvas(v);
+    videos.push(v);
+  }
+  return videos[stream];
+}
+
 function showStreams(count) {
+  streamCount = count;
+  if (rtpVideo) {
+    for (let i = 0; i < count; i++) videoFor(i);
+    videos.forEach((v, i) => v.classList.toggle('hidden', i >= count));
+    canvases.forEach((c) => c.classList.add('hidden'));
+    return;
+  }
+  videos.forEach((v) => v.classList.add('hidden'));
   while (canvases.length < count) {
     const canvas = document.createElement('canvas');
     canvas.dataset.stream = String(canvases.length);
+    canvas.style.order = String(canvases.length);
     canvas.tabIndex = -1;
     screens.append(canvas);
     input.observeCanvas(canvas);
@@ -262,6 +322,7 @@ worker.onmessage = ({ data }) => {
   switch (data.type) {
     case 'connected':
       reloadIfUpdated('reconnect');
+      if (rtpVideo) checkRtpVideoArrives();
       break;
     case 'status':
       if (data.level === 'error' && /connection failed/.test(data.text) && currentHost !== homeHost) {
@@ -286,6 +347,8 @@ worker.onmessage = ({ data }) => {
       hideStatus();
       break;
     case 'stats':
+      // Over RTP the worker sees no video; the connection's own stats describe it.
+      if (rtpVideo) data = { ...data, ...rtpStats };
       if (++statsCount % 5 === 0) log('info', 'stats', data);
       if (data.fps > 0) hideStatus();
       renderHud(data);
@@ -447,6 +510,59 @@ function switchMachine(host, name = host) {
   log('info', 'switch machine', { host });
   ui.toast({ text: `Connecting to ${name}…`, timeout: 2500 });
 }
+
+/** If tracks were negotiated but no picture comes, go back to data-channel video. */
+let rtpCheck;
+function checkRtpVideoArrives() {
+  clearTimeout(rtpCheck);
+  rtpCheck = setTimeout(() => {
+    if (!rtpVideo || videos.some((v) => v.videoWidth > 0)) return;
+    log('warn', 'remote video: no picture over RTP; falling back to the data channel');
+    try { sessionStorage.setItem('glass.rtp', '0'); } catch {}
+    location.reload();
+  }, 6000);
+}
+
+// Video numbers over RTP, from the connection's stats (once a second, no layout reads).
+const rtpStats = {};
+let lastInbound;
+setInterval(async () => {
+  if (!rtpVideo || !rtc) return;
+  const report = await rtc.stats?.();
+  if (!report) return;
+  let frames = 0, bytes = 0, dropped = 0, jitter = 0, emitted = 0, decode = 0, decoded = 0, rtt;
+  for (const r of report.values()) {
+    if (r.type === 'inbound-rtp' && r.kind === 'video') {
+      frames += r.framesDecoded ?? 0;
+      bytes += r.bytesReceived ?? 0;
+      dropped += (r.framesDropped ?? 0) + (r.freezeCount ?? 0);
+      jitter += r.jitterBufferDelay ?? 0;
+      emitted += r.jitterBufferEmittedCount ?? 0;
+      decode += r.totalDecodeTime ?? 0;
+      decoded += r.framesDecoded ?? 0;
+    } else if (r.type === 'candidate-pair' && r.nominated && r.currentRoundTripTime != null) {
+      rtt = r.currentRoundTripTime * 1000;
+    }
+  }
+  const now = { frames, bytes, dropped, jitter, emitted, decode, decoded };
+  const was = lastInbound ?? now;
+  lastInbound = now;
+  const dEmitted = emitted - was.emitted;
+  const dDecoded = decoded - was.decoded;
+  // One-way network time + jitter buffer + decode: what the viewer waits beyond capture.
+  const buffer = dEmitted > 0 ? ((jitter - was.jitter) / dEmitted) * 1000 : 0;
+  const decodeMs = dDecoded > 0 ? ((decode - was.decode) / dDecoded) * 1000 : 0;
+  const latency = (rtt ?? 0) / 2 + buffer + decodeMs;
+  Object.assign(rtpStats, {
+    fps: frames - was.frames,
+    mbps: ((bytes - was.bytes) * 8) / 1e6,
+    dropped: dropped - was.dropped,
+    latencyAvg: latency,
+    latencyMax: latency,
+    ...(rtt != null && { rtt }),
+    jitterBufferMs: buffer,
+  });
+}, 1000);
 
 function onLayout(streams) {
   for (const d of streams) if (!displays.some((x) => x.id === d.id)) displays.push(d);

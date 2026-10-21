@@ -4,6 +4,7 @@ mod files;
 mod media;
 mod rate;
 mod remote;
+mod rtp;
 mod server;
 mod setup;
 mod soft_encode;

@@ -63,7 +63,8 @@ export function attachInput({
   const rects = new Map(); // canvas -> content rect
   const resize = new ResizeObserver(() => rects.clear());
   const streamOf = (canvas) => Number(canvas.dataset.stream);
-  const canvasOf = (e) => (e.target instanceof HTMLCanvasElement ? e.target : undefined);
+  // A display is a canvas (WebTransport) or a <video> (remote, over WebRTC).
+  const canvasOf = (e) => e.target?.closest?.('#screens > [data-stream]') ?? undefined;
 
   function contentRect(canvas) {
     let rect = rects.get(canvas);

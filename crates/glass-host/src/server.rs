@@ -187,10 +187,16 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
     let relayed = crate::remote::relayed_peer(request.path());
     let conn = request.accept().await?;
     let peer = conn.remote_address();
-    match relayed {
-        Some(ip) => info!("client connected: {ip} (remote, over WebRTC)"),
+    match &relayed {
+        Some(r) => info!(
+            "client connected: {} (remote, over WebRTC{})",
+            r.peer,
+            if r.rtp_video { ", video as RTP" } else { "" }
+        ),
         None => info!("client connected: {peer}"),
     }
+    // Its video goes out as RTP tracks (rtp.rs), not as datagrams on this session.
+    let rtp_video = relayed.as_ref().is_some_and(|r| r.rtp_video);
 
     let authed = Arc::new(AtomicBool::new(false));
     let audio_on = Arc::new(AtomicBool::new(false));
@@ -222,6 +228,9 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                         }
                         Err(broadcast::error::RecvError::Closed) => return Ok(()),
                     };
+                    if rtp_video {
+                        continue;
+                    }
                     let Some(next_id) = next_frame_id.get_mut(frame.stream as usize) else { continue };
                     if authed.load(Ordering::Relaxed) && video_on.load(Ordering::Relaxed) {
                         send_frame(&conn, &frame, next_id)?;
@@ -272,7 +281,7 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                         audio_on: audio_on.clone(),
                         video_on: video_on.clone(),
                         ctl_tx: ctl_tx.clone(),
-                        relayed,
+                        relayed: relayed.clone(),
                     };
                     tokio::spawn(async move {
                         if let Err(e) = control(ctx, send, recv, rx).await {
@@ -289,7 +298,7 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                         audio_on: audio_on.clone(),
                         video_on: video_on.clone(),
                         ctl_tx: ctl_tx.clone(),
-                        relayed,
+                        relayed: relayed.clone(),
                     };
                     tokio::spawn(async move {
                         if let Err(e) = uni_stream(ctx, stream).await {
@@ -318,7 +327,7 @@ struct SessionCtx {
     video_on: Arc<AtomicBool>,
     ctl_tx: mpsc::UnboundedSender<ServerMsg>,
     /// The real address of a WebRTC viewer (the connection itself is loopback).
-    relayed: Option<std::net::IpAddr>,
+    relayed: Option<crate::remote::Relay>,
 }
 
 async fn control(
@@ -331,6 +340,8 @@ async fn control(
     let hello = control::read_json::<ClientMsg>(&mut recv).await;
     let peer = ctx
         .relayed
+        .as_ref()
+        .map(|r| r.peer)
         .unwrap_or_else(|| ctx.conn.remote_address().ip().to_canonical());
     if auth_blocked(shared, peer) {
         warn!("{peer}: rejected (too many failed sign-ins)");
@@ -416,6 +427,9 @@ async fn control(
         return Ok(());
     };
     ctx.authed.store(true, Ordering::Relaxed);
+    if let Some(r) = &ctx.relayed {
+        crate::remote::bridge_authed(r.bridge);
+    }
     shared.video.request_keyframe(None);
     let guest = matches!(auth, Auth::Guest { .. });
     match &auth {
@@ -532,6 +546,9 @@ async fn control(
             }
             ClientMsg::Video { on } => {
                 ctx.video_on.store(on, Ordering::Relaxed);
+                if let Some(r) = &ctx.relayed {
+                    crate::remote::bridge_watching(r.bridge, on);
+                }
                 if on {
                     shared.video.request_keyframe(None);
                 }
@@ -863,11 +880,64 @@ fn apply_rate_report(shared: &Shared, report: crate::rate::Report) {
         .lock()
         .unwrap()
         .report(report, std::time::Instant::now());
-    if let Some(bps) = changed {
-        info!("bitrate → {:.1} Mbps", bps as f64 / 1e6);
-        shared.video.set_bitrate(bps);
-        let _ = shared.events.send(ServerMsg::Bitrate { bps });
+    if changed.is_some() {
+        apply_bitrate(shared);
     }
+}
+
+/// Each remote (RTP) viewer's congestion-control estimate, as a cap on the shared encoders.
+static REMOTE_CAPS: Mutex<Option<std::collections::HashMap<u64, u32>>> = Mutex::new(None);
+static APPLIED_BPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Sets (or with `None` removes) a remote viewer's bitrate cap.
+pub fn set_remote_cap(viewer: u64, bps: Option<u32>) {
+    {
+        let mut caps = REMOTE_CAPS.lock().unwrap();
+        let caps = caps.get_or_insert_with(Default::default);
+        match bps {
+            Some(b) => caps.insert(viewer, b),
+            None => caps.remove(&viewer),
+        };
+    }
+    if let Some(shared) = SHARED.get() {
+        apply_bitrate(shared);
+    }
+}
+
+/// The encoders' bitrate: the tailnet clients' adaptive target, capped by every remote
+/// viewer's estimate (they share the encoders, so the slowest link sets the rate).
+fn apply_bitrate(shared: &Shared) {
+    let aimd = shared.rate.lock().unwrap().target();
+    let cap = REMOTE_CAPS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|c| c.values().min().copied());
+    let bps = cap.map_or(aimd, |c| c.min(aimd));
+    let last = APPLIED_BPS.load(Ordering::Relaxed);
+    // Ignore wiggles under 3% so encoders aren't poked twice a second.
+    if last != 0 && (bps as f64 - last as f64).abs() < last as f64 * 0.03 {
+        return;
+    }
+    APPLIED_BPS.store(bps, Ordering::Relaxed);
+    // Log real moves only: congestion control nudges the rate every half second.
+    static LOGGED_BPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let logged = LOGGED_BPS.load(Ordering::Relaxed);
+    if logged == 0 || (bps as f64 - logged as f64).abs() >= logged as f64 * 0.15 {
+        LOGGED_BPS.store(bps, Ordering::Relaxed);
+        let why = if cap.is_some_and(|c| c < aimd) {
+            " (remote link)"
+        } else {
+            ""
+        };
+        info!("bitrate → {:.1} Mbps{why}", bps as f64 / 1e6);
+    }
+    shared.video.set_bitrate(bps);
+    let _ = shared.events.send(ServerMsg::Bitrate { bps });
+}
+
+pub fn shared() -> Option<Arc<Shared>> {
+    SHARED.get().cloned()
 }
 
 static SHARED: std::sync::OnceLock<Arc<Shared>> = std::sync::OnceLock::new();
@@ -897,10 +967,8 @@ pub fn remote_viewer_joined() {
             .lock()
             .unwrap()
             .start_cautiously(start, std::time::Instant::now());
-        if let Some(bps) = changed {
-            info!("bitrate → {:.1} Mbps (remote viewer)", bps as f64 / 1e6);
-            shared.video.set_bitrate(bps);
-            let _ = shared.events.send(ServerMsg::Bitrate { bps });
+        if changed.is_some() {
+            apply_bitrate(shared);
         }
     }
 }

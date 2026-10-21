@@ -172,19 +172,102 @@ pub fn bridge_secret() -> &'static str {
     })
 }
 
-/// Reads `/rtc?peer=<ip>&k=<secret>` from a session request path.
-pub fn relayed_peer(path: &str) -> Option<IpAddr> {
+/// A session that came through the local bridge, as the bridge vouches for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Relay {
+    /// The viewer's real address.
+    pub peer: IpAddr,
+    /// Which bridge (and so which WebRTC peer) this is.
+    pub bridge: u64,
+    /// Video goes to this viewer as RTP tracks, not as datagrams on the session.
+    pub rtp_video: bool,
+}
+
+/// Reads `/rtc?peer=<ip>&b=<bridge>&video=rtp&k=<secret>` from a session request path.
+pub fn relayed_peer(path: &str) -> Option<Relay> {
     let query = path.strip_prefix("/rtc?")?;
-    let mut peer = None;
-    let mut ok = false;
+    let (mut peer, mut bridge, mut rtp_video, mut ok) = (None, 0, false, false);
     for pair in query.split('&') {
         match pair.split_once('=') {
             Some(("peer", v)) => peer = v.parse().ok(),
+            Some(("b", v)) => bridge = v.parse().unwrap_or(0),
+            Some(("video", v)) => rtp_video = v == "rtp",
             Some(("k", v)) => ok = crate::control::token_matches(v, bridge_secret()),
             _ => {}
         }
     }
-    peer.filter(|_| ok)
+    peer.filter(|_| ok).map(|peer| Relay {
+        peer,
+        bridge,
+        rtp_video,
+    })
+}
+
+/// What the server tells a bridge about its session: signed in yet, and watching (a hidden
+/// tab pauses video).
+struct BridgeSignals {
+    authed: tokio::sync::watch::Sender<bool>,
+    watching: tokio::sync::watch::Sender<bool>,
+}
+
+static BRIDGES: std::sync::Mutex<Option<std::collections::HashMap<u64, BridgeSignals>>> =
+    std::sync::Mutex::new(None);
+
+fn with_bridge(id: u64, f: impl FnOnce(&BridgeSignals)) {
+    if let Some(b) = BRIDGES.lock().unwrap().as_ref().and_then(|m| m.get(&id)) {
+        f(b);
+    }
+}
+
+pub fn bridge_authed(id: u64) {
+    with_bridge(id, |b| {
+        let _ = b.authed.send(true);
+    });
+}
+
+pub fn bridge_watching(id: u64, on: bool) {
+    with_bridge(id, |b| {
+        let _ = b.watching.send(on);
+    });
+}
+
+/// Registers a bridge; it's removed again when the guard drops.
+fn register_bridge() -> (u64, crate::rtp::Viewer, BridgeGuard) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (authed_tx, authed) = tokio::sync::watch::channel(false);
+    let (watching_tx, watching) = tokio::sync::watch::channel(true);
+    BRIDGES
+        .lock()
+        .unwrap()
+        .get_or_insert_with(Default::default)
+        .insert(
+            id,
+            BridgeSignals {
+                authed: authed_tx,
+                watching: watching_tx,
+            },
+        );
+    (
+        id,
+        crate::rtp::Viewer {
+            authed,
+            watching,
+            id,
+        },
+        BridgeGuard(id),
+    )
+}
+
+struct BridgeGuard(u64);
+
+impl Drop for BridgeGuard {
+    fn drop(&mut self) {
+        if let Some(m) = BRIDGES.lock().unwrap().as_mut() {
+            m.remove(&self.0);
+        }
+        crate::server::set_remote_cap(self.0, None);
+    }
 }
 
 // ---- Signaling ----
@@ -400,8 +483,23 @@ async fn answer(
         username: s.username,
         credential: s.credential,
     }));
-    let mut media = MediaEngine::default();
-    let registry = register_default_interceptors(Registry::new(), &mut media)?;
+    // Video as RTP tracks when the browser offered video m-lines (and RTP isn't switched
+    // off); otherwise the data-channel path below carries it, as before.
+    let rtp_tracks = if std::env::var("GLASS_REMOTE_RTP").as_deref() == Ok("0") {
+        0
+    } else {
+        crate::rtp::offered_video(offer_sdp)
+    };
+    let (mut media, registry, target) = if rtp_tracks > 0 {
+        let mut media = crate::rtp::media_engine()?;
+        let (registry, target) = crate::rtp::registry(&mut media)?;
+        (media, registry, Some(target))
+    } else {
+        let mut media = MediaEngine::default();
+        let registry = register_default_interceptors(Registry::new(), &mut media)?;
+        (media, registry, None)
+    };
+    let _ = &mut media;
     let (gathered_tx, mut gathered) = tokio::sync::mpsc::channel(1);
     let (channels_tx, channels) = tokio::sync::mpsc::unbounded_channel();
     let (state_tx, state) = tokio::sync::watch::channel(RTCPeerConnectionState::New);
@@ -430,6 +528,11 @@ async fn answer(
 
     pc.set_remote_description(RTCSessionDescription::offer(offer_sdp.to_string())?)
         .await?;
+    // Tracks bind to the offered video m-lines in order (stream i → m-line i).
+    let video = match target {
+        Some(target) => Some((crate::rtp::add_tracks(&pc, rtp_tracks).await?, target)),
+        None => None,
+    };
     let answer = pc.create_answer(None).await?;
     pc.set_local_description(answer).await?;
     // Non-trickle: one message each way. Gathering is quick (host + STUN, maybe TURN).
@@ -457,7 +560,7 @@ async fn answer(
     let sig = key.sign(&signed_payload(offer_sdp, &answer_sdp))?;
 
     tokio::spawn(async move {
-        if let Err(e) = bridge(pc.clone(), channels, state, remote_ip, wt_port).await {
+        if let Err(e) = bridge(pc.clone(), channels, state, remote_ip, wt_port, video).await {
             info!("remote peer ended: {e:#}");
         }
         let _ = pc.close().await;
@@ -471,6 +574,7 @@ async fn bridge(
     mut state: tokio::sync::watch::Receiver<RTCPeerConnectionState>,
     remote_ip: Option<IpAddr>,
     wt_port: u16,
+    video: Option<(Vec<crate::rtp::VideoOut>, Arc<std::sync::atomic::AtomicU64>)>,
 ) -> Result<()> {
     // Wait for the browser to connect before opening the loopback session.
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -497,12 +601,25 @@ async fn bridge(
         .with_no_cert_validation()
         .build();
     let endpoint = wtransport::Endpoint::client(config)?;
+    let (bridge_id, viewer, _registration) = register_bridge();
+    let rtp_video = video.is_some();
     let url = format!(
-        "https://127.0.0.1:{wt_port}/rtc?peer={peer}&k={}",
+        "https://127.0.0.1:{wt_port}/rtc?peer={peer}&b={bridge_id}{}&k={}",
+        if rtp_video { "&video=rtp" } else { "" },
         bridge_secret()
     );
     let conn = endpoint.connect(url).await.context("loopback session")?;
-    crate::server::remote_viewer_joined();
+    match video {
+        // Video goes out as RTP; congestion control sets this viewer's bitrate cap.
+        Some((outs, target)) => {
+            tokio::spawn(async move {
+                if let Err(e) = crate::rtp::pump(outs, target, viewer).await {
+                    info!("remote video ended: {e:#}");
+                }
+            });
+        }
+        None => crate::server::remote_viewer_joined(),
+    }
 
     let mut datagram_channel: Option<Arc<dyn DataChannel>> = None;
     let mut bridge_drops = 0u64;
@@ -792,8 +909,17 @@ mod tests {
 
     #[test]
     fn only_the_bridge_can_name_a_peer() {
-        let ok = format!("/rtc?peer=203.0.113.9&k={}", bridge_secret());
-        assert_eq!(relayed_peer(&ok), Some("203.0.113.9".parse().unwrap()));
+        let ok = format!("/rtc?peer=203.0.113.9&b=7&video=rtp&k={}", bridge_secret());
+        assert_eq!(
+            relayed_peer(&ok),
+            Some(Relay {
+                peer: "203.0.113.9".parse().unwrap(),
+                bridge: 7,
+                rtp_video: true
+            })
+        );
+        let plain = format!("/rtc?peer=203.0.113.9&k={}", bridge_secret());
+        assert_eq!(relayed_peer(&plain).map(|r| r.rtp_video), Some(false));
         assert_eq!(relayed_peer("/rtc?peer=203.0.113.9&k=guess"), None);
         assert_eq!(relayed_peer("/"), None);
     }

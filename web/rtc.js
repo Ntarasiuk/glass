@@ -30,11 +30,41 @@ export async function hostIdFor(hostKey) {
   return toB64url(digest.slice(0, 16));
 }
 
-/** Serves the worker's RtcTransport over `port`, connecting on request. */
-export function serveRtc({ port, hostKey, signalUrl, log }) {
+/** Displays a connection can carry as video tracks (the host's MAX_STREAMS). */
+const VIDEO_TRACKS = 4;
+
+/**
+ * Whether to ask for video as RTP tracks: needs H.264 (packetization-mode 1) on the
+ * receiving side, and can be switched off (`glass.rtp` = 0) if tracks failed before.
+ */
+function wantRtpVideo() {
+  try { if (sessionStorage.getItem('glass.rtp') === '0') return false; } catch {}
+  const codecs = RTCRtpReceiver.getCapabilities?.('video')?.codecs ?? [];
+  return codecs.some((c) => /h264/i.test(c.mimeType) && /packetization-mode=1/.test(c.sdpFmtpLine ?? ''));
+}
+
+/** H.264 first, High profile before Baseline (the host sends High), then its RTX. */
+function codecPreferences() {
+  const codecs = RTCRtpReceiver.getCapabilities('video').codecs;
+  const profile = (c) => (/profile-level-id=(\w{4})/i.exec(c.sdpFmtpLine ?? '')?.[1] ?? '').toLowerCase();
+  const rank = (c) => ['6400', '640c', '4d00', '42e0', '4200'].indexOf(profile(c)) >>> 0;
+  const h264 = codecs
+    .filter((c) => /h264/i.test(c.mimeType) && /packetization-mode=1/.test(c.sdpFmtpLine ?? ''))
+    .sort((a, b) => rank(a) - rank(b));
+  const rtx = codecs.filter((c) => /rtx/i.test(c.mimeType));
+  return [...h264, ...rtx];
+}
+
+/**
+ * Serves the worker's RtcTransport over `port`, connecting on request. Video arrives as
+ * RTP tracks when both sides support it: `onVideo(stream, track)` for each, and
+ * `onMode(rtp)` once the answer is in (false: video comes over the data channel).
+ */
+export function serveRtc({ port, hostKey, signalUrl, log, onVideo = () => {}, onMode = () => {} }) {
   // Each connection attempt has a generation (from the worker); everything posted carries
   // it, so a late message from an old connection can't reach a new one.
   let session; // { gen, pc, channels: Map<id, channel>, senders, dgram }
+  const api = {};
   let nextIncoming = -1;
 
   const post = (gen, msg, transfer) => port.postMessage({ ...msg, gen }, transfer ?? []);
@@ -116,6 +146,21 @@ export function serveRtc({ port, hostKey, signalUrl, log }) {
       dgram.binaryType = 'arraybuffer';
       dgram.onmessage = ({ data }) => { if (typeof data !== 'string') post(gen, { t: 'dgram', data }, [data]); };
       s.dgram = dgram;
+      // Video as RTP tracks: one recvonly transceiver per possible display, in stream order.
+      const transceivers = [];
+      if (wantRtpVideo()) {
+        const prefs = codecPreferences();
+        for (let i = 0; i < VIDEO_TRACKS; i++) {
+          const t = pc.addTransceiver('video', { direction: 'recvonly' });
+          try { t.setCodecPreferences(prefs); } catch {}
+          transceivers.push(t);
+        }
+      }
+      pc.ontrack = (e) => {
+        const i = transceivers.indexOf(e.transceiver);
+        // A video m-line the host left unbound fires without a stream: ignore it.
+        if (i >= 0 && e.streams.length) onVideo(i, e.track);
+      };
       pc.ondatachannel = ({ channel }) => {
         const id = nextIncoming--;
         s.channels.set(id, channel);
@@ -140,6 +185,7 @@ export function serveRtc({ port, hostKey, signalUrl, log }) {
         throw new Error("Couldn't verify this computer's identity; not connecting.");
       }
       await pc.setRemoteDescription({ type: 'answer', sdp: reply.sdp });
+      onMode(transceivers.some((t) => t.currentDirection === 'recvonly'));
       ws.close();
       await opened(pc, dgram);
       log('info', 'remote: connected', {
@@ -175,11 +221,15 @@ export function serveRtc({ port, hostKey, signalUrl, log }) {
     }
   };
 
+  /** The live connection's stats (for the HUD), if connected. */
+  api.stats = () => session?.pc.getStats();
+
   function senderFor(s, id) {
     let snd = s.senders.get(id);
     if (!snd && s.channels.has(id)) s.senders.set(id, (snd = sender(s.gen, id, s.channels.get(id))));
     return snd;
   }
+  return api;
 }
 
 export async function verifyAnswer(hostKey, offerSdp, answerSdp, sig) {

@@ -55,6 +55,9 @@ test('a link from anywhere connects over WebRTC: video, input and files', async 
     // The link is spent and dropped from the URL; the host key stays (it names the computer).
     expect(page.url()).toMatch(/#r=[A-Za-z0-9_-]+$/);
     await expect(page.locator('#btn-machines')).toBeHidden();
+    // Video comes as a WebRTC track (RTP), shown in a <video> element, not the data channel.
+    await expect(page.locator('#screens > video:not(.hidden)')).toHaveCount(1);
+    await expect(page.locator('#hud')).toContainText('WebRTC');
 
     // Input reaches the host.
     await host.clearInput();
@@ -76,6 +79,21 @@ test('a link from anywhere connects over WebRTC: video, input and files', async 
     // A reload signs in with the saved pass, not the spent link.
     await page.reload();
     await expectVideo(page);
+  } finally {
+    await host.stop();
+  }
+});
+
+test('falls back to video over the data channel when tracks are unavailable', async ({ page }) => {
+  const host = await remoteHost();
+  try {
+    // As if the browser couldn't receive H.264 tracks.
+    await page.addInitScript(() => sessionStorage.setItem('glass.rtp', '0'));
+    const { url } = JSON.parse(host.cli('link', '--anywhere', '--json'));
+    await page.goto(url);
+    await expectVideo(page);
+    await expect(page.locator('#screens > video:not(.hidden)')).toHaveCount(0);
+    await expect(page.locator('#screens > canvas:not(.hidden)')).toHaveCount(1);
   } finally {
     await host.stop();
   }

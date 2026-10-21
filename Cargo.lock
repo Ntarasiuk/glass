@@ -1162,6 +1162,7 @@ dependencies = [
  "pipewire",
  "qrcode",
  "ring",
+ "rtc",
  "rustls",
  "serde",
  "serde_json",
