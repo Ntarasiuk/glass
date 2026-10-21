@@ -187,6 +187,26 @@ test.describe('input', () => {
     expect((await keys(host, 'keyup')).filter((k) => k === K.Cmd)).toHaveLength(1);
   });
 
+  test('a Linux host gets keys as typed and no Mac shortcuts menu', async ({ page }) => {
+    const host = await new Host({ os: 'linux' }).start();
+    try {
+      await page.goto(host.url());
+      await page.evaluate(() => localStorage.setItem('glass.pcKeyboard', '1'));
+      await page.reload();
+      await expectVideo(page);
+      await expect(page.locator('#btn-shortcuts')).toBeHidden();
+      await host.clearInput();
+      // PC keyboard mode and Ctrl as ⌘ only make sense for Mac hosts.
+      await page.keyboard.press('Control+S');
+      await page.keyboard.down('Control');
+      await page.keyboard.press('Tab');
+      await page.keyboard.up('Control');
+      await expect.poll(() => keys(host, 'keydown')).toEqual([K.Ctrl, K.S, K.Ctrl, K.Tab]);
+    } finally {
+      await host.stop();
+    }
+  });
+
   it('touch: tap clicks, long press right-clicks, two fingers scroll', async ({ page, host }) => {
     await open(page, host);
     await host.clearInput();

@@ -38,6 +38,15 @@ pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
+/// The OS test mode reports to clients: `GLASS_TEST_OS` (macos or linux), default macos,
+/// so client behaviour under test doesn't depend on the machine running the tests.
+pub fn host_os() -> &'static str {
+    match std::env::var("GLASS_TEST_OS").as_deref() {
+        Ok("linux") => "linux",
+        _ => "macos",
+    }
+}
+
 /// Server hook: true if this frame should be dropped (its id still advances).
 pub fn take_drop() -> bool {
     enabled() && DROP_FRAMES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)).is_ok()

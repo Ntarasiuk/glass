@@ -290,7 +290,7 @@ async fn control(
         displays,
         streams: shared.video.streams(),
         audio: crate::audio::SUPPORTED,
-        host_os: crate::platform::OS,
+        host_os: if crate::testmode::enabled() { crate::testmode::host_os() } else { crate::platform::OS },
     };
     control::write_json(&mut send, &welcome).await?;
 
