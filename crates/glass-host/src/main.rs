@@ -395,6 +395,15 @@ async fn run_host(args: Args) -> Result<()> {
         let display = loop {
             match video.set_layout(media::Layout::Single(None)) {
                 Ok(streams) => break streams[0].clone(),
+                // On macOS a missing Screen Recording grant isn't a sleeping display: capture
+                // stays blocked until the user allows it, so retry slowly instead.
+                Err(e) if cfg!(target_os = "macos") && !permissions::has_screen_recording() => {
+                    tracing::warn!(
+                        "{e:#}; Screen Recording isn't allowed. Run `glass setup`, or allow Glass \
+                         in System Settings › Privacy & Security › Screen & System Audio Recording"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
                 Err(e) => {
                     tracing::warn!("{e:#}; waking displays and retrying");
                     platform::wake_displays();
