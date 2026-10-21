@@ -588,6 +588,28 @@ test.describe('resilience', () => {
     expect(host.clientLog('decoder error detail')).toHaveLength(0);
   });
 
+  it('keeps streaming while a desktop tab is briefly hidden; an iPad pauses at once', async ({ page, browser, host }) => {
+    const hide = (p) => p.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    // Covered by another window, as on every Alt+Tab on Windows: switching back must not
+    // wait for a keyframe and a new decoder.
+    await open(page, host);
+    await hide(page);
+    await expect.poll(() => host.clientLog('visibility: hidden').length).toBe(1);
+    await page.waitForTimeout(1500);
+    expect(host.clientLog('video paused (tab hidden)')).toHaveLength(0);
+    expect((await stats(page)).fps).toBeGreaterThan(10);
+
+    const ipad = await browser.newPage({
+      userAgent: 'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+    });
+    await open(ipad, host);
+    await hide(ipad);
+    await expect.poll(() => host.clientLog('video paused (tab hidden)').length).toBe(1);
+  });
+
   it('reconnects after the host restarts', async ({ page, host }) => {
     await open(page, host);
     await host.stop();
