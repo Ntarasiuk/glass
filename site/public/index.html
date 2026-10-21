@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Glass: low-latency remote desktop for your Mac</title>
+  <meta name="description" content="Control your Mac from an iPad or any browser with 15–30 ms latency. Free, one-line install, multiple displays, audio, clipboard and file transfer, secure over Tailscale.">
+  <link rel="canonical" href="https://getglass.lol/">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="alternate" type="text/markdown" href="/docs.md" title="Glass documentation (Markdown)">
+  <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://getglass.lol/">
+  <meta property="og:title" content="Glass: your Mac, in any browser">
+  <meta property="og:description" content="Low-latency remote desktop for macOS. 15–30 ms from your Mac's screen to your iPad. Nothing to install on the iPad.">
+  <meta name="twitter:card" content="summary">
+  <meta name="theme-color" content="#08090b">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Glass",
+    "url": "https://getglass.lol/",
+    "description": "Low-latency remote desktop for macOS. Install on a Mac with one command, then see and control it from a browser on an iPad, iPhone or another computer, with 15–30 ms latency.",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "macOS 13 or later (host); any browser with WebTransport and WebCodecs (viewer)",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "license": "https://opensource.org/licenses/MIT",
+    "codeRepository": "https://github.com/Ntarasiuk/glass",
+    "installUrl": "https://getglass.lol/install.sh",
+    "downloadUrl": "https://getglass.lol/releases/glass-latest-darwin-universal.tar.gz",
+    "softwareHelp": { "@type": "CreativeWork", "url": "https://getglass.lol/docs" },
+    "featureList": [
+      "15–30 ms capture-to-display latency",
+      "Browser viewer: no app on the iPad",
+      "Mouse, keyboard and touch control",
+      "Unlock a locked Mac remotely",
+      "Multiple displays, side by side",
+      "System audio streaming",
+      "Clipboard sync",
+      "Peer-to-peer file transfer",
+      "Secure access over Tailscale"
+    ]
+  }
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <header class="site">
+      <a class="brand" href="/"><img src="/icon.svg" alt="" width="28" height="28">Glass</a>
+      <nav class="site" aria-label="Main">
+        <a href="/docs">Docs</a>
+        <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
+        <a href="#feedback">Feedback</a>
+        <a href="/llms.txt">llms.txt</a>
+      </nav>
+    </header>
+
+    <main>
+      <div class="hero">
+        <h1>Your Mac, in <span>any browser</span>.</h1>
+        <p class="lede">A remote desktop that feels local. About 20&nbsp;ms from your Mac's screen to your iPad, with no app to install on the iPad.</p>
+
+        <div class="install">
+          <code id="cmd"><span class="dim">$</span> curl -fsSL getglass.lol | sh</code>
+          <button class="btn" id="copy" type="button">Copy</button>
+        </div>
+        <p class="hint">Run it on the Mac you want to control. A guided setup takes about two minutes. macOS 13+, free and <a href="https://github.com/Ntarasiuk/glass">open source</a>.</p>
+
+        <ul class="stats">
+          <li><strong>15–30 ms</strong><span>screen to iPad</span></li>
+          <li><strong>60 fps</strong><span>hardware encoded</span></li>
+          <li><strong>MIT</strong><span>free and open source</span></li>
+        </ul>
+      </div>
+
+      <section aria-labelledby="features">
+        <h2 id="features">Everything you reach for</h2>
+        <p class="sub">Built like a game-streaming tool, not a video call, so there's no buffering between you and your Mac.</p>
+        <div class="grid">
+          <div class="card"><h3>Truly low latency</h3><p>Hardware H.264, WebTransport datagrams, no jitter buffer. A live latency meter shows the real number.</p></div>
+          <div class="card"><h3>Just a browser</h3><p>Open a link on your iPad. Add it to the Home Screen for a fullscreen app.</p></div>
+          <div class="card"><h3>Every display</h3><p>Switch between screens, or show them all side by side, arranged like your desk.</p></div>
+          <div class="card"><h3>Full control</h3><p>Trackpad, keyboard and touch. Unlock a locked Mac. ⌘Tab works with Ctrl as ⌘.</p></div>
+          <div class="card"><h3>Sound</h3><p>Mac system audio streams to whichever device you're on.</p></div>
+          <div class="card"><h3>Clipboard and files</h3><p>Copy here, paste there. Send files both ways, directly between your devices.</p></div>
+          <div class="card"><h3>Private by default</h3><p>Runs over your own Tailscale network. Your devices get in automatically; nothing else does.</p></div>
+          <div class="card"><h3>Never stuck</h3><p>Reconnects by itself after sleep, network changes or a suspended tab.</p></div>
+        </div>
+      </section>
+
+      <section aria-labelledby="how">
+        <h2 id="how">Three steps</h2>
+        <p class="sub">Setup checks each step live and tells you exactly what to click.</p>
+        <ol class="steps">
+          <li><h3>Install on your Mac</h3><p>Paste the one-liner into Terminal. It verifies the download and starts setup.</p></li>
+          <li><h3>Follow the setup</h3><p>Connect Tailscale, then allow Screen Recording and Accessibility. Glass runs quietly in the background.</p></li>
+          <li><h3>Scan and go</h3><p>Scan the QR code with your iPad. That's it.</p></li>
+        </ol>
+      </section>
+
+      <section aria-labelledby="feedback">
+        <h2 id="feedback">Tell us what you think</h2>
+        <p class="sub">Bugs, ideas, what you'd use it for. It all goes straight to the people building Glass. You can also run <code>glass feedback "…"</code>.</p>
+        <form class="feedback" id="feedback-form">
+          <label class="visually-hidden" for="fb-message">Your feedback</label>
+          <textarea id="fb-message" name="message" required maxlength="4000" placeholder="What's working, what isn't, what you'd love…"></textarea>
+          <div class="row">
+            <label class="visually-hidden" for="fb-email">Email (optional)</label>
+            <input id="fb-email" name="email" type="email" maxlength="200" placeholder="Email, if you'd like a reply (optional)" autocomplete="email">
+            <button class="btn" type="submit">Send</button>
+          </div>
+          <p class="form-status" id="fb-status" role="status"></p>
+        </form>
+      </section>
+    </main>
+
+    <footer class="site">
+      <span>Glass. A remote desktop for Mac.</span>
+      <nav aria-label="Footer">
+        <a href="/docs">Documentation</a>
+        <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
+        <a href="/docs.md">docs.md</a>
+        <a href="/llms.txt">llms.txt</a>
+        <a href="/llms-full.txt">llms-full.txt</a>
+        <a href="/install.sh">install.sh</a>
+      </nav>
+    </footer>
+  </div>
+
+  <style>.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }</style>
+  <script>
+    const copy = document.getElementById('copy');
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText('curl -fsSL getglass.lol | sh');
+        copy.textContent = 'Copied';
+      } catch {
+        copy.textContent = 'Select it';
+      }
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1600);
+    });
+
+    const form = document.getElementById('feedback-form');
+    const status = document.getElementById('fb-status');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const data = Object.fromEntries(new FormData(form));
+      status.className = 'form-status';
+      status.textContent = 'Sending…';
+      try {
+        const res = await fetch('/api/feedback', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...data, source: 'web' }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || 'Something went wrong');
+        form.reset();
+        status.className = 'form-status ok';
+        status.textContent = 'Thank you, we got it.';
+      } catch (err) {
+        status.className = 'form-status err';
+        status.textContent = err.message;
+      }
+    });
+  </script>
+</body>
+</html>

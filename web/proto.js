@@ -1,0 +1,67 @@
+// Mirrors crates/glass-proto. All integers little-endian.
+
+export const KIND_VIDEO = 1;
+export const KIND_PING = 2;
+export const KIND_PONG = 3;
+export const KIND_KEYFRAME_REQUEST = 4;
+export const KIND_AUDIO = 5;
+export const AUDIO_HEADER_LEN = 16;
+export const FLAG_KEYFRAME = 1;
+export const VIDEO_HEADER_LEN = 20;
+export const INPUT_EVENT_LEN = 12;
+
+export const Input = { MOVE: 1, DOWN: 2, UP: 3, SCROLL: 4, KEY_DOWN: 5, KEY_UP: 6 };
+
+export const STREAM_SHIFT = 4;
+
+export function readVideoHeader(view) {
+  const flags = view.getUint8(1);
+  return {
+    flags: flags & 0x0f,
+    stream: flags >> STREAM_SHIFT,
+    fragIdx: view.getUint16(2, true),
+    fragCount: view.getUint16(4, true),
+    checksum: view.getUint16(6, true),
+    frameId: view.getUint32(8, true),
+    captureUs: Number(view.getBigUint64(12, true)),
+  };
+}
+
+export function ping(nowMs) {
+  const buf = new ArrayBuffer(16);
+  const view = new DataView(buf);
+  view.setUint8(0, KIND_PING);
+  view.setFloat64(8, nowMs, true);
+  return new Uint8Array(buf);
+}
+
+export function readPong(view) {
+  return { clientMs: view.getFloat64(8, true), hostUs: Number(view.getBigUint64(16, true)) };
+}
+
+export function inputEvent(kind, { button = 0, keycode = 0, a = 0, b = 0 } = {}) {
+  const buf = new ArrayBuffer(INPUT_EVENT_LEN);
+  const view = new DataView(buf);
+  view.setUint8(0, kind);
+  view.setUint8(1, button);
+  view.setUint16(2, keycode, true);
+  view.setFloat32(4, a, true);
+  view.setFloat32(8, b, true);
+  return new Uint8Array(buf);
+}
+
+/** Fletcher-16 (mod 255); mirrors glass_proto::fletcher16. */
+export function fletcher16(data) {
+  let a = 0;
+  let b = 0;
+  for (let i = 0; i < data.length; ) {
+    const end = Math.min(i + 4096, data.length);
+    for (; i < end; i++) {
+      a += data[i];
+      b += a;
+    }
+    a %= 255;
+    b %= 255;
+  }
+  return (b << 8) | a;
+}

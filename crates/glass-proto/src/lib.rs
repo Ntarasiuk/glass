@@ -1,0 +1,264 @@
+//! Wire format shared by the host and (mirrored in `web/proto.js`) the browser client.
+//!
+//! All integers are little-endian.
+//!
+//! Datagrams (unreliable):
+//!   host -> client  VIDEO  fragment of one encoded frame
+//!   host -> client  PONG   reply to PING, used for clock sync
+//!   client -> host  PING
+//!   client -> host  KEYFRAME_REQUEST  [kind, stream] after the client detects loss
+//!   host -> client  AUDIO  5 ms of 48 kHz s16 PCM (only to sessions that enabled audio)
+//!
+//! Input travels client -> host on one reliable unidirectional stream as fixed-size
+//! [`InputEvent`] records, so a lost key-up can never leave a key stuck down.
+
+pub const KIND_VIDEO: u8 = 1;
+pub const KIND_PING: u8 = 2;
+pub const KIND_PONG: u8 = 3;
+pub const KIND_KEYFRAME_REQUEST: u8 = 4;
+pub const KIND_AUDIO: u8 = 5;
+
+/// 5 ms at 48 kHz: one packet fits a datagram (16 + 240 * 2 ch * 2 B = 976 bytes).
+pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
+pub const AUDIO_FRAMES_PER_PACKET: usize = 240;
+
+/// kind u8 | channels u8 | reserved u16 | seq u32 | capture_us u64, then s16 LE interleaved PCM.
+pub const AUDIO_HEADER_LEN: usize = 16;
+
+pub fn audio_packet(seq: u32, capture_us: u64, channels: u8, pcm: &[i16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(AUDIO_HEADER_LEN + pcm.len() * 2);
+    out.push(KIND_AUDIO);
+    out.push(channels);
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(&capture_us.to_le_bytes());
+    for s in pcm {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    out
+}
+
+pub const FLAG_KEYFRAME: u8 = 1;
+/// Upper nibble of `flags`: which display stream the frame belongs to.
+pub const STREAM_SHIFT: u8 = 4;
+pub const MAX_STREAMS: usize = 4;
+
+/// kind u8 | flags u8 | frag_idx u16 | frag_count u16 | checksum u16 | frame_id u32 | capture_us u64
+///
+/// `checksum` is [`fletcher16`] of the whole reassembled frame.
+pub const VIDEO_HEADER_LEN: usize = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoHeader {
+    pub flags: u8,
+    pub stream: u8,
+    pub frag_idx: u16,
+    pub frag_count: u16,
+    pub frame_id: u32,
+    /// Host clock (microseconds) at which the frame was captured.
+    pub capture_us: u64,
+    pub checksum: u16,
+}
+
+impl VideoHeader {
+    pub fn write(&self, out: &mut [u8]) {
+        out[0] = KIND_VIDEO;
+        out[1] = (self.flags & 0x0f) | (self.stream << STREAM_SHIFT);
+        out[2..4].copy_from_slice(&self.frag_idx.to_le_bytes());
+        out[4..6].copy_from_slice(&self.frag_count.to_le_bytes());
+        out[6..8].copy_from_slice(&self.checksum.to_le_bytes());
+        out[8..12].copy_from_slice(&self.frame_id.to_le_bytes());
+        out[12..20].copy_from_slice(&self.capture_us.to_le_bytes());
+    }
+
+    pub fn read(buf: &[u8]) -> Option<Self> {
+        if buf.len() < VIDEO_HEADER_LEN || buf[0] != KIND_VIDEO {
+            return None;
+        }
+        Some(Self {
+            flags: buf[1] & 0x0f,
+            stream: buf[1] >> STREAM_SHIFT,
+            frag_idx: u16::from_le_bytes([buf[2], buf[3]]),
+            frag_count: u16::from_le_bytes([buf[4], buf[5]]),
+            checksum: u16::from_le_bytes([buf[6], buf[7]]),
+            frame_id: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
+            capture_us: u64::from_le_bytes(buf[12..20].try_into().unwrap()),
+        })
+    }
+}
+
+/// Splits one encoded frame into datagrams no larger than `max_datagram`.
+pub fn fragment(
+    frame: &[u8],
+    stream: u8,
+    frame_id: u32,
+    keyframe: bool,
+    capture_us: u64,
+    max_datagram: usize,
+) -> Vec<Vec<u8>> {
+    let payload = max_datagram - VIDEO_HEADER_LEN;
+    let checksum = fletcher16(frame);
+    let frag_count = frame.len().div_ceil(payload).max(1);
+    assert!(frag_count <= u16::MAX as usize, "frame too large to fragment");
+    (0..frag_count)
+        .map(|i| {
+            let chunk = &frame[i * payload..((i + 1) * payload).min(frame.len())];
+            let mut dgram = vec![0u8; VIDEO_HEADER_LEN + chunk.len()];
+            VideoHeader {
+                flags: if keyframe { FLAG_KEYFRAME } else { 0 },
+                stream,
+                frag_idx: i as u16,
+                frag_count: frag_count as u16,
+                frame_id,
+                capture_us,
+                checksum,
+            }
+            .write(&mut dgram);
+            dgram[VIDEO_HEADER_LEN..].copy_from_slice(chunk);
+            dgram
+        })
+        .collect()
+}
+
+/// Fletcher-16 (mod 255), mirrored in web/proto.js. Detects corrupted reassembly before
+/// a bad frame reaches the decoder.
+pub fn fletcher16(data: &[u8]) -> u16 {
+    let (mut a, mut b) = (0u32, 0u32);
+    for chunk in data.chunks(4096) {
+        for &x in chunk {
+            a += x as u32;
+            b += a;
+        }
+        a %= 255;
+        b %= 255;
+    }
+    ((b << 8) | a) as u16
+}
+
+/// PING: kind u8 | pad [u8; 7] | client_ms f64
+/// PONG: kind u8 | pad [u8; 7] | client_ms f64 (echoed) | host_us u64
+pub fn pong(ping: &[u8], host_us: u64) -> Option<[u8; 24]> {
+    if ping.len() < 16 || ping[0] != KIND_PING {
+        return None;
+    }
+    let mut out = [0u8; 24];
+    out[0] = KIND_PONG;
+    out[8..16].copy_from_slice(&ping[8..16]);
+    out[16..24].copy_from_slice(&host_us.to_le_bytes());
+    Some(out)
+}
+
+pub const INPUT_EVENT_LEN: usize = 12;
+
+/// type u8 | button u8 | keycode u16 | a f32 | b f32 (for moves, `button` is the stream)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InputEvent {
+    /// Absolute position, normalized to 0..1 of display stream `stream`.
+    MouseMove { x: f32, y: f32, stream: u8 },
+    MouseDown { button: u8 },
+    MouseUp { button: u8 },
+    /// Pixel deltas, positive = content moves up/left (matches DOM `wheel` sign).
+    Scroll { dx: f32, dy: f32 },
+    /// macOS virtual keycode (kVK_*), mapped from `KeyboardEvent.code` by the client.
+    KeyDown { keycode: u16 },
+    KeyUp { keycode: u16 },
+}
+
+impl InputEvent {
+    pub fn read(buf: &[u8; INPUT_EVENT_LEN]) -> Option<Self> {
+        let button = buf[1];
+        let keycode = u16::from_le_bytes([buf[2], buf[3]]);
+        let a = f32::from_le_bytes(buf[4..8].try_into().unwrap());
+        let b = f32::from_le_bytes(buf[8..12].try_into().unwrap());
+        Some(match buf[0] {
+            1 => Self::MouseMove { x: a, y: b, stream: button },
+            2 => Self::MouseDown { button },
+            3 => Self::MouseUp { button },
+            4 => Self::Scroll { dx: a, dy: b },
+            5 => Self::KeyDown { keycode },
+            6 => Self::KeyUp { keycode },
+            _ => return None,
+        })
+    }
+
+    pub fn write(&self) -> [u8; INPUT_EVENT_LEN] {
+        let (kind, button, keycode, a, b) = match *self {
+            Self::MouseMove { x, y, stream } => (1, stream, 0, x, y),
+            Self::MouseDown { button } => (2, button, 0, 0.0, 0.0),
+            Self::MouseUp { button } => (3, button, 0, 0.0, 0.0),
+            Self::Scroll { dx, dy } => (4, 0, 0, dx, dy),
+            Self::KeyDown { keycode } => (5, 0, keycode, 0.0, 0.0),
+            Self::KeyUp { keycode } => (6, 0, keycode, 0.0, 0.0),
+        };
+        let mut out = [0u8; INPUT_EVENT_LEN];
+        out[0] = kind;
+        out[1] = button;
+        out[2..4].copy_from_slice(&keycode.to_le_bytes());
+        out[4..8].copy_from_slice(&a.to_le_bytes());
+        out[8..12].copy_from_slice(&b.to_le_bytes());
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fragments_reassemble() {
+        let frame: Vec<u8> = (0..5000u32).map(|i| i as u8).collect();
+        let dgrams = fragment(&frame, 2, 7, true, 123, 1200);
+        assert_eq!(dgrams.len(), 5000usize.div_ceil(1200 - VIDEO_HEADER_LEN));
+        let mut joined = Vec::new();
+        for (i, d) in dgrams.iter().enumerate() {
+            assert!(d.len() <= 1200);
+            let h = VideoHeader::read(d).unwrap();
+            assert_eq!((h.frag_idx as usize, h.frame_id, h.capture_us), (i, 7, 123));
+            assert_eq!((h.flags, h.stream), (FLAG_KEYFRAME, 2));
+            assert_eq!(h.checksum, fletcher16(&frame));
+            joined.extend_from_slice(&d[VIDEO_HEADER_LEN..]);
+        }
+        assert_eq!(joined, frame);
+    }
+
+    #[test]
+    fn fletcher16_known_values() {
+        assert_eq!(fletcher16(b"abcde"), 0xC8F0);
+        assert_eq!(fletcher16(b"abcdef"), 0x2057);
+    }
+
+    #[test]
+    fn input_roundtrip() {
+        for ev in [
+            InputEvent::MouseMove { x: 0.25, y: 0.75, stream: 1 },
+            InputEvent::MouseDown { button: 2 },
+            InputEvent::Scroll { dx: -3.0, dy: 40.0 },
+            InputEvent::KeyUp { keycode: 0x31 },
+        ] {
+            assert_eq!(InputEvent::read(&ev.write()), Some(ev));
+        }
+    }
+
+    #[test]
+    fn audio_packet_layout() {
+        let pcm: Vec<i16> = (0..AUDIO_FRAMES_PER_PACKET as i16 * 2).collect();
+        let p = audio_packet(9, 77, 2, &pcm);
+        assert_eq!(p.len(), AUDIO_HEADER_LEN + pcm.len() * 2);
+        assert!(p.len() <= 1200);
+        assert_eq!((p[0], p[1]), (KIND_AUDIO, 2));
+        assert_eq!(u32::from_le_bytes(p[4..8].try_into().unwrap()), 9);
+        assert_eq!(u64::from_le_bytes(p[8..16].try_into().unwrap()), 77);
+        assert_eq!(i16::from_le_bytes([p[18], p[19]]), 1);
+    }
+
+    #[test]
+    fn pong_echoes_client_time() {
+        let mut ping = [0u8; 16];
+        ping[0] = KIND_PING;
+        ping[8..16].copy_from_slice(&1234.5f64.to_le_bytes());
+        let p = pong(&ping, 99).unwrap();
+        assert_eq!(p[0], KIND_PONG);
+        assert_eq!(f64::from_le_bytes(p[8..16].try_into().unwrap()), 1234.5);
+        assert_eq!(u64::from_le_bytes(p[16..24].try_into().unwrap()), 99);
+    }
+}

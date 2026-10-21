@@ -1,0 +1,234 @@
+// Toolbar, panels, toasts and the token prompt. DOM writes only; no layout reads.
+
+const $ = (id) => document.getElementById(id);
+
+const TOOLBAR_IDLE_MS = 3000;
+
+export function createUI({ onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken }) {
+  const toolbar = $('toolbar');
+  // Each toolbar menu: its button and panel.
+  const menus = {
+    displays: { button: $('btn-displays'), panel: $('displays-panel') },
+    shortcuts: { button: $('btn-shortcuts'), panel: $('shortcuts-panel') },
+  };
+  const fileInput = $('file-input');
+  const toasts = $('toasts');
+  const auth = $('auth');
+
+  // Fade the toolbar when idle so it doesn't cover the remote screen.
+  let idleTimer;
+  function wakeToolbar() {
+    toolbar.classList.remove('idle');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => toolbar.classList.add('idle'), TOOLBAR_IDLE_MS);
+  }
+  toolbar.addEventListener('pointerenter', wakeToolbar);
+  toolbar.addEventListener('pointerdown', wakeToolbar);
+  wakeToolbar();
+
+  // Toolbar buttons must not steal pointer events from the canvas logic or keep focus.
+  const on = (id, fn) => $(id).addEventListener('click', (e) => { e.preventDefault(); wakeToolbar(); fn(e); });
+
+  on('btn-displays', () => toggleMenu('displays'));
+  on('btn-shortcuts', () => toggleMenu('shortcuts'));
+  on('btn-keyboard', onKeyboard);
+  on('btn-upload', () => fileInput.click());
+  on('btn-download', onRequestFiles);
+  on('btn-audio', onAudio);
+  on('btn-fullscreen', onFullscreen);
+  on('btn-stats', onToggleStats);
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length) onUploadFiles([...fileInput.files]);
+    fileInput.value = '';
+  });
+
+  // Drag-and-drop files from the client device onto the remote screen.
+  addEventListener('dragover', (e) => e.preventDefault());
+  addEventListener('drop', (e) => {
+    e.preventDefault();
+    const files = [...(e.dataTransfer?.files ?? [])];
+    if (files.length) onUploadFiles(files);
+  });
+
+  function setMenuOpen(name, open) {
+    const { button, panel } = menus[name];
+    panel.classList.toggle('hidden', !open);
+    button.setAttribute('aria-expanded', String(open));
+  }
+  function toggleMenu(name) {
+    for (const other of Object.keys(menus)) {
+      setMenuOpen(other, other === name && menus[name].panel.classList.contains('hidden'));
+    }
+  }
+  addEventListener('pointerdown', (e) => {
+    for (const [name, { button, panel }] of Object.entries(menus)) {
+      if (!panel.contains(e.target) && !button.contains(e.target)) setMenuOpen(name, false);
+    }
+  }, { capture: true });
+
+  function menuItem(label, meta, { checked, onSelect }) {
+    const b = document.createElement('button');
+    b.setAttribute('role', checked === undefined ? 'menuitem' : 'menuitemradio');
+    if (checked !== undefined) b.setAttribute('aria-checked', String(checked));
+    const l = document.createElement('span');
+    l.textContent = label;
+    const m = document.createElement('span');
+    m.className = 'meta';
+    m.textContent = meta;
+    b.append(l, m);
+    b.addEventListener('click', onSelect);
+    return b;
+  }
+
+  function toggleItem(label, meta, initial, onChange) {
+    let on = initial;
+    const item = menuItem(label, meta, {
+      checked: on,
+      onSelect: () => {
+        on = !on;
+        item.setAttribute('aria-checked', String(on));
+        onChange(on);
+      },
+    });
+    return item;
+  }
+  const ctrlItem = toggleItem('Ctrl as ⌘', '⌃⇥ ⌃Space ⌃H ⌃⇧3–5', ctrlAsCmd, onCtrlAsCmd);
+
+  let swapOn = swapCmdOption;
+  const swapItem = menuItem('Swap ⌘ and ⌥', 'see note', {
+    checked: swapOn,
+    onSelect: () => {
+      swapOn = !swapOn;
+      swapItem.setAttribute('aria-checked', String(swapOn));
+      onSwapCmdOption(swapOn);
+    },
+  });
+  swapItem.title = 'Pair with iPad Settings › General › Keyboard › Hardware Keyboard › Modifier Keys: Command → Option, Option → Command. Lets ⌘Tab, ⌘Space and ⌘H reach the Mac.';
+  const note = document.createElement('p');
+  note.className = 'note';
+  note.textContent = 'iPadOS keeps ⌘Tab, ⌘Space, ⌘H and ⌘⇧3–5. “Ctrl as ⌘” sends those combos when you press Ctrl instead. Alternatively swap Command and Option in iPad Settings › Keyboard › Hardware Keyboard › Modifier Keys and turn on “Swap ⌘ and ⌥”.';
+  const divider = document.createElement('hr');
+
+  menus.shortcuts.panel.replaceChildren(
+    ctrlItem,
+    swapItem,
+    note,
+    divider,
+    ...shortcuts.map((sc) =>
+      menuItem(sc.label, sc.keysLabel, {
+        onSelect: () => {
+          setMenuOpen('shortcuts', false);
+          onShortcut(sc);
+        },
+      }),
+    ),
+  );
+
+  /** `streamed` lists the display ids currently shown, in stream order. */
+  function renderDisplays(displays, streamed) {
+    const all = streamed.length > 1;
+    const names = positionNames(displays);
+    const ordered = [...displays].sort((a, b) => a.x - b.x || a.y - b.y);
+    const items = ordered.map((d) =>
+      menuItem(names.get(d.id), `${d.width}×${d.height}${d.main ? ' · main' : ''}`, {
+        checked: !all && streamed[0] === d.id,
+        onSelect: () => {
+          setMenuOpen('displays', false);
+          if (all || streamed[0] !== d.id) onSelectDisplay(d.id);
+        },
+      }),
+    );
+    if (displays.length > 1) {
+      items.push(
+        menuItem('All displays', `${displays.length} side by side`, {
+          checked: all,
+          onSelect: () => {
+            setMenuOpen('displays', false);
+            if (!all) onSelectDisplay('all');
+          },
+        }),
+      );
+    }
+    menus.displays.panel.replaceChildren(...items);
+  }
+
+  /** Names displays by where they sit in the macOS arrangement: Left / Right, Top / Bottom. */
+  function positionNames(displays) {
+    const horizontal =
+      Math.max(...displays.map((d) => d.x)) - Math.min(...displays.map((d) => d.x)) >=
+      Math.max(...displays.map((d) => d.y)) - Math.min(...displays.map((d) => d.y));
+    const key = horizontal ? 'x' : 'y';
+    const ordered = [...displays].sort((a, b) => a[key] - b[key]);
+    const words = horizontal ? ['Left', 'Middle', 'Right'] : ['Top', 'Middle', 'Bottom'];
+    const names = new Map();
+    ordered.forEach((d, i) => {
+      let name;
+      if (displays.length === 1) name = d.builtin ? 'Built-in display' : 'Display';
+      else if (displays.length === 2) name = `${words[i === 0 ? 0 : 2]} display`;
+      else if (displays.length === 3) name = `${words[i]} display`;
+      else name = `Display ${i + 1}`;
+      names.set(d.id, name);
+    });
+    return names;
+  }
+
+  function toast({ text, kind, action, timeout = 4000, progress }) {
+    const el = document.createElement('div');
+    el.className = `toast${kind === 'error' ? ' error' : ''}`;
+    const label = document.createElement('span');
+    label.className = 'text';
+    label.textContent = text;
+    el.append(label);
+    let bar;
+    if (progress !== undefined) {
+      bar = document.createElement('progress');
+      bar.max = 1;
+      bar.value = progress;
+      el.append(bar);
+    }
+    if (action) {
+      const b = document.createElement('button');
+      b.textContent = action.label;
+      b.addEventListener('click', () => { action.run(); el.remove(); });
+      el.append(b);
+    }
+    toasts.append(el);
+    let timer;
+    const api = {
+      update({ text: t, progress: p }) {
+        if (t !== undefined) label.textContent = t;
+        if (bar && p !== undefined) bar.value = p;
+      },
+      dismiss(after = 0) {
+        clearTimeout(timer);
+        timer = setTimeout(() => el.remove(), after);
+      },
+    };
+    if (timeout) api.dismiss(timeout);
+    return api;
+  }
+
+  auth.querySelector('form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const token = new FormData(e.target).get('token').trim();
+    if (!token) return;
+    auth.classList.add('hidden');
+    onToken(token);
+  });
+
+  return {
+    renderDisplays,
+    toast,
+    showAuth() {
+      auth.classList.remove('hidden');
+      auth.querySelector('input').focus();
+    },
+    setAudioAvailable(available) {
+      $('btn-audio').classList.toggle('hidden', !available);
+    },
+    setAudioOn(on) {
+      $('audio-waves').style.opacity = on ? '1' : '0.25';
+    },
+  };
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "getglass",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    // The Worker decides who gets the install script and counts downloads.
+    "run_worker_first": ["/", "/install.sh", "/releases/*", "/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "getglass",
+      "database_id": "461a85fd-6d3b-45d2-b7f2-a956d8a262f0",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Add once getglass.lol is registered: "routes": [{ "pattern": "getglass.lol", "custom_domain": true }],
+  "workers_dev": true,
+  "observability": { "enabled": true }
+}

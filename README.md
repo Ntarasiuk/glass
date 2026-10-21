@@ -1,0 +1,67 @@
+# Glass
+
+Low-latency remote desktop for macOS. Install it on a Mac, then see and control that Mac from a browser on an iPad, iPhone or another computer, typically 15–30 ms from screen capture to display.
+
+```sh
+curl -fsSL getglass.lol | sh
+```
+
+Run that on the Mac you want to control. It installs Glass and starts `glass setup`, which walks you through Tailscale, the background service and macOS permissions, then shows a QR code to open on your iPad. Full docs: [getglass.lol/docs](https://getglass.lol/docs) (also as [markdown](site/docs.md)).
+
+## Features
+
+- **Low latency.** Hardware H.264, WebTransport datagrams, WebCodecs decode in a worker, no jitter buffer.
+- **Just a browser** on the viewing device. Add it to the Home Screen for a fullscreen app.
+- **Full control.** Mouse, trackpad, keyboard and touch, including at the lock screen. ⌘Tab via "Ctrl as ⌘" on iPad.
+- **Multiple displays.** Switch, or show all of them side by side, arranged like System Settings.
+- **Audio, clipboard sync and file transfer** in both directions.
+- **Private.** Runs over your Tailscale tailnet. Your own devices are let in automatically; anything else needs a token.
+- **Resilient.** Reconnects after tab suspension, sleep or restarts. Corrupted frames are detected by checksum and never decoded.
+
+## How it works
+
+```
+Mac (glass)                                             Browser
+ScreenCaptureKit ─▶ VideoToolbox H.264 ─▶ WebTransport ─▶ WebCodecs ─▶ OffscreenCanvas
+ (IOSurface,         (hardware,           datagrams        (worker)
+  on change)          low-latency RC)     over QUIC
+CGEvent ◀───────────── input stream ◀──────────────────── pointer / keyboard / touch
+NSPasteboard, files ◀─▶ control + file streams ◀─────────▶ clipboard, uploads, downloads
+```
+
+- `crates/glass-proto`: wire format (mirrored in `web/proto.js`).
+- `crates/glass-host`: the `glass` binary: capture, encode, audio, input injection, WebTransport/HTTPS server, setup wizard, LaunchAgent.
+- `web/`: browser client, no build step.
+- `site/`: getglass.lol, a Cloudflare Worker with static assets plus D1 for download counts and feedback.
+
+## Development
+
+Requirements: macOS 13+, Rust (stable), and Node for the site.
+
+```sh
+cargo run --release -p glass-host          # serves http://localhost:8080
+open http://localhost:8080
+```
+
+The process you run it from (your terminal) needs Screen Recording and Accessibility permission. With Tailscale HTTPS enabled, the host fetches a certificate automatically, so other tailnet devices can connect at `https://<mac>.<tailnet>.ts.net:8080`.
+
+Logs from both the host and connected browsers go to `logs/` (`host.log`, `client.log`), which makes it easy to debug issues on an iPad without a debugger attached.
+
+```sh
+cargo test                                  # protocol and host unit tests
+./scripts/package.sh                        # universal release tarball in dist/
+cd site && npm install && npm run dev       # site locally (wrangler dev)
+```
+
+## Status
+
+Early but daily-driven. Known rough edges:
+
+- Updates ask for Screen Recording and Accessibility again, because unsigned binaries change identity on each build. Code signing would fix it.
+- Safari's hardware video decoder occasionally resets. Glass recovers in a fraction of a second and falls back to steadier decoder settings.
+
+Feedback: `glass feedback "…"`, the form at [getglass.lol](https://getglass.lol/#feedback), or GitHub issues.
+
+## License
+
+[MIT](LICENSE)

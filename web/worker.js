@@ -1,0 +1,380 @@
+// Owns the WebTransport session, frame reassembly, WebCodecs decode and drawing,
+// so none of the video path touches the main thread.
+
+import {
+  AUDIO_HEADER_LEN, KIND_AUDIO, KIND_KEYFRAME_REQUEST, KIND_PONG, KIND_VIDEO,
+  ping, readPong, readVideoHeader,
+} from './proto.js';
+import { VideoStream, setDecoderStep } from './video-stream.js';
+
+const PING_INTERVAL_MS = 500;
+const CLOCK_SAMPLES = 16;
+const RECONNECT_MIN_MS = 250;
+const RECONNECT_MAX_MS = 5000;
+// Pongs arrive every PING_INTERVAL_MS, so this long without any datagram means the
+// session is dead even if the transport hasn't noticed (e.g. after iPadOS suspends the tab).
+const SILENCE_TIMEOUT_MS = 3000;
+
+const log = (level, msg, data) => self.postMessage({ type: 'log', level, msg, data });
+self.addEventListener('unhandledrejection', (e) =>
+  log('error', `worker unhandled rejection: ${e.reason?.message ?? e.reason}`, { stack: e.reason?.stack }));
+
+const STREAM_INPUT = 0x49; // 'I'
+const STREAM_FILE = 0x46; // 'F'
+const encoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+let url;
+let certHash;
+let token;
+let rejected = false;
+let controlWriter;
+let audioPort; // MessagePort of the main thread's AudioWorkletNode
+let audioOn = false;
+let visible = true;
+let audioPackets = 0;
+let audioLost = 0;
+let lastAudioSeq;
+let audioUnderruns = 0;
+let transport;
+let lastRxMs = 0;
+let kill; // ends the current session's read loop even if the transport never reports closing
+let wake; // resolves the reconnect backoff early
+let datagramWriter;
+let inputWriter;
+
+// Host clock offset (µs), taken from the lowest-RTT recent ping.
+const clockSamples = [];
+let clockOffsetUs = 0;
+let rttMs = 0;
+
+const stats = { frames: 0, bytes: 0, latencySum: 0, latencyMax: 0, dropped: 0 };
+
+const streamEnv = {
+  log,
+  post: (msg) => self.postMessage(msg),
+  stats,
+  hostNowUs: () => performance.now() * 1000 + clockOffsetUs,
+  requestKeyframe: (index) => datagramWriter?.write(new Uint8Array([KIND_KEYFRAME_REQUEST, index])).catch(() => {}),
+};
+const streams = []; // VideoStream per host stream number
+function videoStream(index) {
+  return (streams[index] ??= new VideoStream(index, streamEnv));
+}
+
+self.onmessage = async ({ data }) => {
+  if (data.type === 'init') {
+    ({ url, certHash, token } = data);
+    setDecoderStep(data.decoderStep ?? 0);
+    setInterval(() => datagramWriter?.write(ping(performance.now())).catch(() => {}), PING_INTERVAL_MS);
+    setInterval(tick, 1000);
+    run();
+  } else if (data.type === 'canvas') {
+    videoStream(data.stream).setCanvas(data.canvas);
+  } else if (data.type === 'streams') {
+    // Streams the host no longer sends give up their decoders.
+    for (const s of streams.slice(data.count)) s?.release();
+  } else if (data.type === 'input') {
+    inputWriter?.write(data.bytes).catch(() => {});
+  } else if (data.type === 'control') {
+    sendControl(data.msg);
+  } else if (data.type === 'sendFile') {
+    sendFile(data.file).catch((e) => log('error', `send file failed: ${e.message ?? e}`));
+  } else if (data.type === 'token') {
+    token = data.token;
+    rejected = false;
+    transport?.close();
+    wake?.();
+  } else if (data.type === 'visible') {
+    setVisible(data.visible);
+  } else if (data.type === 'audioPort') {
+    audioPort = data.port;
+    // Underruns are normal when a sound ends; count them for the stats instead of logging.
+    audioPort.onmessage = ({ data: m }) => { audioUnderruns = m.underruns; };
+  } else if (data.type === 'audioToggle') {
+    audioOn = !audioOn;
+    sendControl({ t: 'audio', on: audioOn });
+    self.postMessage({ type: 'audio', on: audioOn });
+  } else if (data.type === 'wake') {
+    // Tab became visible or network came back: skip the remaining backoff, and drop a
+    // session that went quiet while suspended instead of waiting for the watchdog.
+    if (transport && performance.now() - lastRxMs > PING_INTERVAL_MS * 2) kill?.('woke with a stale session');
+    wake?.();
+  }
+};
+
+async function run() {
+  let delay = RECONNECT_MIN_MS;
+  for (;;) {
+    // After a rejection, retrying would only be rejected again; wait for a new token.
+    while (rejected) {
+      self.postMessage({ type: 'status', text: 'waiting for access token' });
+      await new Promise((resolve) => { wake = resolve; });
+    }
+    try {
+      await connect();
+      delay = RECONNECT_MIN_MS;
+      self.postMessage({ type: 'status', level: 'warn', text: 'disconnected, reconnecting…' });
+    } catch (e) {
+      self.postMessage({ type: 'status', level: 'error', text: `connection failed: ${e.message ?? e}, retrying…` });
+    }
+    resetSession();
+    await new Promise((resolve) => {
+      wake = resolve;
+      setTimeout(resolve, delay);
+    });
+    wake = undefined;
+    delay = Math.min(delay * 2, RECONNECT_MAX_MS);
+  }
+}
+
+function resetSession() {
+  kill = undefined;
+  try { transport?.close(); } catch {}
+  transport = datagramWriter = inputWriter = controlWriter = undefined;
+  for (const s of streams) s?.reset();
+  clockSamples.length = 0;
+}
+
+/** Resolves when the session ends; throws if it never came up. */
+async function connect() {
+  const options = certHash
+    ? { serverCertificateHashes: [{ algorithm: 'sha-256', value: new Uint8Array(certHash) }] }
+    : {};
+  log('info', 'connecting', { url, pinned: !!certHash });
+  transport = new WebTransport(url, options);
+  transport.closed.catch(() => {});
+  await transport.ready;
+  lastRxMs = performance.now();
+  log('info', 'transport ready', {
+    createWritable: typeof transport.datagrams.createWritable === 'function',
+    writable: !!transport.datagrams.writable,
+    maxDatagramSize: transport.datagrams.maxDatagramSize,
+  });
+  self.postMessage({ type: 'status', text: 'connected' });
+  self.postMessage({ type: 'connected' });
+
+  // Current spec (Safari) uses createWritable(); Chromium still exposes `writable`.
+  const writable = transport.datagrams.createWritable?.() ?? transport.datagrams.writable;
+  datagramWriter = writable.getWriter();
+
+  // Control stream first: the host ignores everything else until hello is accepted.
+  const control = await transport.createBidirectionalStream();
+  controlWriter = control.writable.getWriter();
+  sendControl({ t: 'hello', token });
+  if (audioOn) sendControl({ t: 'audio', on: true });
+  if (!visible) sendControl({ t: 'video', on: false });
+  readControl(control.readable).catch((e) => log('warn', `control read ended: ${e.message ?? e}`));
+
+  const inputStream = await transport.createUnidirectionalStream();
+  inputWriter = inputStream.getWriter();
+  inputWriter.write(new Uint8Array([STREAM_INPUT]));
+  acceptIncoming(transport).catch(() => {});
+
+  const reader = transport.datagrams.readable.getReader();
+  const killed = new Promise((resolve) => { kill = resolve; });
+  for (;;) {
+    let result;
+    try {
+      result = await Promise.race([reader.read(), killed.then((reason) => ({ killed: reason }))]);
+    } catch (e) {
+      log('warn', `datagram read ended: ${e.message ?? e}`);
+      break;
+    }
+    if (result.killed) {
+      log('warn', `session killed: ${result.killed}`);
+      reader.releaseLock?.();
+      break;
+    }
+    const { value, done } = result;
+    if (done) break;
+    lastRxMs = performance.now();
+    const view = new DataView(value.buffer, value.byteOffset, value.byteLength);
+    const kind = view.getUint8(0);
+    if (kind === KIND_VIDEO) {
+      const h = readVideoHeader(view);
+      videoStream(h.stream).onFragment(h, value);
+    }
+    else if (kind === KIND_AUDIO) onAudio(view, value);
+    else if (kind === KIND_PONG) onPong(view);
+  }
+}
+
+/**
+ * iPadOS has few hardware decoders; a hidden tab gives its up and pauses video on the
+ * host, then resumes from a fresh keyframe when shown again.
+ */
+function setVisible(next) {
+  if (next === visible) return;
+  visible = next;
+  sendControl({ t: 'video', on: visible });
+  if (!visible) for (const s of streams) s?.release();
+  log('info', `video ${visible ? 'resumed' : 'paused'} (tab ${visible ? 'visible' : 'hidden'})`);
+}
+
+function sendControl(msg) {
+  if (!controlWriter) return;
+  const body = encoder.encode(JSON.stringify(msg));
+  const frame = new Uint8Array(4 + body.length);
+  new DataView(frame.buffer).setUint32(0, body.length, true);
+  frame.set(body, 4);
+  controlWriter.write(frame).catch(() => {});
+}
+
+/** Reads exactly `n` bytes from a byte-stream reader, buffering leftovers. */
+function byteReader(readable) {
+  const reader = readable.getReader();
+  let buf = new Uint8Array(0);
+  return {
+    async read(n) {
+      while (buf.length < n) {
+        const { value, done } = await reader.read();
+        if (done) return undefined;
+        const next = new Uint8Array(buf.length + value.length);
+        next.set(buf);
+        next.set(value, buf.length);
+        buf = next;
+      }
+      const out = buf.slice(0, n);
+      buf = buf.slice(n);
+      return out;
+    },
+    /** Yields whatever is buffered, then the rest of the stream as-is. */
+    async *rest() {
+      if (buf.length) yield buf;
+      buf = new Uint8Array(0);
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        yield value;
+      }
+    },
+  };
+}
+
+async function readControl(readable) {
+  const r = byteReader(readable);
+  for (;;) {
+    const len = await r.read(4);
+    if (!len) return;
+    const body = await r.read(new DataView(len.buffer).getUint32(0, true));
+    if (!body) return;
+    const msg = JSON.parse(textDecoder.decode(body));
+    if (msg.t === 'error' && msg.msg === 'unauthorized') {
+      rejected = true;
+      self.postMessage({ type: 'unauthorized' });
+    }
+    self.postMessage({ type: 'control', msg });
+  }
+}
+
+async function sendFile(file) {
+  if (!transport) throw new Error('not connected');
+  const id = `${Date.now()}-${file.name}`;
+  const header = encoder.encode(JSON.stringify({ name: file.name, size: file.size }));
+  const prefix = new Uint8Array(5 + header.length);
+  prefix[0] = STREAM_FILE;
+  new DataView(prefix.buffer).setUint32(1, header.length, true);
+  prefix.set(header, 5);
+
+  const stream = await transport.createUnidirectionalStream();
+  const writer = stream.getWriter();
+  await writer.write(prefix);
+  const reader = file.stream().getReader();
+  let sent = 0;
+  let lastReport = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    await writer.write(value);
+    sent += value.byteLength;
+    if (performance.now() - lastReport > 200) {
+      lastReport = performance.now();
+      self.postMessage({ type: 'fileProgress', id, name: file.name, done: sent, total: file.size, direction: 'up' });
+    }
+  }
+  await writer.close();
+  self.postMessage({ type: 'fileProgress', id, name: file.name, done: file.size, total: file.size, direction: 'up' });
+  log('info', 'file sent', { name: file.name, size: file.size });
+}
+
+async function acceptIncoming(t) {
+  const reader = t.incomingUnidirectionalStreams.getReader();
+  for (;;) {
+    const { value: stream, done } = await reader.read();
+    if (done) return;
+    receiveFile(stream).catch((e) => log('error', `receive file failed: ${e.message ?? e}`));
+  }
+}
+
+async function receiveFile(readable) {
+  const r = byteReader(readable);
+  const tag = await r.read(1);
+  if (!tag || tag[0] !== STREAM_FILE) return;
+  const len = await r.read(4);
+  const header = JSON.parse(textDecoder.decode(await r.read(new DataView(len.buffer).getUint32(0, true))));
+  const id = `${Date.now()}-${header.name}`;
+  const chunks = [];
+  let got = 0;
+  let lastReport = 0;
+  for await (const chunk of r.rest()) {
+    chunks.push(chunk);
+    got += chunk.byteLength;
+    if (performance.now() - lastReport > 200) {
+      lastReport = performance.now();
+      self.postMessage({ type: 'fileProgress', id, name: header.name, done: got, total: header.size, direction: 'down' });
+    }
+  }
+  if (got !== header.size) throw new Error(`${header.name}: got ${got} of ${header.size} bytes`);
+  const file = new File(chunks, header.name);
+  self.postMessage({ type: 'fileReceived', id, file });
+  log('info', 'file received', { name: header.name, size: got });
+}
+
+function onAudio(view, bytes) {
+  if (!audioPort || !audioOn) return;
+  const seq = view.getUint32(4, true);
+  if (lastAudioSeq !== undefined && seq !== ((lastAudioSeq + 1) >>> 0)) audioLost++;
+  lastAudioSeq = seq;
+  audioPackets++;
+  // Copy into a fresh, aligned buffer and hand it over without another copy.
+  const pcm = bytes.slice(AUDIO_HEADER_LEN).buffer;
+  audioPort.postMessage({ pcm, channels: view.getUint8(1) }, [pcm]);
+}
+
+function onPong(view) {
+  const now = performance.now();
+  const { clientMs, hostUs } = readPong(view);
+  const rtt = now - clientMs;
+  clockSamples.push({ rtt, offsetUs: hostUs - ((clientMs + now) / 2) * 1000 });
+  if (clockSamples.length > CLOCK_SAMPLES) clockSamples.shift();
+  const best = clockSamples.reduce((a, b) => (b.rtt < a.rtt ? b : a));
+  clockOffsetUs = best.offsetUs;
+  rttMs = rtt;
+}
+
+function tick() {
+  if (kill && performance.now() - lastRxMs > SILENCE_TIMEOUT_MS) {
+    kill(`no data for ${SILENCE_TIMEOUT_MS} ms`);
+    kill = undefined;
+  }
+  reportStats();
+}
+
+function reportStats() {
+  self.postMessage({
+    type: 'stats',
+    fps: stats.frames,
+    mbps: (stats.bytes * 8) / 1e6,
+    latencyAvg: stats.frames ? stats.latencySum / stats.frames : 0,
+    latencyMax: stats.latencyMax,
+    rtt: rttMs,
+    dropped: stats.dropped,
+    audioPackets,
+    audioLost,
+    audioUnderruns,
+  });
+  audioPackets = 0;
+  audioLost = 0;
+  Object.assign(stats, { frames: 0, bytes: 0, latencySum: 0, latencyMax: 0, dropped: 0 });
+}

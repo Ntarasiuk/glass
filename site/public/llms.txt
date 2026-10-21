@@ -1,0 +1,15 @@
+# Glass
+
+> Glass is a free, low-latency remote desktop for macOS. Install it on a Mac, then see and control that Mac from a browser on an iPad, iPhone, or another computer. Typical latency is 15–30 ms from screen capture to display, including over Tailscale. Nothing to install on the viewing device.
+
+Install on the Mac to be controlled: `curl -fsSL getglass.lol | sh` (macOS 13+, Apple Silicon or Intel). The installer starts `glass setup`, a guided setup for Tailscale, the background service and permissions. Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free.
+
+## Docs
+
+- [Full documentation](https://getglass.lol/llms-full.txt): everything in one file: install, setup, features, keyboard behaviour on iPad, CLI reference, architecture, security, troubleshooting, FAQ
+- [Documentation (HTML)](https://getglass.lol/docs): the same, as a web page
+- [Install script](https://getglass.lol/install.sh): what `curl -fsSL getglass.lol | sh` runs
+
+## Optional
+
+- [Feedback API](https://getglass.lol/docs.md#feedback): `POST https://getglass.lol/api/feedback` with JSON `{"message": "…"}`
