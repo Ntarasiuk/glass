@@ -70,6 +70,9 @@ test('a link from anywhere connects over WebRTC: video, input and files', async 
     await page.locator('#btn-download').click();
     await expect(page.locator('.toast', { hasText: 'glass-test-pick', has: page.locator('.action') })).toBeVisible({ timeout: 10_000 });
 
+    // Its logs reach the host over the connection (there's no web server to post them to).
+    await expect.poll(() => host.clientLog('remote: connected').length, { timeout: 10_000 }).toBeGreaterThan(0);
+
     // A reload signs in with the saved pass, not the spent link.
     await page.reload();
     await expectVideo(page);

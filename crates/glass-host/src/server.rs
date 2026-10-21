@@ -113,6 +113,7 @@ pub async fn run(
             }))
         }
     };
+    let _ = CLIENT_LOG.set(client_log.clone());
     let machines_cache = Arc::new(tokio::sync::Mutex::new(None));
     let app = axum::Router::new()
         .merge(extra_routes.unwrap_or_default())
@@ -387,9 +388,7 @@ async fn control(
     }
     let Some(auth) = auth else {
         record_auth_failure(shared, peer);
-        warn!(
-            "{peer}: rejected (bad or missing token)"
-        );
+        warn!("{peer}: rejected (bad or missing token)");
         if link_failed {
             let msg = "This link has expired or was already used. Ask for a new one.".into();
             control::write_json(&mut send, &ServerMsg::Error { msg }).await?;
@@ -410,17 +409,13 @@ async fn control(
     let guest = matches!(auth, Auth::Guest { .. });
     match &auth {
         Auth::Token => info!("{peer}: authenticated via token"),
-        Auth::Tailnet => info!(
-            "{peer}: authenticated via tailnet identity"
-        ),
+        Auth::Tailnet => info!("{peer}: authenticated via tailnet identity"),
         Auth::Guest { expires, new, .. } => {
             let left = crate::access::describe(Duration::from_secs(
                 expires.saturating_sub(crate::access::now()),
             ));
             let how = if *new { "magic link" } else { "guest pass" };
-            info!(
-                "{peer}: authenticated via {how} ({left} left)"
-            );
+            info!("{peer}: authenticated via {how} ({left} left)");
         }
     }
     if let Auth::Guest {
@@ -529,10 +524,7 @@ async fn control(
                 if on {
                     shared.video.request_keyframe(None);
                 }
-                info!(
-                    "{peer}: video {}",
-                    if on { "resumed" } else { "paused" }
-                );
+                info!("{peer}: video {}", if on { "resumed" } else { "paused" });
             }
             ClientMsg::Update if guest => warn!("{peer}: guest asked to update the host; ignored"),
             ClientMsg::Update => {
@@ -542,6 +534,22 @@ async fn control(
                     let _ = ctx.ctl_tx.send(ServerMsg::Error {
                         msg: format!("update: {e:#}"),
                     });
+                }
+            }
+            ClientMsg::Log { lines } => {
+                if let Some(path) = CLIENT_LOG.get() {
+                    let body = lines
+                        .iter()
+                        .take(LOG_LINES_MAX)
+                        .map(|l| {
+                            l.chars()
+                                .take(LOG_LINE_MAX)
+                                .collect::<String>()
+                                .replace('\n', " ")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    append_client_log(path.clone(), body).await;
                 }
             }
             ClientMsg::NetStats(report) => {
@@ -558,10 +566,7 @@ async fn control(
             }
             ClientMsg::Audio { on } => {
                 ctx.audio_on.store(on, Ordering::Relaxed);
-                info!(
-                    "{peer}: audio {}",
-                    if on { "on" } else { "off" }
-                );
+                info!("{peer}: audio {}", if on { "on" } else { "off" });
             }
             ClientMsg::PickFiles => {
                 let ctx = ctx.clone();
@@ -846,6 +851,12 @@ fn web_version(dir: &std::path::Path) -> String {
 }
 
 /// Client log batches arrive as JSON lines; appended verbatim with a receive timestamp.
+/// Where client logs go; set once the server starts.
+static CLIENT_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// Caps on log lines arriving over the control stream (remote clients).
+const LOG_LINES_MAX: usize = 200;
+const LOG_LINE_MAX: usize = 4096;
+
 async fn append_client_log(path: PathBuf, body: String) {
     use std::io::Write;
     let now = unix_now();

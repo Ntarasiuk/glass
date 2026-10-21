@@ -4,7 +4,7 @@
 import { inputEvent } from './proto.js';
 import { attachInput } from './input.js';
 import { createUI } from './ui.js';
-import { log } from './log.js';
+import { log, setLogSink } from './log.js';
 import { MAC_KEYCODES as K } from './keymap.js';
 import { hostIdFor, serveRtc } from './rtc.js';
 
@@ -268,6 +268,8 @@ worker.onmessage = ({ data }) => {
         if (++machineFailures >= MACHINE_MAX_FAILURES) giveUpOnMachine();
       }
       status = data.text;
+      // Logs wait (in log.js) until the next session is signed in.
+      if (status !== 'connected') setLogSink(undefined);
       onConnectionStatus(status);
       log(data.level ?? 'info', `status: ${status}`);
       break;
@@ -326,6 +328,7 @@ function onControl(msg) {
       ui.setAudioAvailable(msg.audio);
       input.setHostOs(msg.host_os ?? 'macos');
       ui.setHostOs(msg.host_os ?? 'macos');
+      if (remoteKey) setLogSink((lines) => control({ t: 'log', lines }));
       guest = Boolean(msg.guest);
       // Remote: other machines aren't reachable from here, so no machines menu either.
       ui.setGuest(guest || Boolean(remoteKey));

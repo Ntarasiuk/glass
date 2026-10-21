@@ -50,6 +50,8 @@ pub enum ClientMsg {
     Update,
     /// Last second's receive stats, for adaptive bitrate.
     NetStats(crate::rate::Report),
+    /// Log lines from a client that has no web server to post them to (remote access).
+    Log { lines: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize)]

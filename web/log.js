@@ -9,13 +9,23 @@ export function log(level, msg, data) {
   if (level === 'error') console.error(msg, data ?? '');
 }
 
-// Remote access (glassdesk.dev/app/) has no host web server to send logs to.
+// Remote access (glassdesk.dev/app/) has no host web server to post logs to: they go
+// over the connection instead, once it's signed in (main.js sets the sink).
 const remote = new URLSearchParams(location.hash.slice(1)).has('r');
+const REMOTE_QUEUE_MAX = 500;
+let sink;
+
+/** `send(lines)` delivers logs over the connection; undefined while it's not usable. */
+export function setLogSink(send) {
+  sink = send;
+  if (sink) flush();
+}
 
 function flush() {
   if (!queue.length) return;
   if (remote) {
-    queue.length = 0;
+    if (sink) sink(queue.splice(0, 200));
+    else if (queue.length > REMOTE_QUEUE_MAX) queue.splice(0, queue.length - REMOTE_QUEUE_MAX);
     return;
   }
   const body = queue.splice(0).join('\n');
