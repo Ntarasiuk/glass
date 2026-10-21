@@ -738,6 +738,10 @@ async fn fit(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>) -> Result<(
 
 #[cfg(not(target_os = "macos"))]
 async fn fit(ctx: &SessionCtx, _session: u64, size: Option<[u32; 2]>) -> Result<()> {
+    if crate::testmode::enabled() {
+        crate::testmode::record_fit(size);
+        return Ok(());
+    }
     if size.is_some() {
         let msg = "Fitting the desktop to this device isn't available on Linux yet.".into();
         let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
