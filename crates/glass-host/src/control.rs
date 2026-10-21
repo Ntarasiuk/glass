@@ -29,6 +29,9 @@ pub enum ClientMsg {
         /// A guest pass a link was traded for earlier.
         #[serde(default)]
         pass: Option<String>,
+        /// What the viewer is, e.g. "Safari on iPad" (shown on the host).
+        #[serde(default)]
+        device: Option<String>,
     },
     /// Stream just this display.
     SelectDisplay { id: u32 },

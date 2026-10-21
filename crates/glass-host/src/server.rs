@@ -358,8 +358,17 @@ async fn control(
         return Ok(());
     }
     let hello_ok = matches!(hello, Ok(Some(ClientMsg::Hello { .. })));
+    let mut hello_device = None;
     let (token, link, pass) = match hello {
-        Ok(Some(ClientMsg::Hello { token, link, pass })) => (token, link, pass),
+        Ok(Some(ClientMsg::Hello {
+            token,
+            link,
+            pass,
+            device,
+        })) => {
+            hello_device = device;
+            (token, link, pass)
+        }
         _ => (None, None, None),
     };
     let expected = control::load_or_create_token(&shared.token_file).unwrap_or_default();
@@ -443,6 +452,29 @@ async fn control(
             info!("{peer}: authenticated via {how} ({left} left)");
         }
     }
+    // Shown on the host (menu bar / notification) for as long as this session lasts.
+    let how = match &auth {
+        Auth::Token => crate::viewers::How::Token,
+        Auth::Tailnet => crate::viewers::How::Tailnet,
+        Auth::Guest { .. } => crate::viewers::How::Guest,
+    };
+    let mut device = crate::viewers::clean_device(hello_device.as_deref());
+    if matches!(auth, Auth::Tailnet)
+        && let Some(name) = tailscale::device_name(peer).await
+    {
+        device = format!("{name} ({device})");
+    }
+    let _viewing = crate::viewers::joined(
+        crate::viewers::Viewer {
+            id: crate::viewers::next_id(),
+            device,
+            how,
+            remote: ctx.relayed.is_some(),
+            peer,
+            since: std::time::SystemTime::now(),
+        },
+        ctx.conn.clone(),
+    );
     if let Auth::Guest {
         pass,
         expires,

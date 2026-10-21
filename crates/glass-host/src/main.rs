@@ -12,6 +12,7 @@ mod status;
 mod tailscale;
 mod testmode;
 mod update;
+mod viewers;
 
 #[cfg(target_os = "macos")]
 #[path = "macos/mod.rs"]
@@ -240,9 +241,27 @@ fn set_token(path: &std::path::Path) -> Result<()> {
 
 const FEEDBACK_URL: &str = "https://glassdesk.dev/api/feedback";
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
+    let rt = tokio::runtime::Runtime::new()?;
+    // The host on macOS shows a menu bar icon (who's viewing), which needs the main thread:
+    // the host itself then runs on the runtime's threads.
+    #[cfg(target_os = "macos")]
+    if args.command.is_none() && !args.test && std::env::var_os("GLASS_NO_MENUBAR").is_none() {
+        let handle = rt.handle().clone();
+        std::thread::spawn(move || {
+            let result = rt.block_on(run_host(args));
+            if let Err(e) = &result {
+                eprintln!("Error: {e:#}");
+            }
+            std::process::exit(if result.is_ok() { 0 } else { 1 });
+        });
+        platform::menubar::run(handle);
+    }
+    rt.block_on(async_main(args))
+}
+
+async fn async_main(args: Args) -> Result<()> {
     match &args.command {
         None => run_host(args).await,
         Some(Command::Setup { yes: false, .. }) => setup::run().await,

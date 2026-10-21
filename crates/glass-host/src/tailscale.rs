@@ -231,6 +231,17 @@ pub async fn is_trusted(peer: IpAddr, owner: &str) -> bool {
     }
 }
 
+/// A tailnet device's name (e.g. "nathans-ipad"), for showing who's connected.
+pub async fn device_name(peer: IpAddr) -> Option<String> {
+    let who = json(&["whois", "--json", &peer.to_canonical().to_string()])
+        .await
+        .ok()?;
+    let name = who["Node"]["ComputedName"]
+        .as_str()
+        .or_else(|| who["Node"]["Hostinfo"]["Hostname"].as_str())?;
+    Some(name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

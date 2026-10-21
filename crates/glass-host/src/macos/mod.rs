@@ -8,6 +8,7 @@ pub mod clipboard;
 pub mod clock;
 pub mod encode;
 pub mod input;
+pub mod menubar;
 pub mod permissions;
 pub mod setup;
 pub mod video;

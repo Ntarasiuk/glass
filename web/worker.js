@@ -28,6 +28,7 @@ const textDecoder = new TextDecoder();
 let url;
 let certHash;
 let token;
+let device; // e.g. "Safari on iPad", shown on the host
 let rtcPort; // remote access: WebRTC over the main thread instead of WebTransport
 let link; // magic link code; traded for a guest pass on first sign-in
 let pass; // guest pass
@@ -70,7 +71,7 @@ function videoStream(index) {
 
 self.onmessage = async ({ data }) => {
   if (data.type === 'init') {
-    ({ url, certHash, token, link, pass, rtcPort } = data);
+    ({ url, certHash, token, link, pass, rtcPort, device } = data);
     setDecoderStep(data.decoderStep ?? 0);
     await probeDecoders(log);
     setInterval(() => datagramWriter?.write(ping(performance.now())).catch(() => {}), PING_INTERVAL_MS);
@@ -177,7 +178,7 @@ async function connect() {
   // Control stream first: the host ignores everything else until hello is accepted.
   const control = await transport.createBidirectionalStream();
   controlWriter = control.writable.getWriter();
-  sendControl({ t: 'hello', token, link, pass });
+  sendControl({ t: 'hello', token, link, pass, device });
   if (audioOn) sendControl({ t: 'audio', on: true });
   if (!visible) sendControl({ t: 'video', on: false });
   readControl(control.readable).catch((e) => log('warn', `control read ended: ${e.message ?? e}`));

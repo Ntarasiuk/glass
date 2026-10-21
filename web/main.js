@@ -245,6 +245,7 @@ worker.postMessage({
   link,
   pass: savedPass,
   rtcPort,
+  device: deviceLabel(),
   decoderStep: Number(storage((s) => s.getItem(DECODER_STEP_KEY)) ?? 0),
 }, rtcPort ? [rtcPort] : []);
 armMachineTimeout();
@@ -430,6 +431,19 @@ function onControl(msg) {
 
 // ---- Connection state overlay and stats HUD ----
 
+
+/** "Safari on iPad", "Chrome on Windows": how the host lists this viewer. */
+function deviceLabel() {
+  const ua = navigator.userAgent;
+  const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox'
+    : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'A browser';
+  // iPadOS reports itself as a Mac; touch gives it away.
+  const os = /iPhone/.test(ua) ? 'iPhone'
+    : /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'iPad'
+    : /Android/.test(ua) ? 'Android' : /CrOS/.test(ua) ? 'ChromeOS' : /Windows/.test(ua) ? 'Windows'
+    : /Macintosh/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : '';
+  return os ? `${browser} on ${os}` : browser;
+}
 
 function machineName(id) {
   if (remoteKey) return 'your computer';
