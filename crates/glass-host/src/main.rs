@@ -111,7 +111,31 @@ enum Command {
         /// Replace it with a new one; devices using the old token must sign in again.
         #[arg(long)]
         reset: bool,
+        /// Choose the token yourself (asked for without echo, or read from stdin).
+        #[arg(long, conflicts_with = "reset")]
+        set: bool,
     },
+}
+
+/// `glass token --set`: prompts on a terminal, otherwise reads one line from stdin.
+fn set_token(path: &std::path::Path) -> Result<()> {
+    use std::io::IsTerminal;
+    let token = if std::io::stdin().is_terminal() {
+        let first = cliclack::password("New access token")
+            .mask('•')
+            .validate(|t: &String| control::validate_token(t).map_err(|e| e.to_string()))
+            .interact()?;
+        let again = cliclack::password("Again, to confirm").mask('•').interact()?;
+        anyhow::ensure!(first == again, "the tokens don't match; nothing changed");
+        first
+    } else {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        line.trim().to_string()
+    };
+    control::save_token(path, &token)?;
+    eprintln!("Token saved. The running host uses it for new connections right away; devices using the old token must sign in again.");
+    Ok(())
 }
 
 const FEEDBACK_URL: &str = "https://glassdesk.dev/api/feedback";
@@ -131,7 +155,10 @@ async fn main() -> Result<()> {
         }
         Some(Command::Feedback { message }) => send_feedback(&message.join(" ")),
         Some(Command::Update) => update::run_cli(),
-        Some(Command::Token { reset }) => {
+        Some(Command::Token { set: true, .. }) => {
+            set_token(&default_token_file())
+        }
+        Some(Command::Token { reset, .. }) => {
             let path = default_token_file();
             if *reset {
                 let _ = std::fs::remove_file(&path);

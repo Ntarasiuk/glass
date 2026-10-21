@@ -77,7 +77,7 @@ The skill drives two commands you can also use in your own scripts:
 2. Open `https://<your-mac>.<your-tailnet>.ts.net:8080` (shown at the end of setup, and by `glass status`).
 3. Optional: in Safari or Chrome, tap **Share → Add to Home Screen**, then launch Glass from its icon. It runs fullscreen with no browser UI, so Safari's own shortcuts (⌘W, ⌘T, ⌘L, ⌘R) reach the Mac instead.
 
-Devices that aren't on your tailnet, or belong to another tailnet user, are asked for the access token from `~/.config/glass/token`. A link containing `#t=<token>` signs a browser in once and is then remembered.
+Devices that aren't on your tailnet, or belong to another tailnet user, are asked for the access token (`glass token` shows it; `glass token --set` lets you choose one). A link containing `#t=<token>` signs a browser in once and is then remembered.
 
 ## Using Glass
 
@@ -118,6 +118,9 @@ glass               Run the host in the foreground (the background service runs 
 glass setup         Guided setup: Tailscale, background service, permissions, connect
 glass setup --yes [--json]   Unattended setup for scripts and agents; reports what's left
 glass status [--json]        Is the service running? Capturing? Permissions? Connect URL
+glass token         Show the access token for devices outside your tailnet
+glass token --reset Replace it with a new random token
+glass token --set   Choose your own token (prompted; or piped: echo … | glass token --set)
 glass feedback "…"  Send feedback to the developers
 glass uninstall     Stop the background service and remove it from login items
 glass --version

@@ -107,6 +107,39 @@ pub fn load_or_create_token(path: &Path) -> Result<String> {
     Ok(token)
 }
 
+/// A token must be long enough not to be guessed and safe to put in a URL (`#t=…`).
+pub fn validate_token(token: &str) -> Result<()> {
+    anyhow::ensure!(token.len() >= 12, "use at least 12 characters");
+    anyhow::ensure!(token.len() <= 128, "use at most 128 characters");
+    anyhow::ensure!(
+        token.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)),
+        "use only letters, digits and - . _ ~"
+    );
+    Ok(())
+}
+
+/// Saves a chosen token, readable only by this user. Written to a temporary file and
+/// renamed so the running host never reads a half-written token.
+pub fn save_token(path: &Path, token: &str) -> Result<()> {
+    validate_token(token)?;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp); // so the 0600 mode below applies to a fresh file
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        let mut file = opts.open(&tmp)?;
+        file.write_all(token.as_bytes())?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 fn getrandom(buf: &mut [u8]) -> Result<()> {
     use std::io::Read;
     std::fs::File::open("/dev/urandom")?.read_exact(buf)?;
@@ -140,6 +173,31 @@ pub fn unique_path(dir: &Path, name: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_validation() {
+        assert!(validate_token("correct-horse.battery_staple~1").is_ok());
+        assert!(validate_token("short").is_err());
+        assert!(validate_token("has spaces in it!").is_err());
+        assert!(validate_token("needs#escaping&in-urls").is_err());
+        assert!(validate_token(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn saved_token_is_private_and_loaded() {
+        let dir = std::env::temp_dir().join(format!("glass-token-test-{}", std::process::id()));
+        let path = dir.join("token");
+        save_token(&path, "my-chosen-token-123").unwrap();
+        assert_eq!(load_or_create_token(&path).unwrap(), "my-chosen-token-123");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert!(save_token(&path, "bad").is_err());
+        assert_eq!(load_or_create_token(&path).unwrap(), "my-chosen-token-123", "a rejected token changes nothing");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn token_compare() {
