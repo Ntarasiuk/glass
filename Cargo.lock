@@ -1131,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "glass-host"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "glass-proto"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "glob"
@@ -1844,6 +1844,7 @@ checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.2",
  "objc2",
+ "objc2-core-foundation",
  "objc2-foundation",
 ]
 
