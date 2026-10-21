@@ -4,7 +4,7 @@
 
 - Website: https://glassdesk.dev
 - Install (on the computer to be controlled): `curl -fsSL glassdesk.dev | sh`
-- Hosts: macOS 13+ (Apple Silicon and Intel), and Linux x86_64 on Wayland (beta; built for Hyprland/Omarchy, should work on GNOME and KDE).
+- Hosts: macOS 13+ (Apple Silicon and Intel), and Linux x86_64 on Wayland with glibc 2.39+ (beta; built for Hyprland/Omarchy, should work on GNOME and KDE; e.g. Arch, Fedora 40+, Ubuntu 24.04+).
 - Viewers: any modern browser with WebTransport and WebCodecs: Safari 26.4+ (iPad, iPhone, Mac), Chrome, Chromium, Edge and Firefox, on any OS including Linux.
 - Price: free and open source (MIT): https://github.com/Ntarasiuk/glass
 

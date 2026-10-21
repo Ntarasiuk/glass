@@ -32,8 +32,9 @@ jobs:
         with: { name: dist-macos, path: dist/ }
 
   linux:
-    # Built on Ubuntu so the binary runs on older and newer glibc alike (Arch included).
-    runs-on: ubuntu-22.04
+    # PipeWire bindings need PipeWire ≥ 1.0 headers, so build on 24.04 (binary needs glibc ≥ 2.39:
+    # Arch/Omarchy, Fedora 40+, Ubuntu 24.04+).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y libpipewire-0.3-dev libclang-dev pkg-config nasm
