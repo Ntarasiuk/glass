@@ -45,6 +45,16 @@ define_class!(
             }
         }
 
+        #[unsafe(method(quitGlass:))]
+        fn quit_glass(&self, _sender: Option<&AnyObject>) {
+            // A clean exit: the login item restarts Glass only after a crash, so it stays
+            // quit until the next login (or `glass setup`). Viewers see it disconnect.
+            tracing::info!("quit from the menu bar");
+            viewers::disconnect_all();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::process::exit(0);
+        }
+
         #[unsafe(method(openLogs:))]
         fn open_logs(&self, _sender: Option<&AnyObject>) {
             let _ = std::process::Command::new("open").arg(super::log_dir()).spawn();
@@ -184,6 +194,13 @@ fn menu(mtm: MainThreadMarker, target: &MenuTarget, list: &[Viewer]) -> Retained
     ));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&item(mtm, "Open logs", Some(sel!(openLogs:)), target));
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    let quit = item(mtm, "Quit Glass", Some(sel!(quitGlass:)), target);
+    quit.setKeyEquivalent(ns_string!("q"));
+    quit.setToolTip(Some(ns_string!(
+        "Stops Glass until you next log in (or run glass setup)"
+    )));
+    menu.addItem(&quit);
     menu
 }
 
