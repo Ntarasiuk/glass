@@ -91,7 +91,11 @@ pub fn widths(streams: &[DisplayInfo], requests: &[Request]) -> Vec<Option<u32>>
 /// The smallest step at least `needed` wide (`None` when that's native).
 fn snap(native: u32, needed: u32) -> Option<u32> {
     // Test displays are tiny (640 px); let tests see them shrink.
-    let min = if crate::testmode::enabled() { 160 } else { MIN_WIDTH };
+    let min = if crate::testmode::enabled() {
+        160
+    } else {
+        MIN_WIDTH
+    };
     let floor = min.min(native);
     let mut best = native;
     for f in STEPS {

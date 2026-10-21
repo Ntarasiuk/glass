@@ -6,7 +6,7 @@ const TOOLBAR_IDLE_MS = 3000;
 // Matches the slide-in transition in index.html (420 ms), plus a beat.
 const TOOLBAR_WAKE_MS = 450;
 
-export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken, resolution = 'auto', onResolution }) {
+export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -230,6 +230,21 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
         onSelect: () => { setMenuOpen('displays', false); onResolution?.('native'); },
       }),
     );
+    // Fit this device: the Mac's desktop in this screen's shape, no black bars.
+    const fits = fitSizes();
+    if (fits.length) {
+      const heading = document.createElement('p');
+      heading.className = 'note';
+      heading.textContent = `Fit this ${deviceName()} · changes the Mac's display shape while you're connected`;
+      items.push(document.createElement('hr'), heading);
+      for (const [w, h] of fits) {
+        const mode = `fit:${w}x${h}`;
+        items.push(menuItem(`${w}×${h}`, '', {
+          checked: resolutionMode === mode,
+          onSelect: () => { setMenuOpen('displays', false); onResolution?.(mode); },
+        }));
+      }
+    }
     lastDisplays = [displays, streamed];
     menus.displays.panel.replaceChildren(...items);
   }

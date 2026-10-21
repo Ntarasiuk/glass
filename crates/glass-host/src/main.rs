@@ -28,7 +28,7 @@ use platform::{agent, audio, clipboard, clock, input, permissions, video};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::sync::broadcast;
 use tracing::info;
@@ -139,6 +139,16 @@ enum Command {
     Remote {
         #[arg(value_parser = ["on", "off", "status"], default_value = "status")]
         action: String,
+    },
+    /// Check that a virtual display (for "fit this device" resolutions) can be created and
+    /// removed cleanly: mirrors the main display onto one for a few seconds, then restores.
+    #[cfg(target_os = "macos")]
+    #[command(hide = true)]
+    DisplayTest {
+        /// Size, e.g. 2048x1536.
+        size: String,
+        #[arg(long, default_value_t = 6)]
+        seconds: u64,
     },
     /// Show the access token for devices outside your tailnet.
     Token {
@@ -299,6 +309,14 @@ async fn async_main(args: Args) -> Result<()> {
             ..
         }) => print_link(*grant, *json, *anywhere),
         Some(Command::Remote { action }) => remote_cli(action),
+        #[cfg(target_os = "macos")]
+        Some(Command::DisplayTest { size, seconds }) => {
+            let (w, h) = size
+                .split_once(['x', '×'])
+                .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+                .context("size like 2048x1536")?;
+            platform::virtual_display::self_test(w, h, *seconds)
+        }
         Some(Command::Token { set: true, .. }) => set_token(&default_token_file()),
         Some(Command::Token { reset, .. }) => {
             let path = default_token_file();

@@ -253,6 +253,21 @@ test.describe('ports', () => {
 });
 
 test.describe('displays', () => {
+  it('offers sizes in this device\'s shape, and puts the displays back after', async ({ page, host }) => {
+    // A square window against a 16:9 display: "fit this device" offers square sizes.
+    await page.setViewportSize({ width: 1100, height: 1100 });
+    await open(page, host);
+    await page.locator('#btn-displays').dispatchEvent('click');
+    const fit = page.locator('.panel:not(.hidden) button', { hasText: '1100×1100' });
+    await expect(fit).toHaveCount(1);
+    await fit.dispatchEvent('click');
+    await expect.poll(async () => (await host.get('/test/fit')).requests).toEqual([[1100, 1100]]);
+    // Back to Auto restores the displays.
+    await page.locator('#btn-displays').dispatchEvent('click');
+    await page.locator('.panel:not(.hidden) button', { hasText: 'Auto' }).dispatchEvent('click');
+    await expect.poll(async () => (await host.get('/test/fit')).requests).toEqual([[1100, 1100], null]);
+  });
+
   it('encodes at the size this screen shows, or the full size on request', async ({ page, host }) => {
     // A small window: the 640×360 display only needs ~300 px, so the host sends half
     // size (the test encoder, like Linux's, scales by halves; Macs scale to any width).

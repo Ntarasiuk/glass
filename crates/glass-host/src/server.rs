@@ -454,13 +454,14 @@ async fn control(
     }
     // This viewer's resolution request lasts as long as the session.
     let viewport_id = crate::viewers::next_id();
-    struct ViewportGuard(u64);
+    struct ViewportGuard(u64, Arc<Shared>);
     impl Drop for ViewportGuard {
         fn drop(&mut self) {
             crate::resolution::set(self.0, None);
+            end_fit(self.0, self.1.clone());
         }
     }
-    let _viewport = ViewportGuard(viewport_id);
+    let _viewport = ViewportGuard(viewport_id, ctx.shared.clone());
     // Shown on the host (menu bar / notification) for as long as this session lasts.
     let how = match &auth {
         Auth::Token => crate::viewers::How::Token,
@@ -605,6 +606,11 @@ async fn control(
                     });
                 }
             }
+            ClientMsg::Fit { .. } if guest => {
+                let msg = "Only this computer's owner can change its display shape.".into();
+                let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
+            }
+            ClientMsg::Fit { size } => fit(&ctx, viewport_id, size).await?,
             ClientMsg::Viewport { streams } => {
                 let streams = streams
                     .into_iter()
@@ -660,6 +666,105 @@ async fn control(
         }
     }
     Ok(())
+}
+
+/// "Fit this device" (macOS): a virtual display in one viewer's shape, which the main
+/// display mirrors while it lasts. One at a time; it ends with that viewer's session.
+#[cfg(target_os = "macos")]
+struct Fit {
+    owner: u64,
+    /// Held, not read: dropping it unmirrors and removes the display.
+    _display: crate::platform::virtual_display::VirtualDisplay,
+}
+
+#[cfg(target_os = "macos")]
+static FIT: Mutex<Option<Fit>> = Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+async fn fit(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>) -> Result<()> {
+    if crate::testmode::enabled() {
+        crate::testmode::record_fit(size); // never reshape real displays in tests
+        return Ok(());
+    }
+    let peer = ctx.conn.remote_address();
+    // Put any current one back first (dropping it unmirrors and removes it).
+    let old = FIT.lock().unwrap().take();
+    let had = old.is_some();
+    if let Some(old) = old {
+        tokio::task::spawn_blocking(move || drop(old)).await?;
+    }
+    let Some([w, h]) = size else {
+        if had {
+            info!("{peer}: displays restored");
+            set_layout(ctx, Layout::Single(None)).await?;
+        }
+        return Ok(());
+    };
+    let (w, h) = (w & !1, h & !1);
+    let created = tokio::task::spawn_blocking(move || {
+        let mut display = crate::platform::virtual_display::VirtualDisplay::create(w, h)?;
+        display.mirror_main()?;
+        anyhow::Ok(display)
+    })
+    .await?;
+    let display = match created {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("{peer}: fit {w}×{h} failed: {e:#}");
+            let msg = format!("Couldn't fit this device: {e:#}");
+            let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
+            return Ok(());
+        }
+    };
+    let id = display.id;
+    info!("{peer}: fitting the desktop to {w}×{h} (virtual display {id})");
+    *FIT.lock().unwrap() = Some(Fit {
+        owner: session,
+        _display: display,
+    });
+    // Screen capture sees a new display a moment after it appears.
+    for _ in 0..30 {
+        let shared = ctx.shared.clone();
+        let listed = tokio::task::spawn_blocking(move || shared.video.displays())
+            .await?
+            .is_ok_and(|ds| ds.iter().any(|d| d.id == id));
+        if listed {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    set_layout(ctx, Layout::Single(Some(id))).await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn fit(ctx: &SessionCtx, _session: u64, size: Option<[u32; 2]>) -> Result<()> {
+    if size.is_some() {
+        let msg = "Fitting the desktop to this device isn't available on Linux yet.".into();
+        let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
+    }
+    Ok(())
+}
+
+/// When a session ends, its "fit this device" display goes too.
+fn end_fit(session: u64, shared: Arc<Shared>) {
+    #[cfg(target_os = "macos")]
+    {
+        let mut fit = FIT.lock().unwrap();
+        if fit.as_ref().is_some_and(|f| f.owner == session) {
+            let old = fit.take();
+            tokio::task::spawn_blocking(move || {
+                drop(old);
+                if let Ok(streams) = shared.video.set_layout(Layout::Single(None)) {
+                    let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
+                    shared.injector.lock().unwrap().set_displays(&ids);
+                    let _ = shared.events.send(ServerMsg::Layout { streams });
+                }
+                info!("displays restored (the viewer who fitted them left)");
+            });
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (session, shared);
 }
 
 async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {

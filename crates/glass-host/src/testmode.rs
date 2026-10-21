@@ -40,6 +40,13 @@ pub fn record_update() {
     UPDATES.fetch_add(1, Ordering::Relaxed);
 }
 
+/// "Fit this device" requests, in order (test mode never touches real displays).
+static FITS: Mutex<Vec<Option<[u32; 2]>>> = Mutex::new(Vec::new());
+
+pub fn record_fit(size: Option<[u32; 2]>) {
+    FITS.lock().unwrap().push(size);
+}
+
 /// Current adaptive bitrate, readable at /test/bitrate.
 static BITRATE: AtomicU32 = AtomicU32::new(0);
 
@@ -392,6 +399,7 @@ pub fn routes(events: broadcast::Sender<ServerMsg>, downloads: PathBuf) -> axum:
             post(|Query(q): Query<DropQuery>| async move { DROP_FRAMES.store(q.frames, Ordering::Relaxed) }),
         )
         .route("/test/updates", get(|| async { Json(serde_json::json!({"count": UPDATES.load(Ordering::Relaxed)})) }))
+        .route("/test/fit", get(|| async { Json(serde_json::json!({"requests": *FITS.lock().unwrap()})) }))
         .route("/test/bitrate", get(|| async { Json(serde_json::json!({"bps": BITRATE.load(Ordering::Relaxed)})) }))
         .route("/test/corrupt", post(|| async { CORRUPT_NEXT.store(true, Ordering::Relaxed) }))
         .route(

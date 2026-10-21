@@ -72,7 +72,12 @@ const savedPass = (() => {
   } catch { return undefined; }
 })();
 let guest = false; // signed in with a magic link: no switching machines, no updating the host
-let resolutionMode = storage((s) => s.getItem(RESOLUTION_KEY)) === 'native' ? 'native' : 'auto';
+// 'auto', 'native', or 'fit:WxH' ("fit this device": lasts only for this tab, so a later
+// visit never reshapes the Mac's displays by itself).
+let resolutionMode = (() => {
+  try { const fit = sessionStorage.getItem('glass.fit'); if (fit) return fit; } catch {}
+  return storage((s) => s.getItem(RESOLUTION_KEY)) === 'native' ? 'native' : 'auto';
+})();
 // Remote video over WebRTC (see videoFor / showStreams): declared early, set up below.
 let rtc;
 let rtpVideo = false;
@@ -184,6 +189,8 @@ const ui = createUI({
   onShortcut: (sc) => input.sendCombo(sc.keys),
   resolution: resolutionMode,
   onResolution: (mode) => setResolution(mode),
+  fitSizes: () => fitSizes(),
+  deviceName: () => deviceLabel().replace(/^.* on /, ''),
   onKeyboard: () => input.focusKeys(),
   onUploadFiles: uploadFiles,
   onRequestFiles: () => {
@@ -418,6 +425,8 @@ function onControl(msg) {
       ui.setGuest(guest || Boolean(remoteKey));
       onLayout(msg.streams);
       queueViewport(true);
+      // A reload or reconnect: the host put the displays back when the session ended.
+      if (resolutionMode.startsWith('fit:') && !guest) sendFit();
       log('info', 'welcome', { displays: displays.length, streams: msg.streams.map((d) => d.id), audio: msg.audio });
       break;
     case 'layout':
@@ -609,7 +618,7 @@ function sendViewport() {
   const streams = [];
   for (let i = 0; i < streamCount; i++) {
     const area = areas.get(elements[i]);
-    if (resolutionMode === 'native' || !area || !area[0]) {
+    if (resolutionMode !== 'auto' || !area || !area[0]) {
       streams.push(null);
       continue;
     }
@@ -623,11 +632,43 @@ function sendViewport() {
 }
 
 function setResolution(mode) {
+  const wasFit = resolutionMode.startsWith('fit:');
   resolutionMode = mode;
-  storage((s) => s.setItem(RESOLUTION_KEY, mode));
+  if (mode.startsWith('fit:')) {
+    try { sessionStorage.setItem('glass.fit', mode); } catch {}
+    sendFit();
+  } else {
+    try { sessionStorage.removeItem('glass.fit'); } catch {}
+    storage((s) => s.setItem(RESOLUTION_KEY, mode));
+    if (wasFit) control({ t: 'fit', size: null });
+  }
   ui.setResolution(mode);
   queueViewport(true);
   log('info', `resolution: ${mode}`);
+}
+
+function sendFit() {
+  const [w, h] = resolutionMode.slice(4).split('x').map(Number);
+  if (w && h) control({ t: 'fit', size: [w, h] });
+}
+
+/**
+ * Desktop sizes in this device's shape (its viewing area, in device pixels, at full, ¾ and
+ * ½ size), when that shape differs from the Mac display's. Empty when they already match.
+ */
+function fitSizes() {
+  const native = displays.find((d) => d.main) ?? displays[0];
+  if (!native) return [];
+  const dpr = devicePixelRatio;
+  const w = Math.round(innerWidth * dpr);
+  const h = Math.round(innerHeight * dpr);
+  const mine = w / h;
+  const theirs = native.width / native.height;
+  if (Math.abs(mine - theirs) < theirs * 0.03) return [];
+  const even = (n) => Math.round(n / 2) * 2;
+  return [1, 0.75, 0.5]
+    .map((f) => [even(w * f), even(h * f)])
+    .filter(([a, b]) => Math.max(a, b) >= 1024 && Math.min(a, b) >= 640 && a <= 7680 && b <= 4320);
 }
 
 function onLayout(streams) {
