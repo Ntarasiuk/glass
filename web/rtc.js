@@ -159,7 +159,13 @@ export function serveRtc({ port, hostKey, signalUrl, log, onVideo = () => {}, on
       pc.ontrack = (e) => {
         const i = transceivers.indexOf(e.transceiver);
         // A video m-line the host left unbound fires without a stream: ignore it.
-        if (i >= 0 && e.streams.length) onVideo(i, e.track);
+        if (i < 0 || !e.streams.length) return;
+        // Show frames as they arrive: a remote desktop wants latency, not smoothing.
+        try {
+          if ('jitterBufferTarget' in e.receiver) e.receiver.jitterBufferTarget = 0;
+          else e.receiver.playoutDelayHint = 0;
+        } catch {}
+        onVideo(i, e.track);
       };
       pc.ondatachannel = ({ channel }) => {
         const id = nextIncoming--;
