@@ -93,21 +93,39 @@ fn screen_recording_step(status: Status) -> Result<Status> {
 /// Waits for the agent to report it is capturing, restarting it at most `MAX_RESTARTS`
 /// times. Returns `None` if it never does.
 fn wait_for_capturing() -> Option<Status> {
+    wait_with_restarts(
+        || status::read().filter(|s| s.is_fresh() && s.capturing),
+        || {
+            let _ = agent::restart();
+        },
+        RESTART_EVERY,
+        Duration::from_millis(500),
+    )
+}
+
+/// Polls `ready` every `tick`, calling `restart` each `restart_every` until it has done so
+/// `MAX_RESTARTS` times; gives up one interval after the last restart.
+fn wait_with_restarts<T>(
+    mut ready: impl FnMut() -> Option<T>,
+    mut restart: impl FnMut(),
+    restart_every: Duration,
+    tick: Duration,
+) -> Option<T> {
     let mut restarts = 0;
     let mut last_restart = Instant::now();
     loop {
-        if let Some(s) = status::read().filter(|s| s.is_fresh() && s.capturing) {
-            return Some(s);
+        if let Some(value) = ready() {
+            return Some(value);
         }
-        if last_restart.elapsed() > RESTART_EVERY {
+        if last_restart.elapsed() > restart_every {
             if restarts == MAX_RESTARTS {
                 return None;
             }
-            let _ = agent::restart();
+            restart();
             restarts += 1;
             last_restart = Instant::now();
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(tick);
     }
 }
 
@@ -134,4 +152,56 @@ fn accessibility_step(mut status: Status) -> Result<Status> {
     }
     sp.stop("Accessibility allowed, remote mouse and keyboard enabled");
     Ok(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    const EVERY: Duration = Duration::from_millis(15);
+    const TICK: Duration = Duration::from_millis(1);
+
+    #[test]
+    fn already_allowed_needs_no_restart() {
+        let restarts = Cell::new(0);
+        assert_eq!(
+            wait_with_restarts(
+                || Some(()),
+                || restarts.set(restarts.get() + 1),
+                EVERY,
+                TICK
+            ),
+            Some(())
+        );
+        assert_eq!(restarts.get(), 0);
+    }
+
+    #[test]
+    fn allowed_after_a_restart_stops_waiting() {
+        let restarts = Cell::new(0);
+        let got = wait_with_restarts(
+            || (restarts.get() >= 1).then_some("capturing"),
+            || restarts.set(restarts.get() + 1),
+            EVERY,
+            TICK,
+        );
+        assert_eq!(got, Some("capturing"));
+        assert_eq!(restarts.get(), 1);
+    }
+
+    /// "Deny": every restart re-shows the macOS prompt, so it must stop after a few.
+    #[test]
+    fn denied_gives_up_after_max_restarts() {
+        let restarts = Cell::new(0);
+        let started = Instant::now();
+        let got: Option<()> =
+            wait_with_restarts(|| None, || restarts.set(restarts.get() + 1), EVERY, TICK);
+        assert_eq!(got, None);
+        assert_eq!(restarts.get(), MAX_RESTARTS);
+        assert!(
+            started.elapsed() < EVERY * (MAX_RESTARTS + 3),
+            "gave up promptly"
+        );
+    }
 }
