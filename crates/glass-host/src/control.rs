@@ -62,6 +62,14 @@ pub struct FileHeader {
 }
 
 pub async fn read_json<T: for<'de> Deserialize<'de>>(stream: &mut RecvStream) -> Result<Option<T>> {
+    match read_frame(stream).await? {
+        Some(buf) => Ok(Some(serde_json::from_slice(&buf)?)),
+        None => Ok(None),
+    }
+}
+
+/// One length-prefixed message body, or `None` when the stream has ended.
+pub async fn read_frame(stream: &mut RecvStream) -> Result<Option<Vec<u8>>> {
     let mut len = [0u8; 4];
     if stream.read_exact(&mut len).await.is_err() {
         return Ok(None);
@@ -72,7 +80,7 @@ pub async fn read_json<T: for<'de> Deserialize<'de>>(stream: &mut RecvStream) ->
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await.context("truncated control message")?;
-    Ok(Some(serde_json::from_slice(&buf)?))
+    Ok(Some(buf))
 }
 
 pub async fn write_json<T: Serialize>(stream: &mut SendStream, msg: &T) -> Result<()> {

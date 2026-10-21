@@ -328,7 +328,16 @@ async fn control(
         }
     });
 
-    while let Some(msg) = control::read_json::<ClientMsg>(&mut recv).await? {
+    while let Some(buf) = control::read_frame(&mut recv).await? {
+        // Skip what we don't understand (say, a newer client) rather than dropping the
+        // whole control stream, which would silently break display switching and more.
+        let msg = match serde_json::from_slice::<ClientMsg>(&buf) {
+            Ok(msg) => msg,
+            Err(e) => {
+                warn!("{peer}: ignoring control message: {e}");
+                continue;
+            }
+        };
         match msg {
             ClientMsg::Hello { .. } => {}
             ClientMsg::SelectDisplay { id } => set_layout(&ctx, Layout::Single(Some(id))).await?,
@@ -391,13 +400,17 @@ async fn control(
 
 async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
     let worker = ctx.shared.clone();
+    let peer = ctx.conn.remote_address();
+    info!("{peer}: layout {layout:?}");
     match tokio::task::spawn_blocking(move || worker.video.set_layout(layout)).await? {
         Ok(streams) => {
             let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
+            info!("{peer}: now streaming displays {ids:?}");
             ctx.shared.injector.lock().unwrap().set_displays(&ids);
             let _ = ctx.shared.events.send(ServerMsg::Layout { streams });
         }
         Err(e) => {
+            warn!("{peer}: switch display failed: {e:#}");
             let _ = ctx.ctl_tx.send(ServerMsg::Error { msg: format!("switch display: {e:#}") });
         }
     }

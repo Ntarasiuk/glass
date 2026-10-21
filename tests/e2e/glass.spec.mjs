@@ -59,6 +59,44 @@ test.describe('connecting', () => {
     expect(await attempt(host.token)).toContain('unauthorized');
   });
 
+  it('skips control messages it does not know instead of hanging up', async ({ page, host }) => {
+    await page.goto(`${host.base}/config.json`);
+    const reply = await page.evaluate(
+      async ({ wt, token }) => {
+        const config = await fetch('/config.json').then((r) => r.json());
+        const t = new WebTransport(`https://localhost:${wt}/`, {
+          serverCertificateHashes: [{ algorithm: 'sha-256', value: new Uint8Array(config.certHash) }],
+        });
+        await t.ready;
+        const { readable, writable } = await t.createBidirectionalStream();
+        const writer = writable.getWriter();
+        const send = (msg) => {
+          const body = new TextEncoder().encode(JSON.stringify(msg));
+          const frame = new Uint8Array(4 + body.length);
+          new DataView(frame.buffer).setUint32(0, body.length, true);
+          frame.set(body, 4);
+          return writer.write(frame);
+        };
+        await send({ t: 'hello', token });
+        // A message from a newer client, then a display switch that must still work.
+        await send({ t: 'somethingFromTheFuture', x: 1 });
+        await send({ t: 'showAll' });
+        const reader = readable.getReader();
+        let text = '';
+        const deadline = Date.now() + 5000;
+        while (!text.includes('"layout"') && Date.now() < deadline) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          text += new TextDecoder().decode(value);
+        }
+        t.close();
+        return text;
+      },
+      { wt: host.wt, token: host.token },
+    );
+    expect(reply).toContain('"layout"');
+  });
+
   it('glass token --reset takes effect without a restart', async ({ page, host }) => {
     await page.goto(`${host.base}/config.json`);
     const old = host.token;
