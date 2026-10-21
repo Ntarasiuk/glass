@@ -67,46 +67,33 @@ header.site nav a:hover, footer.site a:hover { color: var(--text); }
 }
 .copy:hover { background: #fff; }
 
-/* Latency demo */
-.demo { margin: 0; }
-.stage {
-  position: relative; aspect-ratio: 16 / 10.5; overflow: hidden; cursor: crosshair; touch-action: pan-y;
-  border-radius: 16px; border: 1px solid var(--line-strong);
-  background:
-    radial-gradient(120% 90% at 85% 0%, rgb(92 178 255 / 0.14), transparent 60%),
-    radial-gradient(90% 80% at 0% 100%, rgb(199 162 122 / 0.08), transparent 60%),
-    var(--bg-raised);
-  box-shadow: 0 40px 80px -30px rgb(0 0 0 / 0.7);
-}
-.stage-bar { position: absolute; top: 0; left: 0; right: 0; display: flex; gap: 7px; padding: 13px 15px; border-bottom: 1px solid var(--line); }
-.stage-bar i { width: 10px; height: 10px; border-radius: 50%; background: rgb(255 255 255 / 0.12); }
-.stage-hint {
-  position: absolute; inset: auto 0 18px; margin: 0; text-align: center; color: var(--text-faint); font-size: 14px;
-  transition: opacity 400ms var(--ease-out);
-}
-.stage-hint.gone { opacity: 0; }
-.cursor { position: absolute; left: 0; top: 0; pointer-events: none; will-change: transform; }
-.cursor svg { width: 22px; height: 22px; filter: drop-shadow(0 2px 3px rgb(0 0 0 / 0.5)); }
-.cursor span {
-  position: absolute; left: 22px; top: 18px; padding: 3px 9px; border-radius: 999px; white-space: nowrap;
-  font: 500 12px var(--mono); letter-spacing: -0.01em;
-}
-.cursor.slow span { top: -22px; }
-.cursor.flip span { left: auto; right: 6px; }
-.cursor.fast svg { fill: var(--accent); stroke: #0b2238; stroke-width: 1.2; }
-.cursor.fast span { background: var(--accent); color: var(--accent-ink); }
-.cursor.slow svg { fill: var(--slow); stroke: #2e2215; stroke-width: 1.2; }
-.cursor.slow span { background: rgb(199 162 122 / 0.18); color: var(--slow); border: 1px solid rgb(199 162 122 / 0.35); }
-figcaption { margin-top: 12px; color: var(--text-faint); font-size: 13px; line-height: 1.5; }
+/* Single-column hero */
+.hero-solo { grid-template-columns: 1fr; justify-items: center; text-align: center; padding-bottom: clamp(40px, 6vw, 72px); }
+.hero-solo .hero-copy { display: grid; justify-items: center; }
+.hero-solo .lede, .hero-solo .hint { margin-inline: auto; }
+.hero-solo .command { width: min(520px, 100%); text-align: left; }
+
+/* Three reasons, then the way to everything else */
+.pillars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px 40px; padding-top: 0; }
+.pillars div { padding-top: 18px; border-top: 1px solid var(--line); }
+.pillars h2 { font-size: 20px; letter-spacing: -0.015em; line-height: 1.2; }
+.pillars p { margin: 6px 0 0; font-size: 16px; }
+.more { grid-column: 1 / -1; justify-self: center; margin-top: 8px; font-weight: 600; text-decoration: none; }
+.more span { display: inline-block; transition: transform 160ms var(--ease-out); }
+.more:hover span { transform: translateX(3px); }
+
+/* Features page */
+.page-head { padding: clamp(40px, 7vw, 88px) 0 0; }
+.page-head h1 { margin: 0; font-size: clamp(40px, 5.6vw, 68px); line-height: 1; }
+.page-head p { margin: 20px 0 0; max-width: 56ch; color: var(--text-dim); font-size: clamp(17px, 1.5vw, 19px); }
+.all-features { padding-top: clamp(32px, 5vw, 56px); }
+.all-features .features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 /* Sections */
 section { padding: clamp(56px, 8vw, 104px) 0 0; }
 section h2 { margin: 0; font-size: clamp(32px, 4.2vw, 52px); line-height: 1.04; }
 section p { color: var(--text-dim); }
 
-.why { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: clamp(32px, 6vw, 88px); align-items: start; }
-.why-intro { position: sticky; top: 32px; }
-.why-intro p { margin: 20px 0 0; max-width: 44ch; }
 .features { margin: 0; display: grid; grid-template-columns: 1fr 1fr; column-gap: 40px; }
 .features div { padding: 20px 0 22px; border-top: 1px solid var(--line); }
 .features dt { font: 650 19px var(--display); letter-spacing: -0.015em; }
@@ -174,12 +161,12 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
 .doc th, .doc td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 
 @media (max-width: 880px) {
-  .hero, .why, .agent, .feedback { grid-template-columns: minmax(0, 1fr); }
-  .why-intro { position: static; }
+  .hero, .agent, .feedback { grid-template-columns: minmax(0, 1fr); }
+  .pillars { grid-template-columns: 1fr; gap: 20px; }
   .steps { grid-template-columns: 1fr; gap: 36px; }
 }
 @media (max-width: 560px) {
-  .features { grid-template-columns: 1fr; }
+  .features, .all-features .features { grid-template-columns: 1fr; }
   header.site nav { gap: 16px; font-size: 14px; }
   .command { flex-direction: column; align-items: stretch; padding: 14px; }
   .copy { width: 100%; padding: 11px; }

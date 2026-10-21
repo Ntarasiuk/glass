@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Glass features</title>
+  <meta name="description" content="Everything Glass does: about 20 ms latency, every display and machine, full control, sound, clipboard and files, remote access from anywhere, one-time links, and setup by an AI agent.">
+  <link rel="canonical" href="https://glassdesk.dev/features">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#07080a">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site wrap">
+    <a class="brand" href="/"><img src="/icon.svg" alt="" width="26" height="26">Glass</a>
+    <nav aria-label="Main">
+      <a href="/features">Features</a>
+      <a href="/docs">Docs</a>
+      <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="page-head wrap">
+      <h1>Everything Glass does.</h1>
+      <p>Most remote desktops ride the same pipeline as video calls, which buffers to look smooth. Glass hands frames from the hardware encoder straight to your browser's decoder and never waits.</p>
+    </section>
+
+    <section class="all-features wrap" aria-label="Features">
+      <dl class="features">
+        <div><dt>Feels local</dt><dd>Hardware H.264 over WebTransport, decoded off the main thread. A live meter shows the real latency.</dd></div>
+        <div><dt>Just a browser</dt><dd>Open a link on your iPad. Add it to the Home Screen for a fullscreen app with your shortcuts intact.</dd></div>
+        <div><dt>Every display</dt><dd>Switch screens, or see them all side by side, arranged exactly like your desk.</dd></div>
+        <div><dt>Every machine</dt><dd>All your computers in one menu. Switch between them without leaving the page.</dd></div>
+        <div><dt>Full control</dt><dd>Trackpad, keyboard, touch and pinch to zoom. Unlock a locked Mac. ⌘Tab works.</dd></div>
+        <div><dt>Sound, clipboard, files</dt><dd>System audio, copy and paste both ways, and files sent directly between your devices.</dd></div>
+        <div><dt>Steady on bad Wi-Fi</dt><dd>Adapts its bitrate to the network, reconnects by itself, and never shows a corrupted frame.</dd></div>
+        <div><dt>From anywhere</dt><dd>Away from home, <code>glass link --anywhere</code> connects any browser straight to your computer: end-to-end encrypted, no ports opened.</dd></div>
+        <div><dt>Links that work once</dt><dd>Let a phone or a friend's laptop in with a one-time link. Each device gets its own pass; revoke them all with one command.</dd></div>
+        <div><dt>Private by default</dt><dd>On your own Tailscale network, your devices get in and nothing else does. Remote access stays off until you turn it on.</dd></div>
+      </dl>
+    </section>
+
+    <section class="setup wrap" aria-labelledby="setup">
+      <h2 id="setup">Two minutes to set up.</h2>
+      <ol class="steps">
+        <li><strong>Install</strong><span>Paste the one-liner on the computer you want to control. It checks the download before installing.</span></li>
+        <li><strong>Follow along</strong><span>The setup connects Tailscale and walks you through the permissions, checking each one as you go.</span></li>
+        <li><strong>Scan and go</strong><span>Scan the QR code with your iPad. Glass starts with the computer from now on, and keeps itself up to date.</span></li>
+      </ol>
+    </section>
+
+    <section class="agent wrap" aria-labelledby="agent">
+      <div>
+        <h2 id="agent">Or let your agent do it.</h2>
+        <p>Glass comes with a skill for AI agents. Ask Claude Code to <q>set up Glass on my Mac mini</q> and it finds the machine on your tailnet, installs Glass over SSH, and tells you exactly which switch to click on that screen. Later, just ask it for a link to your computer.</p>
+      </div>
+      <div class="command" data-copy="mkdir -p ~/.claude/skills/glass && curl -fsSL https://glassdesk.dev/skill.md -o ~/.claude/skills/glass/SKILL.md">
+        <code><span class="prompt" aria-hidden="true">$</span> mkdir -p ~/.claude/skills/glass &amp;&amp; curl -fsSL https://glassdesk.dev/skill.md -o ~/.claude/skills/glass/SKILL.md</code>
+        <button type="button" class="copy">Copy</button>
+      </div>
+    </section>
+
+    <section class="feedback wrap" aria-labelledby="feedback">
+      <div>
+        <h2 id="feedback">Tell us what you think.</h2>
+        <p>Bugs, ideas, what you'd use it for. It goes straight to the people building Glass. You can also run <code>glass feedback "…"</code> or open a <a href="https://github.com/Ntarasiuk/glass/issues">GitHub issue</a>.</p>
+      </div>
+      <form id="feedback-form">
+        <label for="fb-message">Your feedback</label>
+        <textarea id="fb-message" name="message" required maxlength="4000" placeholder="What's working, what isn't, what you'd love…"></textarea>
+        <label for="fb-email">Email <span>(optional, if you'd like a reply)</span></label>
+        <div class="row">
+          <input id="fb-email" name="email" type="email" maxlength="200" placeholder="you@example.com" autocomplete="email">
+          <button type="submit">Send</button>
+        </div>
+        <p class="form-status" id="fb-status" role="status"></p>
+      </form>
+    </section>
+  </main>
+
+  <footer class="site wrap">
+    <span>Glass is free and open source under the MIT license.</span>
+    <nav aria-label="Footer">
+      <a href="/features">Features</a>
+      <a href="/docs">Documentation</a>
+      <a href="/features#feedback">Feedback</a>
+      <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
+      <a href="/docs.md">docs.md</a>
+      <a href="/llms.txt">llms.txt</a>
+      <a href="/skill.md">skill.md</a>
+      <a href="/install.sh">install.sh</a>
+    </nav>
+  </footer>
+
+  <script src="/site.js" type="module"></script>
+</body>
+</html>

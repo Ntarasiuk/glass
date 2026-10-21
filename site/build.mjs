@@ -73,7 +73,7 @@ writeFileSync(
     <main class="doc">
 ${body}
     </main>
-    <footer class="site"><span>Glass. A remote desktop for Mac and Linux.</span><nav aria-label="Footer"><a href="/">Home</a><a href="/#feedback">Feedback</a></nav></footer>
+    <footer class="site"><span>Glass. A remote desktop for Mac and Linux.</span><nav aria-label="Footer"><a href="/">Home</a><a href="/features#feedback">Feedback</a></nav></footer>
   </div>
 </body>
 </html>
