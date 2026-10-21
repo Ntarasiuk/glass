@@ -423,6 +423,8 @@ function onControl(msg) {
       guest = Boolean(msg.guest);
       // Remote: other machines aren't reachable from here, so no machines menu either.
       ui.setGuest(guest || Boolean(remoteKey));
+      ui.setCanFit(!guest);
+      if (guest && resolutionMode.startsWith('fit:')) setResolution('auto');
       onLayout(msg.streams);
       queueViewport(true);
       // A reload or reconnect: the host put the displays back when the session ended.
@@ -640,7 +642,7 @@ function setResolution(mode) {
   } else {
     try { sessionStorage.removeItem('glass.fit'); } catch {}
     storage((s) => s.setItem(RESOLUTION_KEY, mode));
-    if (wasFit) control({ t: 'fit', size: null });
+    if (wasFit && !guest) control({ t: 'fit', size: null });
   }
   ui.setResolution(mode);
   queueViewport(true);

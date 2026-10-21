@@ -231,7 +231,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
       }),
     );
     // Fit this device: the Mac's desktop in this screen's shape, no black bars.
-    const fits = fitSizes();
+    const fits = canFit ? fitSizes() : [];
     if (fits.length) {
       const heading = document.createElement('p');
       heading.className = 'note';
@@ -250,6 +250,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
   }
   let resolutionMode = resolution;
   let lastDisplays;
+  let canFit = true;
 
   /** Names displays by where they sit in the macOS arrangement: Left / Right, Top / Bottom. */
   function positionNames(displays) {
@@ -357,6 +358,11 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     setGuest(guest) {
       $('btn-machines').classList.toggle('hidden', guest);
       if (guest) setMenuOpen('machines', false);
+    },
+    /** Only the owner can reshape the host's display (guests get an error). */
+    setCanFit(on) {
+      canFit = on;
+      if (lastDisplays) renderDisplays(...lastDisplays);
     },
     setResolution(mode) {
       resolutionMode = mode;
