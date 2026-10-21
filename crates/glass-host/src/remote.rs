@@ -504,6 +504,8 @@ async fn bridge(
     let conn = endpoint.connect(url).await.context("loopback session")?;
 
     let mut datagram_channel: Option<Arc<dyn DataChannel>> = None;
+    let mut bridge_drops = 0u64;
+    let mut last_drop_report = std::time::Instant::now();
     loop {
         tokio::select! {
             channel = channels.recv() => {
@@ -541,7 +543,15 @@ async fn bridge(
                     // Drop rather than queue: a late frame is worse than a missing one.
                     if dc.outstanding_bytes().await.unwrap_or(0) < DATAGRAM_BACKLOG {
                         let _ = dc.try_send(BytesMut::from(&datagram.payload()[..])).await;
+                    } else {
+                        bridge_drops += 1;
                     }
+                }
+                // Tells apart loss here (the WebRTC send buffer is full) from loss on the way.
+                if bridge_drops > 0 && last_drop_report.elapsed() >= Duration::from_secs(5) {
+                    info!("remote peer ({peer}): bridge dropped {bridge_drops} packets (link backed up)");
+                    bridge_drops = 0;
+                    last_drop_report = std::time::Instant::now();
                 }
             }
             stream = conn.accept_uni() => {

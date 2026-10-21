@@ -534,16 +534,19 @@ test.describe('resilience', () => {
     expect(host.clientLog('decoder error detail')).toHaveLength(0);
   });
 
-  it('backs off the bitrate under loss and recovers', async ({ page, host }) => {
+  it('backs off the bitrate under loss, and a quiet stream does not climb back', async ({ page, host }) => {
     await open(page, host);
     const bps = async () => (await host.get('/test/bitrate')).bps;
     const max = await bps();
     await host.post('/test/drop?frames=4');
     await expect.poll(bps, { timeout: 5_000 }).toBeLessThan(max);
-    const low = await bps();
     await expect(page.locator('#hud')).toContainText('target');
-    // Clean network again: it climbs back.
-    await expect.poll(bps, { timeout: 15_000 }).toBeGreaterThan(low);
+    // The test pattern uses a sliver of its allowance: no loss, but no evidence the link
+    // could take more, so the rate holds (it rises only when used; see rate.rs tests).
+    await page.waitForTimeout(3000);
+    const low = await bps();
+    await page.waitForTimeout(4000);
+    expect(await bps()).toBe(low);
   });
 
   it('never decodes a corrupted frame', async ({ page, host }) => {

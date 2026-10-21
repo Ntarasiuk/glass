@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 use block2::RcBlock;
-use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_foundation::{
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType,
+};
 use objc2_core_media::{
     CMFormatDescription, CMSampleBuffer, CMTime,
     CMVideoFormatDescriptionGetH264ParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_H264,
@@ -18,15 +20,49 @@ use objc2_core_video::CVImageBuffer;
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
-    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
-    kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
-    kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
-    kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
+    kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_ExpectedFrameRate,
+    kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_ProfileLevel,
+    kVTCompressionPropertyKey_RealTime, kVTEncodeFrameOptionKey_ForceKeyFrame,
+    kVTProfileLevel_H264_High_AutoLevel, kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
 
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
 const MAX_GOP_FRAMES: i32 = 900;
+
+/// The average target, plus hard limits so bursts (motion, keyframes) can't swamp a slow
+/// link: at most 1.2× the target over any second, and half a second's worth in any
+/// quarter second.
+fn set_rate(session: &VTCompressionSession, bps: u32) {
+    let bytes_per_sec = bps as f64 / 8.0;
+    let limits = [
+        CFNumber::new_f64(bytes_per_sec * 1.2),
+        CFNumber::new_f64(1.0),
+        CFNumber::new_f64(bytes_per_sec * 0.5),
+        CFNumber::new_f64(0.25),
+    ];
+    let limits = CFArray::from_retained_objects(&limits);
+    let average = CFNumber::new_i32(bps as i32);
+    for (key, value, what) in unsafe {
+        [
+            (
+                kVTCompressionPropertyKey_AverageBitRate,
+                &*average as &CFType,
+                "bitrate",
+            ),
+            (
+                kVTCompressionPropertyKey_DataRateLimits,
+                &*limits as &CFType,
+                "data rate limits",
+            ),
+        ]
+    } {
+        let status = unsafe { VTSessionSetProperty(session, key, Some(value)) };
+        if status != 0 {
+            tracing::warn!("set {what} ({bps} bps): {status}");
+        }
+    }
+}
 
 pub use crate::media::EncodedFrame;
 
@@ -94,10 +130,7 @@ impl Encoder {
                 kVTCompressionPropertyKey_ProfileLevel,
                 kVTProfileLevel_H264_High_AutoLevel,
             );
-            set(
-                kVTCompressionPropertyKey_AverageBitRate,
-                &CFNumber::new_i32(bitrate),
-            );
+
             set(
                 kVTCompressionPropertyKey_ExpectedFrameRate,
                 &CFNumber::new_i32(fps),
@@ -108,6 +141,7 @@ impl Encoder {
                 kVTCompressionPropertyKey_MaxKeyFrameInterval,
                 &CFNumber::new_i32(MAX_GOP_FRAMES),
             );
+            set_rate(&session, bitrate as u32);
             session.prepare_to_encode_frames();
         }
 
@@ -120,17 +154,7 @@ impl Encoder {
 
     /// Changes the target bitrate on the fly; low-latency rate control adapts within frames.
     pub fn set_bitrate(&self, bps: u32) {
-        let value = CFNumber::new_i32(bps as i32);
-        let status = unsafe {
-            VTSessionSetProperty(
-                &self.session,
-                kVTCompressionPropertyKey_AverageBitRate,
-                Some(&value),
-            )
-        };
-        if status != 0 {
-            tracing::warn!("set bitrate {bps}: {status}");
-        }
+        set_rate(&self.session, bps);
     }
 
     pub fn encode(&self, image: &CVImageBuffer, pts: CMTime, capture_us: u64) {

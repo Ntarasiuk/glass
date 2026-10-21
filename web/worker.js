@@ -393,6 +393,8 @@ function reportStats() {
       dropped: stats.dropped,
       frames: stats.frames,
       latency_ms: stats.latencySamples ? stats.latencySum / stats.latencySamples : null,
+      // How much of the allowance was used: the host only raises it when it's needed.
+      received_bps: stats.bytes * 8,
     });
   }
   self.postMessage({

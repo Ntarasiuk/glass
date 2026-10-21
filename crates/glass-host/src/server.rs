@@ -200,6 +200,8 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
     let mut frames = shared.frames.subscribe();
     // Per stream, so a client sees a gap only when that stream lost a frame.
     let mut next_frame_id = [0u32; MAX_STREAMS];
+    // When this client last had a keyframe request honoured: [all streams, stream 0, …].
+    let mut last_keyframe_request = [None::<std::time::Instant>; MAX_STREAMS + 1];
 
     let result: Result<()> = async {
         loop {
@@ -245,7 +247,15 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                             }
                         }
                         Some(&KIND_KEYFRAME_REQUEST) if authed.load(Ordering::Relaxed) => {
-                            shared.video.request_keyframe(dgram.get(1).copied());
+                            // Keyframes are big: on a lossy link, honouring every request
+                            // makes the loss worse. One per stream per interval is enough.
+                            let stream = dgram.get(1).copied();
+                            let slot = stream.map_or(0, |s| (s as usize + 1).min(MAX_STREAMS));
+                            let now = std::time::Instant::now();
+                            if last_keyframe_request[slot].is_none_or(|t| now.duration_since(t) >= KEYFRAME_REQUEST_SPACING) {
+                                last_keyframe_request[slot] = Some(now);
+                                shared.video.request_keyframe(stream);
+                            }
                         }
                         _ => {}
                     }
@@ -630,6 +640,9 @@ enum Auth {
 
 /// How often a guest session re-checks that its pass is still valid.
 const GUEST_RECHECK: Duration = Duration::from_secs(10);
+
+/// A client's keyframe requests are honoured at most this often (per stream).
+const KEYFRAME_REQUEST_SPACING: Duration = Duration::from_millis(500);
 
 const AUTH_MAX_FAILURES: u32 = 10;
 const AUTH_WINDOW: Duration = Duration::from_secs(600);
