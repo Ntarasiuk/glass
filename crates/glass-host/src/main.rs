@@ -357,21 +357,27 @@ async fn run_host(args: Args) -> Result<()> {
         (Some(_), port) if port != 0 => match std::net::TcpListener::bind(("0.0.0.0", port)) {
             Ok(l) => Some(l),
             Err(e) => {
-                info!(
-                    "port {port} unavailable ({e}); links use :{}",
-                    args.http_port
-                );
+                info!("port {port} unavailable ({e}); links include the web port");
                 None
             }
         },
         _ => None,
     };
-    let portless = https_listener.is_some()
-        || (tls.is_some() && tailscale::serves_https_to(args.http_port).await);
+    // The usual web port, or the next free one.
+    let http_listener = bind_first_free(args.http_port)?;
+    let web_port = http_listener.local_addr()?.port();
+    if web_port != args.http_port {
+        tracing::warn!(
+            "port {} is in use; serving the web client on {web_port}",
+            args.http_port
+        );
+    }
+    let portless =
+        https_listener.is_some() || (tls.is_some() && tailscale::serves_https_to(web_port).await);
     let url = if portless {
         format!("{scheme}://{host}/")
     } else {
-        format!("{scheme}://{host}:{}/", args.http_port)
+        format!("{scheme}://{host}:{web_port}/")
     };
     status::start(Some(url.clone()));
 
@@ -478,6 +484,7 @@ async fn run_host(args: Args) -> Result<()> {
         shared,
         paths.web_dir,
         args.http_port,
+        http_listener,
         https_listener,
         args.wt_port,
         args.wt_host,
@@ -486,6 +493,19 @@ async fn run_host(args: Args) -> Result<()> {
         test_routes,
     )
     .await
+}
+
+/// How many ports past the usual one to try when it's taken.
+pub const PORT_TRIES: u16 = 20;
+
+/// Binds `port`, or the next free one within `PORT_TRIES`.
+fn bind_first_free(port: u16) -> Result<std::net::TcpListener> {
+    let last = port.saturating_add(PORT_TRIES - 1);
+    (port..=last)
+        .find_map(|p| std::net::TcpListener::bind(("0.0.0.0", p)).ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("TCP ports {port}–{last} are all in use; free one or pass --http-port")
+        })
 }
 
 pub fn home() -> PathBuf {

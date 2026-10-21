@@ -226,6 +226,32 @@ test.describe('magic links', () => {
   });
 });
 
+test.describe('ports', () => {
+  it('moves to the next free ports when the usual ones are taken', async ({ page, host }) => {
+    // A second host asked for the same ports as the running one.
+    const second = new Host();
+    Object.assign(second, { http: host.http, wt: host.wt, base: host.base });
+    await second.start(); // returns once *a* host answers there; find where this one went
+    try {
+      const statusFile = `${second.configDir}/status.json`;
+      const { readFileSync, existsSync } = await import('node:fs');
+      await expect.poll(() => existsSync(statusFile) && JSON.parse(readFileSync(statusFile, 'utf8')).url, { timeout: 15_000 })
+        .toMatch(/^http:\/\/localhost:\d+\/$/);
+      const url = JSON.parse(readFileSync(statusFile, 'utf8')).url;
+      const port = Number(new URL(url).port);
+      expect(port).toBeGreaterThan(host.http);
+      const config = await (await fetch(`${url}config.json`)).json();
+      expect(config.wtPort).toBeGreaterThan(host.wt);
+      // And it works there.
+      const token = readFileSync(`${second.configDir}/token`, 'utf8').trim();
+      await page.goto(`${url}#t=${token}`);
+      await expectVideo(page);
+    } finally {
+      await second.stop();
+    }
+  });
+});
+
 test.describe('displays', () => {
   it('lists displays and switches between one and all', async ({ page, host }) => {
     await open(page, host);

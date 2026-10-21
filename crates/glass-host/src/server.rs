@@ -1,6 +1,5 @@
 //! WebTransport session handling plus the HTTP(S) server for the web client.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,7 +52,9 @@ pub struct TlsFiles {
 pub async fn run(
     shared: Arc<Shared>,
     web_dir: PathBuf,
+    // The usual web port, where other machines' hosts are probed.
     http_port: u16,
+    http_listener: std::net::TcpListener,
     https_listener: Option<std::net::TcpListener>,
     wt_port: u16,
     wt_host: Option<String>,
@@ -72,13 +73,29 @@ pub async fn run(
             .fmt(Sha256DigestFmt::BytesArray)
     });
 
-    let config = ServerConfig::builder()
-        .with_bind_default(wt_port)
-        .with_identity(identity)
-        .keep_alive_interval(Some(Duration::from_secs(2)))
-        .max_idle_timeout(Some(Duration::from_secs(10)))?
-        .build();
-    let endpoint = Endpoint::server(config)?;
+    // The usual port, or the next free one: clients learn it from /config.json.
+    let mut bound = None;
+    for port in wt_port..wt_port.saturating_add(crate::PORT_TRIES) {
+        let config = ServerConfig::builder()
+            .with_bind_default(port)
+            .with_identity(identity.clone_identity())
+            .keep_alive_interval(Some(Duration::from_secs(2)))
+            .max_idle_timeout(Some(Duration::from_secs(10)))?
+            .build();
+        match Endpoint::server(config) {
+            Ok(endpoint) => {
+                bound = Some((endpoint, port));
+                break;
+            }
+            Err(e) => warn!("udp/{port} unavailable ({e}); trying the next port"),
+        }
+    }
+    let Some((endpoint, wt_port)) = bound else {
+        anyhow::bail!(
+            "UDP ports {wt_port}–{} are all in use; free one or pass --wt-port",
+            wt_port.saturating_add(crate::PORT_TRIES - 1)
+        );
+    };
     info!("WebTransport listening on udp/{wt_port}");
 
     let cert_hash = cert_hash.map(|h| serde_json::from_str::<Vec<u8>>(&h).unwrap());
@@ -113,7 +130,8 @@ pub async fn run(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         ));
-    let addr = SocketAddr::from(([0, 0, 0, 0], http_port));
+    let web_port = http_listener.local_addr()?.port();
+    http_listener.set_nonblocking(true)?;
     tokio::spawn(async move {
         let result = match tls {
             Some(t) => {
@@ -131,16 +149,21 @@ pub async fn run(
                         }
                     });
                 }
-                info!("web client at https://<host>:{http_port}");
-                axum_server::bind_rustls(addr, rustls)
+                info!("web client at https://<host>:{web_port}");
+                axum_server::from_tcp_rustls(http_listener, rustls)?
                     .serve(app.into_make_service())
                     .await
             }
             None => {
-                info!("web client at http://localhost:{http_port}");
-                axum_server::bind(addr).serve(app.into_make_service()).await
+                info!("web client at http://localhost:{web_port}");
+                axum_server::from_tcp(http_listener)?
+                    .serve(app.into_make_service())
+                    .await
             }
         };
+        if let Err(e) = &result {
+            tracing::error!("web server stopped: {e}");
+        }
         anyhow::Ok(result?)
     });
 
@@ -749,15 +772,26 @@ async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_j
 }
 
 /// If a Glass host answers at `https://<dns>:<port>/config.json`, its WebTransport port.
+/// Tries the port-less address first (it's there even when a host's web port had to move),
+/// then the usual port.
 async fn probe_glass(dns: &str, port: u16) -> Option<u16> {
-    let url = format!("https://{dns}:{port}/config.json");
-    let out = tokio::process::Command::new("curl")
-        .args(["-fsS", "--max-time", "1.5", &url])
-        .output()
-        .await
-        .ok()?;
-    let config: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    config["wtPort"].as_u64().map(|p| p as u16)
+    for url in [
+        format!("https://{dns}/config.json"),
+        format!("https://{dns}:{port}/config.json"),
+    ] {
+        let Ok(out) = tokio::process::Command::new("curl")
+            .args(["-fsS", "--max-time", "1.5", &url])
+            .output()
+            .await
+        else {
+            continue;
+        };
+        let config: Option<serde_json::Value> = serde_json::from_slice(&out.stdout).ok();
+        if let Some(port) = config.and_then(|c| c["wtPort"].as_u64()) {
+            return Some(port as u16);
+        }
+    }
+    None
 }
 
 /// Browsers accept a self-signed cert via `serverCertificateHashes` only if it is ECDSA
