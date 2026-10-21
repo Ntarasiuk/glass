@@ -51,7 +51,7 @@ The setup guide walks through four steps and checks each one live:
 
 1. **Tailscale (remote access).** Glass uses [Tailscale](https://tailscale.com) to reach the Mac securely from other devices, with no port forwarding. Setup checks that Tailscale is installed and signed in, and that **HTTPS Certificates** are enabled for your tailnet (one switch on https://login.tailscale.com/admin/dns; browsers require HTTPS for the APIs Glass uses). It then fetches a certificate for the Mac's tailnet name. You can skip this to use Glass only on the Mac itself.
 2. **Background service.** Glass installs a per-user LaunchAgent (`dev.glassdesk.host`) so it runs in the background, optionally starts at login, and restarts if it crashes.
-3. **Screen Recording permission.** macOS asks to let `glass` record the screen. Setup opens the right System Settings pane and waits until capture works.
+3. **Screen Recording permission.** macOS asks to let `glass` record the screen. Setup opens the right System Settings pane (Privacy & Security › Screen Recording on macOS 13–14, Screen & System Audio Recording on 15+) and waits until capture works.
 4. **Accessibility permission.** Needed to inject mouse and keyboard input. Setup opens the pane and waits until it's allowed.
 
 It finishes by showing the connect URL and a QR code to scan with the iPad.
@@ -171,7 +171,7 @@ The same one-liner installs Glass on Linux x86_64. The Linux host uses:
 - **Background service:** a systemd user unit (`~/.config/systemd/user/glass.service`) tied to the graphical session. Logs: `journalctl --user -u glass` and `~/.local/state/glass/`.
 - **Tailscale:** non-root users need to be Tailscale operators to fetch HTTPS certificates; setup offers to run `sudo tailscale set --operator=$USER`.
 
-Dependencies on Arch / Omarchy: `sudo pacman -S --needed pipewire xdg-desktop-portal-hyprland wl-clipboard tailscale`. Setup checks for these.
+Dependencies: PipeWire, wl-clipboard and your desktop's screen-sharing portal (`xdg-desktop-portal-hyprland`, `-gnome`, `-kde` or `-wlr`). Setup detects pacman, apt, dnf or zypper and offers to install what's missing, e.g. on Arch / Omarchy: `sudo pacman -S --needed pipewire xdg-desktop-portal-hyprland wl-clipboard`; on Ubuntu: `sudo apt-get install pipewire xdg-desktop-portal-gnome wl-clipboard`. Tailscale: `curl -fsSL https://tailscale.com/install.sh | sh`, then `sudo tailscale up`.
 
 Keys arrive as typed on Linux hosts: ⌘ on an Apple keyboard is Super. Paste from the viewer's clipboard sends Ctrl+V.
 

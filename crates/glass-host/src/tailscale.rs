@@ -128,6 +128,8 @@ pub async fn machines() -> Result<Vec<Machine>> {
 
 pub enum Probe {
     Missing,
+    /// Installed, but the app (macOS) or tailscaled (Linux) isn't running.
+    NotRunning,
     LoggedOut,
     /// Connected, but the tailnet hasn't enabled HTTPS certificates.
     NoHttps {
@@ -146,7 +148,7 @@ pub async fn probe() -> Probe {
             .output()
             .is_ok();
         return if installed {
-            Probe::LoggedOut
+            Probe::NotRunning
         } else {
             Probe::Missing
         };

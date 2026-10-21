@@ -82,7 +82,7 @@ Common steps:
 |---|---|---|
 | `tailscale-https` | Turn on HTTPS Certificates at https://login.tailscale.com/admin/dns | user, once per tailnet |
 | `tailscale-cert` | Linux: `sudo tailscale set --operator=$USER` on the target | you via SSH if sudo allows, else user |
-| `dependencies` | Linux packages (exact `pacman` command given) | you via SSH if sudo allows, else user |
+| `dependencies` | Linux packages (exact command for the distro's package manager given) | you via SSH if sudo allows, else user |
 | `input-access` | Linux uinput rule; `glass setup` on the target asks for sudo once | user |
 | `screen-recording`, `accessibility` | macOS permission switches | person at the screen |
 | `screen-share` | Linux share picker | person at the screen |

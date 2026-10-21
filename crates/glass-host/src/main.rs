@@ -503,8 +503,8 @@ async fn run_host(args: Args) -> Result<()> {
             info!("accessibility: granted (input injection enabled)");
         } else {
             tracing::warn!(
-                "accessibility: NOT granted; remote input will be ignored. Run `glass setup`, or allow \
-                 Glass in System Settings → Privacy & Security → Accessibility"
+                "accessibility: NOT granted; remote input will be ignored. Allow it in {}",
+                platform::setup::input_settings()
             );
         }
         permissions::request_missing();
@@ -516,7 +516,8 @@ async fn run_host(args: Args) -> Result<()> {
                 Err(e) if cfg!(target_os = "macos") && !permissions::has_screen_recording() => {
                     tracing::warn!(
                         "{e:#}; Screen Recording isn't allowed. Run `glass setup`, or allow Glass \
-                         in System Settings › Privacy & Security › Screen & System Audio Recording"
+                         in {}",
+                        platform::setup::screen_settings()
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 }

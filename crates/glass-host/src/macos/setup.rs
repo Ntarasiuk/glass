@@ -27,6 +27,51 @@ pub fn try_tailscale_operator() -> bool {
     false
 }
 
+pub const TAILSCALE_INSTALL: &str = "Install the Tailscale app (https://tailscale.com/download/mac, or the Mac App Store),\n\
+     open it and sign in. Install it on your other devices too.";
+pub const TAILSCALE_START: &str = "Tailscale is installed but not running. Open the Tailscale app.";
+pub const TAILSCALE_SIGN_IN: &str =
+    "Tailscale isn't signed in. Click its icon in the menu bar and log in.";
+
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("open").arg(url).status();
+}
+
+/// macOS 15 renamed the Screen Recording pane.
+fn screen_pane_name() -> &'static str {
+    let major = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split('.')
+                .next()?
+                .trim()
+                .parse::<u32>()
+                .ok()
+        })
+        .unwrap_or(15);
+    if major >= 15 {
+        "Screen & System Audio Recording"
+    } else {
+        "Screen Recording"
+    }
+}
+
+/// Where to allow screen capture, for messages.
+pub fn screen_settings() -> String {
+    format!(
+        "System Settings › Privacy & Security › {}",
+        screen_pane_name()
+    )
+}
+
+/// Where to allow remote input, for messages.
+pub fn input_settings() -> String {
+    "System Settings › Privacy & Security › Accessibility".into()
+}
+
 /// Opens the panes on the Mac's screen, so whoever is there (or controlling it) can click.
 pub fn permission_needs(status: &Status) -> Vec<crate::setup::Need> {
     let mut needs = Vec::new();
@@ -34,7 +79,10 @@ pub fn permission_needs(status: &Status) -> Vec<crate::setup::Need> {
         permissions::open_pane(permissions::SCREEN_RECORDING_PANE);
         needs.push(crate::setup::Need {
             step: "screen-recording",
-            action: "Allow \"glass\" in System Settings › Privacy & Security › Screen & System Audio Recording (opened on the Mac)".into(),
+            action: format!(
+                "Allow \"glass\" in {} (opened on the Mac)",
+                screen_settings()
+            ),
             on_screen: true,
         });
     }
@@ -42,7 +90,10 @@ pub fn permission_needs(status: &Status) -> Vec<crate::setup::Need> {
         permissions::open_pane(permissions::ACCESSIBILITY_PANE);
         needs.push(crate::setup::Need {
             step: "accessibility",
-            action: "Allow \"glass\" in System Settings › Privacy & Security › Accessibility (opened on the Mac)".into(),
+            action: format!(
+                "Allow \"glass\" in {} (opened on the Mac)",
+                input_settings()
+            ),
             on_screen: true,
         });
     }
@@ -63,7 +114,7 @@ fn screen_recording_step(status: Status) -> Result<Status> {
     }
     note(
         "Allow Glass to see your screen",
-        "macOS will ask to let \"glass\" record your screen and audio.\n\
+        "macOS will ask to let \"glass\" record this computer's screen.\n\
          Click Allow, or switch Glass on in the System Settings pane that opens.\n\
          If it asks to \"Quit & Reopen\", go ahead. Glass restarts itself.",
     )?;
@@ -76,10 +127,11 @@ fn screen_recording_step(status: Status) -> Result<Status> {
             return Ok(s);
         }
         sp.error("Screen Recording still isn't allowed");
-        log::warning(
-            "If you clicked Deny, switch Glass on in System Settings › Privacy & Security › \
-             Screen & System Audio Recording.\nIf it isn't listed, click + and choose ~/.glass/bin/glass.",
-        )?;
+        log::warning(format!(
+            "If you clicked Deny, switch Glass on in {}.\n\
+             If it isn't listed, click + and choose ~/.glass/bin/glass.",
+            screen_settings()
+        ))?;
         if !crate::setup::ask_retry("Allowed it?", "Quit setup (run `glass setup` again later)")? {
             // Leave the agent stopped so it doesn't keep prompting in the background.
             agent::stop();

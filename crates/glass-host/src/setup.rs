@@ -10,11 +10,7 @@ use console::style;
 use crate::status::{self, Status};
 use crate::{agent, platform, tailscale};
 
-#[cfg(target_os = "macos")]
-const TAILSCALE_DOWNLOAD: &str = "https://tailscale.com/download/mac";
-#[cfg(target_os = "linux")]
-const TAILSCALE_DOWNLOAD: &str =
-    "https://tailscale.com/download/linux (on Arch/Omarchy: sudo pacman -S tailscale)";
+use platform::setup::{TAILSCALE_INSTALL, TAILSCALE_SIGN_IN, TAILSCALE_START};
 const TAILSCALE_DNS_ADMIN: &str = "https://login.tailscale.com/admin/dns";
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -41,16 +37,20 @@ async fn tailscale_step() -> Result<Option<String>> {
             tailscale::Probe::Missing => {
                 log::warning(format!(
                     "Tailscale isn't installed. It's free and gives your devices a private, secure link.\n\
-                     Install it here and on your other devices: {TAILSCALE_DOWNLOAD}"
+                     {TAILSCALE_INSTALL}"
                 ))?;
                 if !ask_retry("Installed it?", "Skip (use Glass only on this computer)")? {
                     return Ok(None);
                 }
             }
+            tailscale::Probe::NotRunning => {
+                log::warning(TAILSCALE_START)?;
+                if !ask_retry("Started it?", "Skip remote access for now")? {
+                    return Ok(None);
+                }
+            }
             tailscale::Probe::LoggedOut => {
-                log::warning(
-                    "Tailscale is installed but not signed in. Open Tailscale from the menu bar and log in.",
-                )?;
+                log::warning(TAILSCALE_SIGN_IN)?;
                 if !ask_retry("Signed in?", "Skip remote access for now")? {
                     return Ok(None);
                 }
@@ -61,9 +61,7 @@ async fn tailscale_step() -> Result<Option<String>> {
                      (one switch at the bottom of {TAILSCALE_DNS_ADMIN}), so {name} can get a certificate.",
                     style("HTTPS Certificates").bold()
                 ))?;
-                let _ = std::process::Command::new("open")
-                    .arg(TAILSCALE_DNS_ADMIN)
-                    .status();
+                platform::setup::open_url(TAILSCALE_DNS_ADMIN);
                 if !ask_retry("Turned it on?", "Skip remote access for now")? {
                     return Ok(None);
                 }
@@ -127,7 +125,7 @@ fn wait_for_host() -> Result<Status> {
         }
         if started.elapsed() > START_TIMEOUT {
             sp.error("Glass didn't start");
-            anyhow::bail!("see ~/Library/Logs/Glass/agent.log for details");
+            anyhow::bail!("{}", agent::LOG_HINT.trim());
         }
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -274,18 +272,26 @@ pub async fn run_unattended(json: bool) -> Result<()> {
             });
             None
         }
+        tailscale::Probe::NotRunning => {
+            needs.push(Need {
+                step: "tailscale-start",
+                action: TAILSCALE_START.replace('\n', " "),
+                on_screen: cfg!(target_os = "macos"),
+            });
+            None
+        }
         tailscale::Probe::LoggedOut => {
             needs.push(Need {
                 step: "tailscale-login",
-                action: "Sign in to Tailscale on this machine".into(),
-                on_screen: true,
+                action: TAILSCALE_SIGN_IN.into(),
+                on_screen: cfg!(target_os = "macos"),
             });
             None
         }
         tailscale::Probe::Missing => {
             needs.push(Need {
                 step: "tailscale-install",
-                action: format!("Install Tailscale: {TAILSCALE_DOWNLOAD}"),
+                action: TAILSCALE_INSTALL.replace('\n', " "),
                 on_screen: false,
             });
             None

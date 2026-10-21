@@ -22,20 +22,101 @@ pub async fn prepare() -> Result<()> {
 
 fn dependencies_step() -> Result<()> {
     log::step("Desktop integration")?;
+    if std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "x11") {
+        log::warning(
+            "This is an X11 session. Glass on Linux needs Wayland: log out, pick a Wayland \
+             session (e.g. \"GNOME\" rather than \"GNOME on Xorg\"), and run `glass setup` there.",
+        )?;
+    }
     loop {
         let missing = missing_dependencies();
         if missing.is_empty() {
             log::success("PipeWire, screen-sharing portal and wl-clipboard found")?;
             return Ok(());
         }
-        log::warning(format!(
-            "Missing: {}. On Arch / Omarchy:\n  {}",
-            missing.join(", "),
-            style(format!("sudo pacman -S --needed {}", missing.join(" "))).bold()
-        ))?;
+        let Some(pm) = PackageManager::detect() else {
+            log::warning(format!(
+                "Missing: {}. Install them with your package manager.",
+                missing.join(", ")
+            ))?;
+            if !ask_retry("Installed them?", "Continue anyway")? {
+                return Ok(());
+            }
+            continue;
+        };
+        let command = pm.install(&missing, false);
+        log::warning(format!("Missing: {}", missing.join(", ")))?;
+        if confirm(format!(
+            "Install them now? (runs {})",
+            style(&command).bold()
+        ))
+        .initial_value(true)
+        .interact()?
+        {
+            let _ = Command::new("sh").args(["-c", &command]).status();
+            continue;
+        }
         if !ask_retry("Installed them?", "Continue anyway")? {
             return Ok(());
         }
+    }
+}
+
+/// The distro's package manager, for install commands that work as written.
+#[derive(Clone, Copy)]
+enum PackageManager {
+    Pacman,
+    Apt,
+    Dnf,
+    Zypper,
+}
+
+impl PackageManager {
+    fn detect() -> Option<Self> {
+        [
+            ("pacman", Self::Pacman),
+            ("apt-get", Self::Apt),
+            ("dnf", Self::Dnf),
+            ("zypper", Self::Zypper),
+        ]
+        .into_iter()
+        .find(|(cmd, _)| has_command(cmd))
+        .map(|(_, pm)| pm)
+    }
+
+    fn install(self, packages: &[&str], unattended: bool) -> String {
+        let packages = packages.join(" ");
+        let (cmd, yes) = match self {
+            Self::Pacman => ("pacman -S --needed", "--noconfirm"),
+            Self::Apt => ("apt-get install", "-y"),
+            Self::Dnf => ("dnf install", "-y"),
+            Self::Zypper => ("zypper install", "-y"),
+        };
+        let sudo = if unattended { "sudo -n" } else { "sudo" };
+        if unattended {
+            format!("{sudo} {cmd} {yes} {packages}")
+        } else {
+            format!("{sudo} {cmd} {packages}")
+        }
+    }
+}
+
+/// The screen-sharing portal backend for this desktop (package names match across distros).
+fn portal_package() -> &'static str {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_lowercase();
+    if desktop.contains("hyprland") {
+        "xdg-desktop-portal-hyprland"
+    } else if desktop.contains("gnome") || desktop.contains("unity") {
+        "xdg-desktop-portal-gnome"
+    } else if desktop.contains("kde") {
+        "xdg-desktop-portal-kde"
+    } else if desktop.contains("cosmic") {
+        "xdg-desktop-portal-cosmic"
+    } else {
+        // sway, river, niri, Wayfire and other wlroots compositors.
+        "xdg-desktop-portal-wlr"
     }
 }
 
@@ -100,7 +181,7 @@ fn missing_dependencies() -> Vec<&'static str> {
         });
     [
         (!has_command("pipewire")).then_some("pipewire"),
-        (!portal).then_some("xdg-desktop-portal-hyprland"),
+        (!portal).then_some(portal_package()),
         (!has_command("wl-copy")).then_some("wl-clipboard"),
     ]
     .into_iter()
@@ -112,17 +193,24 @@ fn missing_dependencies() -> Vec<&'static str> {
 pub fn prepare_unattended() -> Vec<crate::setup::Need> {
     let mut needs = Vec::new();
     let missing = missing_dependencies();
-    if !missing.is_empty()
-        && !sudo_n(&format!(
-            "pacman -S --needed --noconfirm {}",
-            missing.join(" ")
-        ))
-    {
-        needs.push(crate::setup::Need {
-            step: "dependencies",
-            action: format!("Install: sudo pacman -S --needed {}", missing.join(" ")),
-            on_screen: false,
+    if !missing.is_empty() {
+        let pm = PackageManager::detect();
+        let installed = pm.is_some_and(|pm| {
+            Command::new("sh")
+                .args(["-c", &pm.install(&missing, true)])
+                .status()
+                .is_ok_and(|s| s.success())
         });
+        if !installed {
+            needs.push(crate::setup::Need {
+                step: "dependencies",
+                action: match pm {
+                    Some(pm) => format!("Install: {}", pm.install(&missing, false)),
+                    None => format!("Install with the package manager: {}", missing.join(" ")),
+                },
+                on_screen: false,
+            });
+        }
     }
     if !input::has_accessibility() {
         let script = format!(
@@ -139,6 +227,30 @@ pub fn prepare_unattended() -> Vec<crate::setup::Need> {
         }
     }
     needs
+}
+
+pub const TAILSCALE_INSTALL: &str = "Install Tailscale: curl -fsSL https://tailscale.com/install.sh | sh\n\
+     then sign in with: sudo tailscale up. Install it on your other devices too.";
+pub const TAILSCALE_START: &str = "Tailscale is installed but its service isn't running. Start it with:\n  sudo systemctl enable --now tailscaled";
+pub const TAILSCALE_SIGN_IN: &str =
+    "Tailscale isn't signed in. Run: sudo tailscale up (it prints a link to log in).";
+
+pub fn open_url(url: &str) {
+    let _ = Command::new("xdg-open")
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Where to allow screen capture, for messages.
+pub fn screen_settings() -> String {
+    "the desktop's screen-share picker (run `glass setup` on the machine)".into()
+}
+
+/// Where to allow remote input, for messages.
+pub fn input_settings() -> String {
+    "`glass setup` (grants /dev/uinput access, then log out and back in)".into()
 }
 
 pub fn try_tailscale_operator() -> bool {
@@ -192,4 +304,26 @@ pub fn permissions(status: Status) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_commands_match_the_distro() {
+        let pkgs = ["pipewire", "wl-clipboard"];
+        assert_eq!(
+            PackageManager::Pacman.install(&pkgs, false),
+            "sudo pacman -S --needed pipewire wl-clipboard"
+        );
+        assert_eq!(
+            PackageManager::Apt.install(&pkgs, true),
+            "sudo -n apt-get install -y pipewire wl-clipboard"
+        );
+        assert_eq!(
+            PackageManager::Dnf.install(&pkgs, false),
+            "sudo dnf install pipewire wl-clipboard"
+        );
+    }
 }
