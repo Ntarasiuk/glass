@@ -5,7 +5,7 @@
 
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use anyhow::{Result, bail};
 use block2::RcBlock;
@@ -21,9 +21,10 @@ use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
     kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_ExpectedFrameRate,
-    kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_ProfileLevel,
-    kVTCompressionPropertyKey_RealTime, kVTEncodeFrameOptionKey_ForceKeyFrame,
-    kVTProfileLevel_H264_High_AutoLevel, kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
+    kVTCompressionPropertyKey_MaxAllowedFrameQP, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
+    kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
+    kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
 
@@ -85,6 +86,14 @@ pub struct Encoder {
     session: CFRetained<VTCompressionSession>,
     force_keyframe: Arc<AtomicBool>,
     on_frame: Arc<dyn Fn(EncodedFrame) + Send + Sync>,
+    /// The sharpness cap in force (MaxAllowedFrameQP; 0 = none), from `apply_policy`.
+    qp_cap: AtomicU32,
+    /// The cap is lifted for the keyframe just submitted; restore it on the next frame.
+    cap_lifted: AtomicBool,
+    /// Bytes produced, for sharing the bitrate between displays by activity.
+    bytes: Arc<AtomicU64>,
+    /// Size of the latest output frame (an idle refresh stops once these get tiny).
+    last_size: Arc<AtomicU64>,
 }
 
 // VTCompressionSession is thread-safe; frames are submitted from the capture queue only.
@@ -164,20 +173,81 @@ impl Encoder {
             session,
             force_keyframe,
             on_frame,
+            qp_cap: AtomicU32::new(0),
+            cap_lifted: AtomicBool::new(false),
+            bytes: Arc::new(AtomicU64::new(0)),
+            last_size: Arc::new(AtomicU64::new(0)),
         })
     }
 
-    /// Changes the target bitrate on the fly; low-latency rate control adapts within frames.
-    pub fn set_bitrate(&self, bps: u32) {
+    /// Applies the sharpness policy for `bps` (see `rate::sharp_policy`): the bitrate, the
+    /// expected frame rate and a cap on how coarse frames may get. Returns the frame-rate
+    /// ceiling for capture.
+    pub fn apply_policy(&self, bps: u32) -> u32 {
+        let (fps, qp) = crate::rate::sharp_policy(bps);
         set_rate(&self.session, bps);
+        self.set(
+            unsafe { kVTCompressionPropertyKey_ExpectedFrameRate },
+            fps as i32,
+            "frame rate",
+        );
+        if self.qp_cap.swap(qp, Ordering::Relaxed) != qp && !self.cap_lifted.load(Ordering::Relaxed)
+        {
+            self.set(
+                unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP },
+                qp as i32,
+                "QP cap",
+            );
+        }
+        fps
+    }
+
+    fn set(&self, key: &CFString, value: i32, what: &str) {
+        let n = CFNumber::new_i32(value);
+        let status = unsafe { VTSessionSetProperty(&self.session, key, Some(&n)) };
+        if status != 0 {
+            tracing::warn!("set {what} ({value}): {status}");
+        }
+    }
+
+    /// Bytes produced since the last call.
+    pub fn take_bytes(&self) -> u64 {
+        self.bytes.swap(0, Ordering::Relaxed)
+    }
+
+    pub fn last_frame_size(&self) -> u64 {
+        self.last_size.load(Ordering::Relaxed)
+    }
+
+    pub fn keyframe_pending(&self) -> bool {
+        self.force_keyframe.load(Ordering::Relaxed)
     }
 
     pub fn encode(&self, image: &CVImageBuffer, pts: CMTime, capture_us: u64) {
-        let props = self.force_keyframe.swap(false, Ordering::Relaxed).then(|| {
+        let keyframe = self.force_keyframe.swap(false, Ordering::Relaxed);
+        // Keyframes go uncapped: capping them makes them bigger, not sharper (measured
+        // 661 → 981 KB), which stalls a slow link. The cap returns on the next frame.
+        let cap = self.qp_cap.load(Ordering::Relaxed);
+        if keyframe && cap != 0 {
+            self.set(
+                unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP },
+                51,
+                "QP cap",
+            );
+            self.cap_lifted.store(true, Ordering::Relaxed);
+        } else if !keyframe && self.cap_lifted.swap(false, Ordering::Relaxed) && cap != 0 {
+            self.set(
+                unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP },
+                cap as i32,
+                "QP cap",
+            );
+        }
+        let props = keyframe.then(|| {
             let keys = unsafe { [kVTEncodeFrameOptionKey_ForceKeyFrame] };
             CFDictionary::<CFString, CFType>::from_slices(&keys, &[CFBoolean::new(true)])
         });
         let on_frame = self.on_frame.clone();
+        let (bytes, last_size) = (self.bytes.clone(), self.last_size.clone());
         let handler = RcBlock::new(
             move |status: i32, _flags: VTEncodeInfoFlags, sample: *mut CMSampleBuffer| {
                 if status != 0 {
@@ -190,6 +260,8 @@ impl Encoder {
                     return;
                 }
                 if let Some(frame) = unsafe { annex_b(&*sample) } {
+                    bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
+                    last_size.store(frame.data.len() as u64, Ordering::Relaxed);
                     on_frame(EncodedFrame {
                         capture_us,
                         ..frame

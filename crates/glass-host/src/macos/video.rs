@@ -29,6 +29,10 @@ struct Stream {
     encoder: Arc<Encoder>,
     display: DisplayInfo,
     keyframe: Arc<AtomicBool>,
+    /// Frame-rate ceiling the capture honours (from the sharpness policy).
+    fps: Arc<std::sync::atomic::AtomicU32>,
+    /// Recent output bytes (decaying), to share the bitrate by activity.
+    activity: std::sync::atomic::AtomicU64,
 }
 
 pub struct Video {
@@ -147,13 +151,16 @@ impl Video {
             }),
         )?;
         let encoder = Arc::new(encoder);
-        encoder.set_bitrate(self.bitrate.load(Ordering::Relaxed));
+        let fps = Arc::new(std::sync::atomic::AtomicU32::new(
+            encoder.apply_policy(self.bitrate.load(Ordering::Relaxed)),
+        ));
         let capture = capture::start(
             &display.sc,
             width,
             height,
             self.config.fps,
             encoder.clone(),
+            fps.clone(),
             audio,
         )?;
         let id = display.info.id;
@@ -166,6 +173,8 @@ impl Video {
             encoder,
             display: display.info.clone(),
             keyframe,
+            fps,
+            activity: Default::default(),
         })
     }
 
@@ -190,10 +199,28 @@ impl VideoSource for Video {
     fn displays(&self) -> Result<Vec<DisplayInfo>> {
         Video::displays(self)
     }
+    /// `bps` is the total for all displays (not each): shared out by `rebalance`.
     fn set_bitrate(&self, bps: u32) {
         self.bitrate.store(bps, Ordering::Relaxed);
-        for s in self.streams.lock().unwrap().iter() {
-            s.encoder.set_bitrate(bps);
+        self.rebalance();
+    }
+
+    /// Splits the total between displays by recent activity, and applies the sharpness
+    /// policy (bitrate, frame-rate ceiling, quality cap) to each.
+    fn rebalance(&self) {
+        let streams = self.streams.lock().unwrap();
+        let activity: Vec<u64> = streams
+            .iter()
+            .map(|s| {
+                let recent = s.encoder.take_bytes() + s.activity.load(Ordering::Relaxed) / 2;
+                s.activity.store(recent, Ordering::Relaxed);
+                recent
+            })
+            .collect();
+        let shares = crate::rate::split(self.bitrate.load(Ordering::Relaxed), &activity);
+        for (s, bps) in streams.iter().zip(shares) {
+            let fps = s.encoder.apply_policy(bps);
+            s.fps.store(fps, Ordering::Relaxed);
         }
     }
 }

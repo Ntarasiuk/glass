@@ -51,6 +51,8 @@ pub trait VideoSource: Send + Sync {
     fn displays(&self) -> anyhow::Result<Vec<DisplayInfo>>;
     /// Target bitrate for each stream, in bits per second (adaptive rate control).
     fn set_bitrate(&self, bps: u32);
+    /// Re-shares the bitrate between displays (called every second).
+    fn rebalance(&self) {}
 }
 
 /// Where client input goes (the platform injector, or a recorder in tests).

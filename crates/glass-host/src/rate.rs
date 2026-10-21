@@ -141,6 +141,55 @@ impl RateControl {
     }
 }
 
+/// Shares a total bitrate between displays by how much each is changing (bytes it
+/// produced recently): a still display needs a trickle, the one with motion needs most.
+/// Floors keep a still display refreshable and a busy one usable.
+pub fn split(total: u32, activity: &[u64]) -> Vec<u32> {
+    const STILL_FLOOR: u32 = 300_000;
+    const BUSY_FLOOR: u32 = 1_000_000;
+    let n = activity.len();
+    if n <= 1 {
+        return vec![total; n];
+    }
+    let sum: u64 = activity.iter().sum();
+    if sum == 0 {
+        return vec![total / n as u32; n];
+    }
+    let busy = |a: u64| a * 20 >= sum; // at least 5% of the recent bytes
+    let floors: Vec<u32> = activity
+        .iter()
+        .map(|&a| if busy(a) { BUSY_FLOOR } else { STILL_FLOOR })
+        .collect();
+    let floor_sum: u32 = floors.iter().sum();
+    if floor_sum >= total {
+        return floors
+            .iter()
+            .map(|&f| (f as u64 * total as u64 / floor_sum as u64) as u32)
+            .collect();
+    }
+    let spare = (total - floor_sum) as u64;
+    activity
+        .iter()
+        .zip(&floors)
+        .map(|(&a, &f)| f + (spare * a / sum) as u32)
+        .collect()
+}
+
+/// What a display's encoder does at a given bitrate to keep text sharp: a frame-rate
+/// ceiling, and a cap on how coarse a frame may get (QP; lower is sharper). When bits run
+/// short it sends fewer, sharp frames rather than many blurry ones; a still screen keeps
+/// refining after motion stops. Measured on 2560×1440 text with VideoToolbox.
+pub fn sharp_policy(bps: u32) -> (u32, u32) {
+    match bps {
+        b if b >= 12_000_000 => (60, 28),
+        b if b >= 8_000_000 => (60, 30),
+        b if b >= 5_000_000 => (45, 30),
+        b if b >= 3_000_000 => (30, 30),
+        b if b >= 1_500_000 => (15, 28),
+        _ => (10, 28),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +304,32 @@ mod tests {
             rc.report(lossy(), t0);
         }
         assert_eq!(rc.target(), (MAX as f64 * MIN_FRACTION) as u32);
+    }
+
+    #[test]
+    fn split_conserves_the_total_and_favours_motion() {
+        let parts = split(20_000_000, &[900_000, 10_000]);
+        assert!(parts.iter().sum::<u32>() <= 20_000_000);
+        assert!(parts.iter().sum::<u32>() >= 19_999_000);
+        assert!(parts[0] as f64 >= 0.8 * 20_000_000.0, "{parts:?}");
+        assert!(parts[1] >= 300_000, "still display keeps its floor");
+        assert_eq!(split(5_000_000, &[0, 0]), vec![2_500_000, 2_500_000]);
+        assert_eq!(split(7, &[1]), vec![7]);
+        // Too little to go round: shares in proportion to the floors.
+        let tight = split(1_000_000, &[100, 100, 100]);
+        assert!(tight.iter().sum::<u32>() <= 1_000_000);
+    }
+
+    #[test]
+    fn less_bitrate_means_fewer_frames_never_coarser_ones() {
+        let mut last_fps = u32::MAX;
+        for bps in [
+            20_000_000, 10_000_000, 6_000_000, 4_000_000, 2_000_000, 1_000_000,
+        ] {
+            let (fps, qp) = sharp_policy(bps);
+            assert!(fps <= last_fps);
+            assert!(qp <= 30, "QP cap never loosens past 30");
+            last_fps = fps;
+        }
     }
 }

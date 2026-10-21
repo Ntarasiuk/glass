@@ -37,8 +37,8 @@ use webrtc::peer_connection::{
 };
 use webrtc::rtp_transceiver::RtpSender;
 
-/// GCC grows only ~8%/s and doesn't probe, so it starts where a typical internet link
-/// already gives a readable picture.
+/// Where congestion control starts: a typical internet link already gives a readable
+/// picture here.
 const INITIAL_BPS: f64 = 5_000_000.0;
 const MIN_BPS: f64 = 1_000_000.0;
 const MAX_BPS: f64 = 40_000_000.0;
@@ -103,31 +103,97 @@ pub fn media_engine() -> Result<MediaEngine> {
     Ok(m)
 }
 
-/// Publishes GCC's target for the encoder, and paces above it.
-struct ReportingEstimator {
+/// GCC's estimate, made quicker and safer for a screen stream:
+/// - Quicker: GCC (as implemented here) grows ~8%/s and never probes. While the stream
+///   really uses what it has and GCC isn't backing off, a boost adds 15% a second; any
+///   GCC decrease resets it.
+/// - Safer: a still screen sends little, and GCC keeps growing anyway; so the published
+///   rate stays within twice the best rate actually delivered recently (min 5 Mb/s), so
+///   the first motion after a pause doesn't hit the link with an unproven burst.
+///
+/// The encoder follows the published rate; the pacer runs `PACING_FACTOR` above it.
+struct GlassEstimator {
     inner: Gcc,
     target: Arc<AtomicU64>,
+    published: f64,
+    boost: f64,
+    last_gcc: f64,
+    last_step: Instant,
+    /// Delivered (acknowledged) bytes, by report time, over the last second.
+    acked: VecDeque<(Instant, usize)>,
+    /// Best delivered rate per second over the last 10 s.
+    peaks: VecDeque<(Instant, f64)>,
 }
 
-impl ReportingEstimator {
-    fn publish(&self) {
+const BOOST_STEP: f64 = 1.15;
+const PROVEN_WINDOW: Duration = Duration::from_secs(10);
+
+impl GlassEstimator {
+    fn new(inner: Gcc, target: Arc<AtomicU64>) -> Self {
+        let gcc = inner.target_bitrate();
+        Self {
+            inner,
+            target,
+            published: gcc,
+            boost: 1.0,
+            last_gcc: gcc,
+            last_step: Instant::now(),
+            acked: VecDeque::new(),
+            peaks: VecDeque::new(),
+        }
+    }
+
+    fn update(&mut self, now: Instant) {
+        let gcc = self.inner.target_bitrate();
+        while self
+            .acked
+            .front()
+            .is_some_and(|(t, _)| now.duration_since(*t) > Duration::from_secs(1))
+        {
+            self.acked.pop_front();
+        }
+        let delivered = self.acked.iter().map(|(_, n)| *n).sum::<usize>() as f64 * 8.0;
+        if gcc < self.last_gcc * 0.97 {
+            self.boost = 1.0; // GCC saw congestion: no extra push.
+        } else if now.duration_since(self.last_step) >= Duration::from_secs(1) {
+            self.last_step = now;
+            self.peaks.push_back((now, delivered));
+            while self
+                .peaks
+                .front()
+                .is_some_and(|(t, _)| now.duration_since(*t) > PROVEN_WINDOW)
+            {
+                self.peaks.pop_front();
+            }
+            if delivered >= self.published * 0.8 {
+                self.boost = (self.boost * BOOST_STEP).min(MAX_BPS / gcc.max(1.0));
+            }
+        }
+        self.last_gcc = gcc;
+        let proven = self.peaks.iter().map(|(_, b)| *b).fold(0.0, f64::max);
+        let ceiling = (proven * 2.0).max(INITIAL_BPS);
+        self.published = (gcc * self.boost).min(ceiling).clamp(MIN_BPS, MAX_BPS);
         self.target
-            .store(self.inner.target_bitrate().to_bits(), Ordering::Relaxed);
+            .store(self.published.to_bits(), Ordering::Relaxed);
     }
 }
 
-impl BandwidthEstimator for ReportingEstimator {
+impl BandwidthEstimator for GlassEstimator {
     fn on_reports(&mut self, now: Instant, reports: &[PacketReport]) {
         self.inner.on_reports(now, reports);
-        self.publish();
+        let arrived: usize = reports.iter().filter(|r| r.arrived).map(|r| r.size).sum();
+        if arrived > 0 {
+            self.acked.push_back((now, arrived));
+        }
+        self.update(now);
     }
     /// Only the pacer reads this (so never take the encoder target from stats).
     fn target_bitrate(&self) -> f64 {
-        self.inner.target_bitrate() * PACING_FACTOR
+        self.published * PACING_FACTOR
     }
     fn handle_timeout(&mut self, now: Instant) {
         self.inner.handle_timeout(now);
-        self.publish();
+        self.update(now);
     }
     fn poll_timeout(&self) -> Option<Instant> {
         self.inner.poll_timeout()
@@ -199,10 +265,7 @@ impl Interceptor for KeyframeRequestForwarder {
 /// the estimate the encoder should follow.
 pub fn registry(media: &mut MediaEngine) -> Result<(Registry, Arc<AtomicU64>)> {
     let target = Arc::new(AtomicU64::new(INITIAL_BPS.to_bits()));
-    let estimator = ReportingEstimator {
-        inner: Gcc::new(INITIAL_BPS, MIN_BPS, MAX_BPS),
-        target: target.clone(),
-    };
+    let estimator = GlassEstimator::new(Gcc::new(INITIAL_BPS, MIN_BPS, MAX_BPS), target.clone());
     let r =
         configure_congestion_control(Registry::new(), estimator, CongestionFeedback::Twcc, media)?;
     let r = register_default_interceptors(r, media)?;
@@ -426,6 +489,22 @@ mod tests {
         assert_eq!(offered_video("v=0\r\nm=application 9 x\r\n"), 0);
         let many = "m=video 9 x\r\n".repeat(9);
         assert_eq!(offered_video(&many), MAX_TRACKS);
+    }
+
+    #[test]
+    fn estimate_stays_within_what_was_proven() {
+        let target = Arc::new(AtomicU64::new(0));
+        let mut est = GlassEstimator::new(Gcc::new(INITIAL_BPS, MIN_BPS, MAX_BPS), target.clone());
+        let t0 = Instant::now();
+        // Nothing delivered yet (a still screen): no boost, and held at the starting rate.
+        for i in 0..30 {
+            est.handle_timeout(t0 + Duration::from_millis(100 * i));
+        }
+        let published = f64::from_bits(target.load(Ordering::Relaxed));
+        assert!(published <= INITIAL_BPS * 1.001, "{published}");
+        assert!(published >= MIN_BPS);
+        assert_eq!(est.boost, 1.0);
+        assert_eq!(est.target_bitrate(), published * PACING_FACTOR);
     }
 
     #[test]

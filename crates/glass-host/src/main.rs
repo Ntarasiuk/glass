@@ -545,6 +545,17 @@ async fn run_host(args: Args) -> Result<()> {
         audio,
         rate: Mutex::new(rate::RateControl::new((args.mbps * 1_000_000) as u32)),
     });
+    // Re-share the bitrate between displays by activity, once a second.
+    {
+        let video = shared.video.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                video.rebalance();
+            }
+        });
+    }
     info!("open {url}#t={token}");
     server::run(
         shared,

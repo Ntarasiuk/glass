@@ -39,6 +39,71 @@ unsafe impl Send for LastFrame {}
 pub struct FrameState {
     encoder: Arc<Encoder>,
     last: std::sync::Mutex<LastFrame>,
+    /// Frame-rate ceiling from the sharpness policy (fewer, sharper frames on a slow link).
+    fps_cap: Arc<std::sync::atomic::AtomicU32>,
+    /// Capture time of the last frame actually encoded.
+    last_encoded_us: std::sync::atomic::AtomicU64,
+    /// Bumped on every new image; a pending check that sees it unchanged knows the screen
+    /// has gone still.
+    generation: std::sync::atomic::AtomicU64,
+    /// The newest image was skipped by the frame-rate ceiling and still needs sending.
+    unsent: std::sync::atomic::AtomicBool,
+    /// Idle refreshes done since the screen went still, and how many came out tiny.
+    refreshes: std::sync::atomic::AtomicU32,
+    tiny: std::sync::atomic::AtomicU32,
+    queue: dispatch2::DispatchRetained<DispatchQueue>,
+}
+
+/// A still screen is re-encoded this often for a while, so it sharpens to near-lossless
+/// after motion (each pass refines the previous one).
+const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(83);
+/// At most this many refreshes (3 s), and stop after 3 tiny outputs (already sharp).
+const MAX_REFRESHES: u32 = 36;
+const TINY_FRAME: u64 = 1024;
+
+impl FrameState {
+    fn encode_last(&self) {
+        let Some(image) = self.last.lock().unwrap().0.clone() else {
+            return;
+        };
+        let now = now_us();
+        self.last_encoded_us
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+        self.encoder
+            .encode(&image, unsafe { CMTime::new(now as i64, 1_000_000) }, now);
+    }
+
+    /// After a frame (sent or skipped): if nothing newer arrives, send what was skipped,
+    /// then keep refining the still picture for a while.
+    fn schedule_idle_check(self: &Arc<Self>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let fps = self.fps_cap.load(Relaxed).max(1);
+        let wait = REFRESH_INTERVAL.max(std::time::Duration::from_micros(1_000_000 / fps as u64));
+        let generation = self.generation.load(Relaxed);
+        let state = self.clone();
+        let Ok(when) = dispatch2::DispatchTime::try_from(wait) else {
+            return;
+        };
+        let _ = self.queue.after(when, move || {
+            if state.generation.load(Relaxed) != generation {
+                return; // newer frames took over
+            }
+            if state.unsent.swap(false, Relaxed) {
+                state.encode_last();
+            } else {
+                if state.encoder.last_frame_size() < TINY_FRAME {
+                    state.tiny.fetch_add(1, Relaxed);
+                }
+                if state.refreshes.fetch_add(1, Relaxed) >= MAX_REFRESHES
+                    || state.tiny.load(Relaxed) >= 3
+                {
+                    return;
+                }
+                state.encode_last();
+            }
+            state.schedule_idle_check();
+        });
+    }
 }
 
 pub struct Ivars {
@@ -96,8 +161,23 @@ define_class!(
                 0 => now_us(),
                 us => us,
             };
-            ivars.state.encoder.encode(&image, pts, capture_us);
-            ivars.state.last.lock().unwrap().0 = Some(image);
+            let state = &ivars.state;
+            state.generation.fetch_add(1, Relaxed);
+            state.refreshes.store(0, Relaxed);
+            state.tiny.store(0, Relaxed);
+            // Over the frame-rate ceiling: keep the image, send it later if it's the last.
+            let fps = state.fps_cap.load(Relaxed);
+            let since = capture_us.saturating_sub(state.last_encoded_us.load(Relaxed));
+            let too_soon = fps > 0 && since < 900_000 / fps as u64;
+            if too_soon && !state.encoder.keyframe_pending() {
+                state.unsent.store(true, Relaxed);
+            } else {
+                state.unsent.store(false, Relaxed);
+                state.last_encoded_us.store(capture_us, Relaxed);
+                state.encoder.encode(&image, pts, capture_us);
+            }
+            state.last.lock().unwrap().0 = Some(image);
+            state.schedule_idle_check();
         }
     }
 );
@@ -137,15 +217,7 @@ impl Capture {
     /// new frames). With a keyframe pending, this delivers it even if the screen is static.
     pub fn refresh(&self) {
         let state = self.state.clone();
-        self.queue.exec_async(move || {
-            let Some(image) = state.last.lock().unwrap().0.clone() else {
-                return;
-            };
-            let now = now_us();
-            state
-                .encoder
-                .encode(&image, unsafe { CMTime::new(now as i64, 1_000_000) }, now);
-        });
+        self.queue.exec_async(move || state.encode_last());
     }
 }
 
@@ -218,6 +290,7 @@ pub fn start(
     height: usize,
     fps: i32,
     encoder: Arc<Encoder>,
+    fps_cap: Arc<std::sync::atomic::AtomicU32>,
     audio: Option<Arc<std::sync::Mutex<Packetizer>>>,
 ) -> Result<Capture> {
     let captures_audio = audio.is_some();
@@ -246,12 +319,19 @@ pub fn start(
     let stream = unsafe {
         SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &config, None)
     };
+    let queue = DispatchQueue::new("glass.capture", DispatchQueueAttr::SERIAL);
     let state = Arc::new(FrameState {
         encoder,
         last: std::sync::Mutex::new(LastFrame(None)),
+        fps_cap,
+        last_encoded_us: Default::default(),
+        generation: Default::default(),
+        unsent: Default::default(),
+        refreshes: Default::default(),
+        tiny: Default::default(),
+        queue: queue.clone(),
     });
     let output = StreamOutput::new(state.clone(), audio, unsafe { display.displayID() });
-    let queue = DispatchQueue::new("glass.capture", DispatchQueueAttr::SERIAL);
     // Separate queue so audio never waits behind a frame being encoded.
     let audio_queue = DispatchQueue::new("glass.audio", DispatchQueueAttr::SERIAL);
     unsafe {
