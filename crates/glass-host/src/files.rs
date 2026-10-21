@@ -60,7 +60,8 @@ pub async fn receive(stream: &mut RecvStream) -> Result<(String, PathBuf)> {
     Ok((name, dest))
 }
 
-/// Shows a native file chooser on the Mac's screen (visible to the remote user).
+/// Shows a native file chooser on the host's screen (visible to the remote user).
+#[cfg(target_os = "macos")]
 pub async fn pick() -> Result<Vec<PathBuf>> {
     let script = r#"set picked to choose file with prompt "Send to Glass client" with multiple selections allowed
 set out to ""
@@ -78,6 +79,54 @@ return out"#;
         .filter(|l| !l.is_empty())
         .map(PathBuf::from)
         .collect())
+}
+
+/// Shows the desktop's file chooser through the portal.
+#[cfg(target_os = "linux")]
+pub async fn pick() -> Result<Vec<PathBuf>> {
+    use ashpd::desktop::file_chooser::SelectedFiles;
+    let response = SelectedFiles::open_file()
+        .title("Send to Glass client")
+        .multiple(true)
+        .send()
+        .await?
+        .response();
+    // Cancelled dialogs come back as an error response.
+    let Ok(files) = response else { return Ok(Vec::new()) };
+    Ok(files.uris().iter().filter_map(|u| file_uri_to_path(u.as_str())).collect())
+}
+
+/// `file:///home/me/My%20File.txt` → `/home/me/My File.txt`.
+#[cfg(any(target_os = "linux", test))]
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    let encoded = uri.strip_prefix("file://")?;
+    let bytes = encoded.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    use std::os::unix::ffi::OsStringExt;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_file_uris() {
+        assert_eq!(file_uri_to_path("file:///home/me/My%20File.txt"), Some(PathBuf::from("/home/me/My File.txt")));
+        assert_eq!(file_uri_to_path("file:///tmp/a"), Some(PathBuf::from("/tmp/a")));
+        assert_eq!(file_uri_to_path("https://x"), None);
+    }
 }
 
 pub async fn send(conn: &Connection, path: &Path) -> Result<()> {

@@ -1,18 +1,20 @@
-mod agent;
-mod audio;
-mod capture;
-mod clipboard;
-mod clock;
 mod control;
-mod encode;
 mod files;
-mod input;
-mod permissions;
+mod media;
 mod server;
 mod setup;
 mod status;
 mod tailscale;
-mod video;
+
+#[cfg(target_os = "macos")]
+#[path = "macos/mod.rs"]
+mod platform;
+#[cfg(target_os = "linux")]
+#[path = "linux/mod.rs"]
+mod platform;
+
+// Platform modules keep the same names everywhere, so shared code says `crate::input` etc.
+use platform::{agent, audio, clipboard, clock, input, permissions, video};
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -62,7 +64,8 @@ struct Args {
     #[arg(long, default_value_os_t = default_token_file())]
     token_file: PathBuf,
     /// Where host.log and client.log (forwarded from browsers) are written. Defaults to
-    /// ~/Library/Logs/Glass when installed, or logs/ in the source tree.
+    /// ~/Library/Logs/Glass (macOS) or ~/.local/state/glass (Linux) when installed, or logs/
+    /// in the source tree.
     #[arg(long)]
     log_dir: Option<PathBuf>,
 }
@@ -111,7 +114,7 @@ fn print_status() -> Result<()> {
         }
         None => println!(
             "Glass isn't running.{}",
-            if agent::is_installed() { " Check ~/Library/Logs/Glass/agent.log." } else { " Run `glass setup`." }
+            if agent::is_installed() { agent::LOG_HINT } else { " Run `glass setup`." }
         ),
     }
     Ok(())
@@ -123,8 +126,7 @@ fn send_feedback(message: &str) -> Result<()> {
         "message": message,
         "source": "cli",
         "version": env!("CARGO_PKG_VERSION"),
-        "os": std::process::Command::new("sw_vers").arg("-productVersion").output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default(),
+        "os": platform::os_version(),
     });
     let status = std::process::Command::new("curl")
         .args(["-fsS", "-X", "POST", "-H", "content-type: application/json", "--data-binary"])
@@ -150,12 +152,8 @@ async fn run_host(args: Args) -> Result<()> {
         .with_writer(std::io::stdout.and(Mutex::new(host_log)))
         .init();
 
-    // Displays that sleep vanish from ScreenCaptureKit, so keep them (and the system)
-    // awake for as long as the host runs. caffeinate exits when this process does.
-    let _caffeinate = std::process::Command::new("caffeinate")
-        .args(["-d", "-i", "-w", &std::process::id().to_string()])
-        .spawn()
-        .inspect_err(|e| tracing::warn!("caffeinate: {e}"));
+    // Keep displays (and the system) awake for as long as the host runs.
+    let _awake = platform::keep_awake();
     // wtransport and axum-server pull in different rustls crypto backends; pick one.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -196,9 +194,8 @@ async fn run_host(args: Args) -> Result<()> {
         match video.set_layout(video::Layout::Single(None)) {
             Ok(streams) => break streams[0].clone(),
             Err(e) => {
-                // Asleep displays aren't listed; declaring user activity wakes them.
                 tracing::warn!("{e:#}; waking displays and retrying");
-                let _ = std::process::Command::new("caffeinate").args(["-u", "-t", "1"]).status();
+                platform::wake_displays();
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
@@ -270,7 +267,7 @@ impl Paths {
         let source = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
         let web_dir = web_dir.or(installed.clone()).unwrap_or_else(|| source.join("web"));
         let log_dir = log_dir.unwrap_or_else(|| match installed {
-            Some(_) => home().join("Library/Logs/Glass"),
+            Some(_) => platform::log_dir(),
             None => source.join("logs"),
         });
         Self { web_dir, log_dir }

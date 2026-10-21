@@ -9,9 +9,9 @@ use glass_proto::MAX_STREAMS;
 use tokio::sync::broadcast;
 use tracing::info;
 
-use crate::audio::{AudioPackets, Packetizer};
-use crate::capture::{self, Capture, Display, DisplayInfo};
-use crate::encode::{EncodedFrame, Encoder};
+use super::audio::{AudioPackets, Packetizer};
+use super::capture::{self, Capture, Display, DisplayInfo};
+use super::encode::{EncodedFrame, Encoder};
 
 const MAX_MACROBLOCKS: f64 = 36864.0;
 

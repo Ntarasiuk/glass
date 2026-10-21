@@ -26,7 +26,7 @@ use crate::control::{self, ClientMsg, STREAM_FILE, STREAM_INPUT, ServerMsg};
 use crate::files;
 use crate::tailscale;
 use crate::video::{Layout, Video};
-use crate::encode::EncodedFrame;
+use crate::media::EncodedFrame;
 use crate::input::Injector;
 
 pub struct Shared {
@@ -287,7 +287,12 @@ async fn control(
         let shared = shared.clone();
         tokio::task::spawn_blocking(move || shared.video.displays()).await?.unwrap_or_default()
     };
-    let welcome = ServerMsg::Welcome { displays, streams: shared.video.streams(), audio: true };
+    let welcome = ServerMsg::Welcome {
+        displays,
+        streams: shared.video.streams(),
+        audio: crate::audio::SUPPORTED,
+        host_os: crate::platform::OS,
+    };
     control::write_json(&mut send, &welcome).await?;
 
     let mut events = shared.events.subscribe();
@@ -315,7 +320,7 @@ async fn control(
             ClientMsg::Clipboard { text, paste } => {
                 clipboard::set_text(&text);
                 if paste {
-                    shared.injector.lock().unwrap().tap_key(KVK_V);
+                    shared.injector.lock().unwrap().paste();
                 }
             }
             ClientMsg::Video { on } => {
@@ -370,8 +375,6 @@ async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
 
 const AUTH_WAIT: Duration = Duration::from_secs(10);
 
-/// kVK_ANSI_V
-const KVK_V: u16 = 0x09;
 
 async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
     let mut tag = [0u8; 1];

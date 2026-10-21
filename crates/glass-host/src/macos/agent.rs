@@ -7,6 +7,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 pub const LABEL: &str = "dev.glassdesk.host";
+pub const LOG_HINT: &str = " Check ~/Library/Logs/Glass/agent.log.";
 
 pub fn plist_path() -> PathBuf {
     crate::home().join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
@@ -28,7 +29,7 @@ pub fn is_installed() -> bool {
 /// Writes the agent plist for this binary and (re)starts it.
 pub fn install(start_at_login: bool) -> Result<()> {
     let exe = std::env::current_exe()?.canonicalize()?;
-    let logs = crate::home().join("Library/Logs/Glass");
+    let logs = super::log_dir();
     std::fs::create_dir_all(&logs)?;
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>

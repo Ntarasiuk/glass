@@ -9,14 +9,24 @@ repository.workspace = true
 anyhow = "1.0.104"
 axum = "0.8.9"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
-block2 = "0.6.2"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
 cliclack = "0.5.6"
 console = "0.16.6"
-crossbeam-channel = "0.5.17"
-dispatch2 = "0.3.1"
 glass-proto = { version = "0.1.0", path = "../glass-proto" }
+qrcode = { version = "0.14.1", default-features = false }
+rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.0", features = ["full"] }
+tower-http = { version = "0.7.1", features = ["fs", "set-header"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+wtransport = "0.7.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
 objc2-core-audio-types = "0.3.2"
@@ -27,12 +37,9 @@ objc2-core-video = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-screen-capture-kit = "0.3.2"
 objc2-video-toolbox = "0.3.2"
-qrcode = { version = "0.14.1", default-features = false }
-rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
-tokio = { version = "1.54.0", features = ["full"] }
-tower-http = { version = "0.7.1", features = ["fs", "set-header"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-wtransport = "0.7.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "file_chooser"] }
+evdev = "0.13"
+openh264 = "0.9"
+pipewire = "0.10"

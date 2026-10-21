@@ -8,23 +8,24 @@ use cliclack::{confirm, intro, log, note, outro, spinner};
 use console::style;
 
 use crate::status::{self, Status};
-use crate::{agent, permissions, tailscale};
+use crate::{agent, platform, tailscale};
 
+#[cfg(target_os = "macos")]
 const TAILSCALE_DOWNLOAD: &str = "https://tailscale.com/download/mac";
+#[cfg(target_os = "linux")]
+const TAILSCALE_DOWNLOAD: &str = "https://tailscale.com/download/linux (on Arch/Omarchy: sudo pacman -S tailscale)";
 const TAILSCALE_DNS_ADMIN: &str = "https://login.tailscale.com/admin/dns";
 const START_TIMEOUT: Duration = Duration::from_secs(20);
-/// Screen Recording grants often only apply after a restart; nudge the agent this often.
-const RESTART_EVERY: Duration = Duration::from_secs(8);
 
 pub async fn run() -> Result<()> {
     intro(style(" glass ").black().on_cyan())?;
-    log::remark("Remote control for this Mac from any browser, with very low latency.")?;
+    log::remark("Remote control for this computer from any browser, with very low latency.")?;
 
     let tailnet = tailscale_step().await?;
+    platform::setup::prepare().await?;
     service_step()?;
     let status = wait_for_host()?;
-    let status = screen_recording_step(status)?;
-    accessibility_step(status)?;
+    platform::setup::permissions(status)?;
     finish(tailnet)
 }
 
@@ -36,9 +37,9 @@ async fn tailscale_step() -> Result<Option<String>> {
             tailscale::Probe::Missing => {
                 log::warning(format!(
                     "Tailscale isn't installed. It's free and gives your devices a private, secure link.\n\
-                     Install it on this Mac and on your iPad: {TAILSCALE_DOWNLOAD}"
+                     Install it here and on your other devices: {TAILSCALE_DOWNLOAD}"
                 ))?;
-                if !ask_retry("Installed it?", "Skip (use Glass only from this Mac)")? {
+                if !ask_retry("Installed it?", "Skip (use Glass only on this computer)")? {
                     return Ok(None);
                 }
             }
@@ -69,6 +70,18 @@ async fn tailscale_step() -> Result<Option<String>> {
                     }
                     None => {
                         sp.error("Couldn't get a certificate from Tailscale");
+                        // On Linux, non-root users need to be Tailscale "operators" to fetch certs.
+                        #[cfg(target_os = "linux")]
+                        if confirm("Allow your user to manage Tailscale certificates? (runs `sudo tailscale set --operator=$USER`)")
+                            .initial_value(true)
+                            .interact()?
+                        {
+                            let user = std::env::var("USER").unwrap_or_default();
+                            let _ = std::process::Command::new("sudo")
+                                .args(["tailscale", "set", &format!("--operator={user}")])
+                                .status();
+                            continue;
+                        }
                         if !ask_retry("Try again?", "Skip remote access for now")? {
                             return Ok(None);
                         }
@@ -106,62 +119,6 @@ fn wait_for_host() -> Result<Status> {
     }
 }
 
-fn screen_recording_step(mut status: Status) -> Result<Status> {
-    log::step("Screen Recording permission")?;
-    if status.capturing {
-        log::success("Already allowed")?;
-        return Ok(status);
-    }
-    note(
-        "Allow Glass to see your screen",
-        "macOS will ask to let \"glass\" record your screen and audio.\n\
-         Click Allow, or switch Glass on in the System Settings pane that opens.\n\
-         If it asks to \"Quit & Reopen\", go ahead. Glass restarts itself.",
-    )?;
-    permissions::open_pane(permissions::SCREEN_RECORDING_PANE);
-    let sp = spinner();
-    sp.start("Waiting for Screen Recording to be allowed");
-    let mut last_restart = Instant::now();
-    loop {
-        if let Some(s) = status::read().filter(|s| s.is_fresh() && s.capturing) {
-            status = s;
-            break;
-        }
-        if last_restart.elapsed() > RESTART_EVERY {
-            let _ = agent::restart();
-            last_restart = Instant::now();
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    sp.stop("Screen Recording allowed, capturing your display");
-    Ok(status)
-}
-
-fn accessibility_step(mut status: Status) -> Result<Status> {
-    log::step("Accessibility permission (mouse and keyboard)")?;
-    if status.accessibility {
-        log::success("Already allowed")?;
-        return Ok(status);
-    }
-    note(
-        "Allow Glass to control the mouse and keyboard",
-        "In the Accessibility pane that opens, switch Glass on.\n\
-         If it isn't listed, click + and choose ~/.glass/bin/glass.",
-    )?;
-    permissions::open_pane(permissions::ACCESSIBILITY_PANE);
-    let sp = spinner();
-    sp.start("Waiting for Accessibility to be allowed");
-    loop {
-        if let Some(s) = status::read().filter(|s| s.is_fresh() && s.accessibility) {
-            status = s;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    sp.stop("Accessibility allowed, remote mouse and keyboard enabled");
-    Ok(status)
-}
-
 fn finish(tailnet: Option<String>) -> Result<()> {
     let token = std::fs::read_to_string(crate::default_token_file()).unwrap_or_default();
     let token = token.trim();
@@ -182,7 +139,7 @@ fn finish(tailnet: Option<String>) -> Result<()> {
         }
         None => {
             note(
-                "Use Glass on this Mac",
+                "Use Glass on this computer",
                 format!(
                     "Open {} to try it here.\n\
                      Run {} again once Tailscale is set up to connect from other devices.",
@@ -200,7 +157,7 @@ fn finish(tailnet: Option<String>) -> Result<()> {
 }
 
 /// Confirm with a retry/skip choice. Returns true to retry.
-fn ask_retry(retry: &str, skip: &str) -> io::Result<bool> {
+pub(crate) fn ask_retry(retry: &str, skip: &str) -> io::Result<bool> {
     cliclack::select(retry).item(true, "Yes, check again", "").item(false, skip, "").interact()
 }
 

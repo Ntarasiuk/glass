@@ -19,7 +19,7 @@ writeFileSync(
 
 > ${summary}
 
-Install on the Mac to be controlled: \`curl -fsSL glassdesk.dev | sh\` (macOS 13+, Apple Silicon or Intel). The installer starts \`glass setup\`, a guided setup for Tailscale, the background service and permissions. Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free and open source (MIT).
+Install on the computer to be controlled: \`curl -fsSL glassdesk.dev | sh\` (macOS 13+ on Apple Silicon or Intel; Linux x86_64 on Wayland, beta). The installer starts \`glass setup\`, a guided setup for Tailscale, the background service and permissions. Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free and open source (MIT).
 
 ## Docs
 
@@ -77,14 +77,15 @@ const dist = '../dist';
 if (existsSync(dist)) {
   for (const f of readdirSync(dist)) copyFileSync(`${dist}/${f}`, `public/releases/${f}`);
 }
-const latest = 'public/releases/glass-latest-darwin-universal.tar.gz';
-if (!existsSync(latest)) {
-  console.warn('warning: no release found; run scripts/package.sh first');
-} else {
-  // The installer verifies against this checksum.
-  const versioned = readdirSync('public/releases').find((f) => /^glass-\d.*\.tar\.gz\.sha256$/.test(f));
+// The installer verifies each platform's "latest" tarball against this checksum.
+const releases = readdirSync('public/releases');
+const latest = releases.filter((f) => /^glass-latest-.*\.tar\.gz$/.test(f));
+if (!latest.length) console.warn('warning: no release found; run scripts/package.sh first');
+for (const f of latest) {
+  const platform = f.replace(/^glass-latest-/, '').replace(/\.tar\.gz$/, '');
+  const versioned = releases.find((r) => r.endsWith(`-${platform}.tar.gz.sha256`) && !r.startsWith('glass-latest'));
   const sum = readFileSync(`public/releases/${versioned}`, 'utf8').split(/\s+/)[0];
-  writeFileSync(`${latest}.sha256`, `${sum}  glass-latest-darwin-universal.tar.gz\n`);
+  writeFileSync(`public/releases/${f}.sha256`, `${sum}  ${f}\n`);
 }
 
 console.log('built: llms.txt, llms-full.txt, docs.md, docs/index.html, releases/');

@@ -1,10 +1,11 @@
 # Glass
 
-> Glass is a free, low-latency remote desktop for macOS. Install it on a Mac, then see and control that Mac from a browser on an iPad, iPhone, or another computer. Typical latency is 15–30 ms from screen capture to display, including over Tailscale. Nothing to install on the viewing device.
+> Glass is a free, open-source, low-latency remote desktop for macOS and Linux (Wayland). Install it on the computer you want to control, then see and control it from a browser on an iPad, iPhone, or another computer. Typical latency is 15–30 ms from screen capture to display, including over Tailscale. Nothing to install on the viewing device.
 
 - Website: https://glassdesk.dev
-- Install (on the Mac to be controlled): `curl -fsSL glassdesk.dev | sh`
-- Platforms: host is macOS 13+ (Apple Silicon and Intel). Viewer is any modern browser with WebTransport and WebCodecs: Safari 26.4+ (iPad, iPhone, Mac), Chrome, Edge and Firefox.
+- Install (on the computer to be controlled): `curl -fsSL glassdesk.dev | sh`
+- Hosts: macOS 13+ (Apple Silicon and Intel), and Linux x86_64 on Wayland (beta; built for Hyprland/Omarchy, should work on GNOME and KDE).
+- Viewers: any modern browser with WebTransport and WebCodecs: Safari 26.4+ (iPad, iPhone, Mac), Chrome, Chromium, Edge and Firefox, on any OS including Linux.
 - Price: free and open source (MIT): https://github.com/Ntarasiuk/glass
 
 ## What Glass does
@@ -125,17 +126,43 @@ Files:
 - **Integrity and recovery:** each frame carries a checksum; corrupted or incomplete frames are never decoded. The client requests a keyframe and recovers within a fraction of a second. If the browser's hardware decoder misbehaves, Glass falls back to more conservative decoder settings and remembers the choice.
 - **Clock sync:** NTP-style ping/pong over datagrams, used for the live latency display.
 
+## Linux host (beta)
+
+The same one-liner installs Glass on Linux x86_64. The Linux host uses:
+
+- **Screen capture:** xdg-desktop-portal ScreenCast over PipeWire. On Hyprland (Omarchy), the share picker asks once which screen to share; Glass saves a restore token so it doesn't ask again.
+- **Encoding:** software H.264 (OpenH264, screen-content mode). Screens larger than 2560×1600 are halved before encoding, to keep the frame rate up. Hardware VA-API encoding is planned.
+- **Input:** a virtual keyboard and absolute pointer through `/dev/uinput`. `glass setup` installs a one-line udev rule (`/etc/udev/rules.d/60-glass-uinput.rules`) giving the logged-in user access; this needs `sudo` once.
+- **Clipboard:** `wl-copy` / `wl-paste` (wl-clipboard).
+- **Audio:** the default output's monitor, through PipeWire.
+- **Background service:** a systemd user unit (`~/.config/systemd/user/glass.service`) tied to the graphical session. Logs: `journalctl --user -u glass` and `~/.local/state/glass/`.
+- **Tailscale:** non-root users need to be Tailscale operators to fetch HTTPS certificates; setup offers to run `sudo tailscale set --operator=$USER`.
+
+Dependencies on Arch / Omarchy: `sudo pacman -S --needed pipewire xdg-desktop-portal-hyprland wl-clipboard tailscale`. Setup checks for these.
+
+Keys arrive as typed on Linux hosts: ⌘ on an Apple keyboard is Super. Paste from the viewer's clipboard sends Ctrl+V.
+
+## Viewing from Linux or Windows (Omarchy included)
+
+Open the Glass URL in Chromium, Chrome, or Firefox with Tailscale running. When the host is a Mac, **PC keyboard** mode (on by default for Linux and Windows browsers; toggle it in the ⌘ menu) translates PC conventions:
+
+- Ctrl → ⌘ (so Ctrl+C, Ctrl+V, Ctrl+Tab, and Ctrl+Q do what you expect on the Mac)
+- Super → Ctrl
+- Alt → ⌥
+
+Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's Keyboard Lock passes everything else through. If the browser has no hardware H.264 decoder, Glass uses software decoding automatically.
+
 ## Security and privacy
 
 - All traffic is encrypted (TLS 1.3 via QUIC/HTTPS).
 - With Tailscale, traffic stays on your private tailnet and goes directly between devices when possible.
 - Access control: a device is let in if Tailscale reports it belongs to the same user as the Mac, or if it presents the access token. Glass sends nothing to a session (video, audio, clipboard, input) until it is authenticated.
-- Glass runs a LaunchAgent as your user, not as root.
+- Glass runs as your user (a LaunchAgent on macOS, a systemd user service on Linux), never as root.
 - The glassdesk.dev website counts downloads using a salted hash of the IP address (no raw IPs stored) and stores feedback you choose to send. The Glass app itself sends nothing to glassdesk.dev except feedback you submit.
 
 ## Requirements
 
-- Host: macOS 13 Ventura or newer, Apple Silicon or Intel.
+- Host: macOS 13 Ventura or newer (Apple Silicon or Intel), or Linux x86_64 with a Wayland compositor that supports the ScreenCast portal, plus PipeWire.
 - Viewer: a browser with WebTransport and WebCodecs, such as Safari 26.4+ on iPadOS/iOS/macOS, or current Chrome, Edge, or Firefox.
 - Remote access: Tailscale on both devices with HTTPS Certificates enabled for the tailnet (free plan works).
 
@@ -162,7 +189,7 @@ Files:
 
 **How is it different from Parsec, Moonlight, or Jump Desktop?** Those need a native app on the viewing device. Glass runs in a browser, aims for similar latency, and is built specifically around a Mac host.
 
-**Does it work on Windows or Linux hosts?** Not yet; the host is macOS-only.
+**Does it work on Linux?** Yes, as a viewer in any modern browser, and as a host on Wayland (beta). **Windows hosts?** Not yet.
 
 **Does it stream audio?** Yes, Mac system audio, toggled per device.
 

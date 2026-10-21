@@ -6,11 +6,12 @@ use std::sync::Arc;
 use glass_proto::{AUDIO_FRAMES_PER_PACKET, AUDIO_SAMPLE_RATE, audio_packet};
 use objc2_core_audio_types::{kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved};
 use objc2_core_media::{CMAudioFormatDescriptionGetStreamBasicDescription, CMSampleBuffer};
-use tokio::sync::broadcast;
 
-use crate::clock::cmtime_us;
+use super::clock::cmtime_us;
 
-pub type AudioPackets = broadcast::Sender<Arc<Vec<u8>>>;
+pub use crate::media::AudioPackets;
+
+pub const SUPPORTED: bool = true;
 
 pub struct Packetizer {
     packets: AudioPackets,

@@ -24,6 +24,7 @@ const MODIFIER_KEYCODES = new Set(MODIFIER_CODES.map((c) => MAC_KEYCODES[c]));
  */
 export function attachInput({
   screens, keySink, send, control, nextClipboard, onLocalShortcut, swapCmdOption = false, ctrlAsCmd = true,
+  pcKeyboard = false,
 }) {
   // With iPadOS set to turn the physical ⌘ key into ⌥ (so it can't claim ⌘Tab etc.),
   // swap them back here so the Mac gets the keys the user actually pressed.
@@ -41,8 +42,17 @@ export function attachInput({
     code === 'Tab' || code === 'Space' || (code === 'KeyH' && !shift) ||
     (shift && ['Digit3', 'Digit4', 'Digit5'].includes(code));
 
-  const codeOf = (e) => (swap ? SWAPPED[e.code] ?? e.code : e.code);
-  const cmdHeld = (e) => (swap ? e.altKey : e.metaKey);
+  // PC keyboards (Linux, Windows): Ctrl is the everyday shortcut key, so it becomes ⌘ on
+  // the Mac, and Super/Windows becomes Ctrl. Alt stays ⌥.
+  let pc = pcKeyboard;
+  const PC = {
+    ControlLeft: 'MetaLeft', ControlRight: 'MetaRight', MetaLeft: 'ControlLeft', MetaRight: 'ControlRight',
+  };
+
+  // Remaps exist to make a non-Mac keyboard behave on a Mac; other hosts get keys as typed.
+  let macHost = true;
+  const codeOf = (e) => (!macHost ? undefined : pc ? PC[e.code] : swap ? SWAPPED[e.code] : undefined) ?? e.code;
+  const cmdHeld = (e) => (!macHost ? e.metaKey : pc ? e.ctrlKey : swap ? e.altKey : e.metaKey);
   // Each canvas shows one host stream (data-stream) and is letterboxed by
   // `object-fit: contain`; pointer positions map into the video's content box. Rects are
   // cached and dropped on resize, so pointer events never force a layout read.
@@ -245,7 +255,7 @@ export function attachInput({
     }
 
     e.preventDefault();
-    if (remapCtrl && !remappedCtrl && e.ctrlKey && !cmdHeld(e) && stolenByIPad(code, e.shiftKey)) {
+    if (macHost && remapCtrl && !pc && !remappedCtrl && e.ctrlKey && !cmdHeld(e) && stolenByIPad(code, e.shiftKey)) {
       // Swap the Ctrl the Mac already sees for ⌘, until Ctrl is released.
       for (const ctrl of CTRL_KEYCODES) {
         if (heldKeys.delete(ctrl)) {
@@ -330,6 +340,16 @@ export function attachInput({
       releaseKeys();
       remappedCtrl = undefined;
       remapCtrl = on;
+    },
+    setHostOs(os) {
+      releaseKeys();
+      remappedCtrl = undefined;
+      macHost = os === 'macos';
+    },
+    setPcKeyboard(on) {
+      releaseKeys();
+      remappedCtrl = undefined;
+      pc = on;
     },
     setSwapCmdOption(on) {
       releaseKeys();

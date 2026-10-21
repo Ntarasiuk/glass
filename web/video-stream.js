@@ -11,10 +11,27 @@ const DECODER_LADDER = [
   { name: 'hw-lowlatency', optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' },
   { name: 'hw', optimizeForLatency: false, hardwareAcceleration: 'prefer-hardware' },
   { name: 'sw', optimizeForLatency: true, hardwareAcceleration: 'prefer-software' },
+  // No hint: whatever the browser has (e.g. Chromium on Linux without VA-API).
+  { name: 'auto', optimizeForLatency: true },
 ];
 const LADDER_WINDOW_MS = 120_000;
 const LADDER_FAILURES = 2;
 const ladder = { step: 0, failures: [] };
+
+/**
+ * Skips configurations this browser can't do at all. "prefer-hardware" fails outright
+ * where there's no hardware decoder (common on Linux), rather than falling back.
+ */
+export async function probeDecoders(log, codec = 'avc1.640033') {
+  const supported = [];
+  for (const config of DECODER_LADDER) {
+    const { supported: ok } = await VideoDecoder.isConfigSupported({ codec, ...config }).catch(() => ({}));
+    if (ok) supported.push(config.name);
+  }
+  const first = DECODER_LADDER.findIndex((c) => supported.includes(c.name));
+  if (first > ladder.step) ladder.step = first;
+  log(first < 0 ? 'error' : 'info', 'decoder support', { supported, using: DECODER_LADDER[ladder.step]?.name });
+}
 
 /** Restores a fallback found in an earlier session (remembered per device by main.js). */
 export function setDecoderStep(step) {

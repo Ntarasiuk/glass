@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 
 const TOOLBAR_IDLE_MS = 3000;
 
-export function createUI({ onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken }) {
+export function createUI({ onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -93,6 +93,7 @@ export function createUI({ onSelectDisplay, onShortcut, shortcuts, swapCmdOption
     });
     return item;
   }
+  const pcItem = toggleItem('PC keyboard', 'Ctrl → ⌘, Super → ⌃', pcKeyboard, onPcKeyboard);
   const ctrlItem = toggleItem('Ctrl as ⌘', '⌃⇥ ⌃Space ⌃H ⌃⇧3–5', ctrlAsCmd, onCtrlAsCmd);
 
   let swapOn = swapCmdOption;
@@ -111,6 +112,7 @@ export function createUI({ onSelectDisplay, onShortcut, shortcuts, swapCmdOption
   const divider = document.createElement('hr');
 
   menus.shortcuts.panel.replaceChildren(
+    pcItem,
     ctrlItem,
     swapItem,
     note,
@@ -223,6 +225,10 @@ export function createUI({ onSelectDisplay, onShortcut, shortcuts, swapCmdOption
     showAuth() {
       auth.classList.remove('hidden');
       auth.querySelector('input').focus();
+    },
+    /** The ⌘ menu (Mac shortcuts and key remaps) only applies to Mac hosts. */
+    setHostOs(os) {
+      $('btn-shortcuts').classList.toggle('hidden', os !== 'macos');
     },
     setAudioAvailable(available) {
       $('btn-audio').classList.toggle('hidden', !available);

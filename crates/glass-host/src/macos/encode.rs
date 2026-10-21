@@ -28,13 +28,7 @@ use objc2_video_toolbox::{
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
 const MAX_GOP_FRAMES: i32 = 900;
 
-pub struct EncodedFrame {
-    /// Display stream number, set by the stream that owns the encoder.
-    pub stream: u8,
-    pub data: Vec<u8>,
-    pub keyframe: bool,
-    pub capture_us: u64,
-}
+pub use crate::media::EncodedFrame;
 
 pub struct Encoder {
     session: CFRetained<VTCompressionSession>,

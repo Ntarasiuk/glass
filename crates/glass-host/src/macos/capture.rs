@@ -22,9 +22,10 @@ use objc2_screen_capture_kit::{
     SCStreamOutput, SCStreamOutputType,
 };
 
-use crate::audio::Packetizer;
-use crate::clock::{cmtime_us, now_us};
-use crate::encode::Encoder;
+use super::audio::Packetizer;
+use super::clock::{cmtime_us, now_us};
+use super::encode::Encoder;
+pub use crate::media::DisplayInfo;
 
 /// kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ('420v'), the encoder's native input.
 const PIXEL_FORMAT_420V: u32 = u32::from_be_bytes(*b"420v");
@@ -119,19 +120,6 @@ impl StreamOutput {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DisplayInfo {
-    pub id: CGDirectDisplayID,
-    pub width: usize,
-    pub height: usize,
-    /// Position and size in the macOS display arrangement (global points).
-    pub x: f64,
-    pub y: f64,
-    pub points_width: f64,
-    pub points_height: f64,
-    pub main: bool,
-    pub builtin: bool,
-}
 
 /// Keeps the stream and its output alive; capture stops when dropped.
 pub struct Capture {

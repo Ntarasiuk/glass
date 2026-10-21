@@ -1,0 +1,201 @@
+//! Injects client input through uinput: a virtual keyboard and an absolute pointer.
+//! Needs write access to /dev/uinput (`glass setup` installs a udev rule granting it to
+//! the logged-in user).
+
+use std::collections::HashSet;
+use std::fs::OpenOptions;
+
+use evdev::uinput::VirtualDevice;
+use evdev::{AbsInfo, AbsoluteAxisCode, AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode, UinputAbsSetup};
+use glass_proto::InputEvent as Ev;
+
+use super::keymap::{self, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, KEY_LEFTCTRL, KEY_LEFTMETA, KEY_RIGHTMETA, KEY_V};
+use super::video::{self, Rect};
+
+/// Absolute pointer resolution across the whole desktop layout.
+const ABS_MAX: i32 = 65535;
+/// DOM wheel deltas are pixels; one wheel notch is 120 hi-res units, roughly 40 px.
+const HI_RES_PER_PIXEL: f32 = 3.0;
+
+pub fn has_accessibility() -> bool {
+    OpenOptions::new().write(true).open("/dev/uinput").is_ok()
+}
+
+pub struct Injector {
+    keyboard: Option<VirtualDevice>,
+    pointer: Option<VirtualDevice>,
+    /// Logical rect of each streamed display, by stream number.
+    bounds: Vec<Rect>,
+    /// Bounding box of every monitor; the absolute pointer spans this.
+    layout: Rect,
+    held: HashSet<u16>,
+    buttons: [bool; 3],
+    wheel: (f32, f32),
+}
+
+impl Injector {
+    pub fn new(display: u32) -> Self {
+        let mut this = Self {
+            keyboard: None,
+            pointer: None,
+            bounds: Vec::new(),
+            layout: Rect::default(),
+            held: HashSet::new(),
+            buttons: [false; 3],
+            wheel: (0.0, 0.0),
+        };
+        this.set_displays(&[display]);
+        this.ensure_devices();
+        this
+    }
+
+    /// Creates the virtual devices if they don't exist yet (e.g. access was granted
+    /// after the host started).
+    fn ensure_devices(&mut self) {
+        if self.keyboard.is_some() && self.pointer.is_some() {
+            return;
+        }
+        match build_devices() {
+            Ok((keyboard, pointer)) => {
+                self.keyboard = Some(keyboard);
+                self.pointer = Some(pointer);
+                tracing::info!("input: virtual keyboard and pointer ready");
+            }
+            Err(e) => tracing::warn!("input: can't create uinput devices ({e}); run `glass setup`"),
+        }
+    }
+
+    pub fn set_displays(&mut self, displays: &[u32]) {
+        self.release_all();
+        self.bounds = displays.iter().filter_map(|&id| video::rect_of(id)).collect();
+        self.layout = video::layout_rect();
+    }
+
+    pub fn handle(&mut self, ev: Ev) {
+        self.ensure_devices();
+        match ev {
+            Ev::MouseMove { x, y, stream } => {
+                let Some(r) = self.bounds.get(stream as usize).or(self.bounds.first()).copied() else { return };
+                let gx = r.x + x.clamp(0.0, 1.0) as f64 * r.w;
+                let gy = r.y + y.clamp(0.0, 1.0) as f64 * r.h;
+                let l = self.layout;
+                let ax = (((gx - l.x) / l.w.max(1.0)) * ABS_MAX as f64).round() as i32;
+                let ay = (((gy - l.y) / l.h.max(1.0)) * ABS_MAX as f64).round() as i32;
+                self.pointer(&[
+                    InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_X.0, ax.clamp(0, ABS_MAX)),
+                    InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_Y.0, ay.clamp(0, ABS_MAX)),
+                ]);
+            }
+            Ev::MouseDown { button } | Ev::MouseUp { button } => {
+                let down = matches!(ev, Ev::MouseDown { .. });
+                let code = match button {
+                    0 => BTN_LEFT,
+                    1 => BTN_MIDDLE,
+                    2 => BTN_RIGHT,
+                    _ => return,
+                };
+                self.buttons[button as usize] = down;
+                self.pointer(&[InputEvent::new(EventType::KEY.0, code, down as i32)]);
+            }
+            Ev::Scroll { dx, dy } => {
+                // DOM: +dy scrolls down. evdev: +wheel scrolls up, +hwheel scrolls right.
+                let (v, h) = (-dy * HI_RES_PER_PIXEL, dx * HI_RES_PER_PIXEL);
+                self.wheel.0 += v;
+                self.wheel.1 += h;
+                let mut events = vec![
+                    InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_WHEEL_HI_RES.0, v.round() as i32),
+                    InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL_HI_RES.0, h.round() as i32),
+                ];
+                // Legacy whole-notch events for apps that ignore hi-res scrolling.
+                let notches = ((self.wheel.0 / 120.0).trunc(), (self.wheel.1 / 120.0).trunc());
+                if notches.0 != 0.0 {
+                    events.push(InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_WHEEL.0, notches.0 as i32));
+                    self.wheel.0 -= notches.0 * 120.0;
+                }
+                if notches.1 != 0.0 {
+                    events.push(InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, notches.1 as i32));
+                    self.wheel.1 -= notches.1 * 120.0;
+                }
+                self.pointer(&events);
+            }
+            Ev::KeyDown { keycode } | Ev::KeyUp { keycode } => {
+                let down = matches!(ev, Ev::KeyDown { .. });
+                let Some(code) = keymap::to_evdev(keycode) else { return };
+                if down {
+                    self.held.insert(code);
+                } else {
+                    self.held.remove(&code);
+                }
+                self.key(code, down);
+            }
+        }
+    }
+
+    /// Pastes with Ctrl+V. The client triggers this from ⌘V, which arrives here as Super,
+    /// so Super is lifted for the paste and restored after.
+    pub fn paste(&mut self) {
+        let supers: Vec<u16> = [KEY_LEFTMETA, KEY_RIGHTMETA].into_iter().filter(|k| self.held.contains(k)).collect();
+        for &k in &supers {
+            self.key(k, false);
+        }
+        self.key(KEY_LEFTCTRL, true);
+        self.key(KEY_V, true);
+        self.key(KEY_V, false);
+        self.key(KEY_LEFTCTRL, false);
+        for &k in &supers {
+            self.key(k, true);
+        }
+    }
+
+    /// Releases anything still held, e.g. when a client disconnects mid-drag.
+    pub fn release_all(&mut self) {
+        for button in 0..3u8 {
+            if self.buttons[button as usize] {
+                self.handle(Ev::MouseUp { button });
+            }
+        }
+        for code in std::mem::take(&mut self.held) {
+            self.key(code, false);
+        }
+    }
+
+    fn key(&mut self, code: u16, down: bool) {
+        if let Some(kb) = self.keyboard.as_mut()
+            && let Err(e) = kb.emit(&[InputEvent::new(EventType::KEY.0, code, down as i32)])
+        {
+            tracing::warn!("input: keyboard emit failed: {e}");
+        }
+    }
+
+    fn pointer(&mut self, events: &[InputEvent]) {
+        if let Some(p) = self.pointer.as_mut()
+            && let Err(e) = p.emit(events)
+        {
+            tracing::warn!("input: pointer emit failed: {e}");
+        }
+    }
+}
+
+fn build_devices() -> std::io::Result<(VirtualDevice, VirtualDevice)> {
+    let keys: AttributeSet<KeyCode> = keymap::all_evdev().map(KeyCode::new).collect();
+    let keyboard = VirtualDevice::builder()?.name("Glass keyboard").with_keys(&keys)?.build()?;
+
+    let buttons: AttributeSet<KeyCode> = [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].into_iter().map(KeyCode::new).collect();
+    let axis = |code| UinputAbsSetup::new(code, AbsInfo::new(0, 0, ABS_MAX, 0, 0, 0));
+    let wheels = AttributeSet::from_iter([
+        RelativeAxisCode::REL_WHEEL,
+        RelativeAxisCode::REL_HWHEEL,
+        RelativeAxisCode::REL_WHEEL_HI_RES,
+        RelativeAxisCode::REL_HWHEEL_HI_RES,
+    ]);
+    // ABS_X/ABS_Y plus buttons and no BTN_TOUCH: libinput treats it as an absolute
+    // pointer (like a VM's tablet device) spanning the whole layout.
+    let pointer = VirtualDevice::builder()?
+        .name("Glass pointer")
+        .with_keys(&buttons)?
+        .with_absolute_axis(&axis(AbsoluteAxisCode::ABS_X))?
+        .with_absolute_axis(&axis(AbsoluteAxisCode::ABS_Y))?
+        .with_relative_axes(&wheels)?
+        .build()?;
+    Ok((keyboard, pointer))
+}

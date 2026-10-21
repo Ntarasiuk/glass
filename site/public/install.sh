@@ -10,19 +10,28 @@ set -eu
 BASE="${GLASS_BASE:-https://glassdesk.dev}"
 PREFIX="$HOME/.glass"
 BIN_DIR="$HOME/.local/bin"
-TARBALL="glass-latest-darwin-universal.tar.gz"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  \033[36m›\033[0m %s\n' "$*"; }
 fail() { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
 echo
-bold "Glass: your Mac, in any browser"
+bold "Glass: your computer, in any browser"
 echo
 
-[ "$(uname -s)" = "Darwin" ] || fail "Glass runs on macOS. Install it on the Mac you want to control."
-major=$(sw_vers -productVersion | cut -d. -f1)
-[ "$major" -ge 13 ] || fail "Glass needs macOS 13 (Ventura) or newer; this Mac has $(sw_vers -productVersion)."
+case "$(uname -s)-$(uname -m)" in
+  Darwin-*)
+    major=$(sw_vers -productVersion | cut -d. -f1)
+    [ "$major" -ge 13 ] || fail "Glass needs macOS 13 (Ventura) or newer; this Mac has $(sw_vers -productVersion)."
+    TARBALL="glass-latest-darwin-universal.tar.gz"
+    ;;
+  Linux-x86_64)
+    [ -n "${WAYLAND_DISPLAY:-}" ] || info "Glass on Linux needs a Wayland session (Hyprland, GNOME, KDE…); run setup from inside it."
+    TARBALL="glass-latest-linux-x86_64.tar.gz"
+    ;;
+  Linux-*) fail "Glass on Linux currently supports x86_64; this machine is $(uname -m)." ;;
+  *) fail "Glass runs on macOS and Linux. Install it on the computer you want to control." ;;
+esac
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -31,7 +40,11 @@ info "Downloading"
 curl -fsSL "$BASE/releases/$TARBALL" -o "$tmp/glass.tar.gz" || fail "Download failed. Check your connection and try again."
 curl -fsSL "$BASE/releases/$TARBALL.sha256" -o "$tmp/glass.sha256" || fail "Couldn't fetch the checksum."
 expected=$(cut -d' ' -f1 < "$tmp/glass.sha256")
-actual=$(shasum -a 256 "$tmp/glass.tar.gz" | cut -d' ' -f1)
+if command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$tmp/glass.tar.gz" | cut -d' ' -f1)
+else
+  actual=$(shasum -a 256 "$tmp/glass.tar.gz" | cut -d' ' -f1)
+fi
 [ "$expected" = "$actual" ] || fail "Checksum mismatch: the download is corrupt or was tampered with."
 
 info "Installing to ~/.glass"
@@ -46,10 +59,17 @@ ln -sf "$PREFIX/bin/glass" "$BIN_DIR/glass"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
-    shell_rc="$HOME/.zshrc"
-    [ "${SHELL##*/}" = "bash" ] && shell_rc="$HOME/.bash_profile"
-    if ! grep -qs 'HOME/.local/bin' "$shell_rc"; then
-      printf '\n# Added by the Glass installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$shell_rc"
+    case "${SHELL##*/}-$(uname -s)" in
+      bash-Darwin) shell_rc="$HOME/.bash_profile" ;;
+      bash-*) shell_rc="$HOME/.bashrc" ;;
+      fish-*) shell_rc="$HOME/.config/fish/config.fish" ;;
+      *) shell_rc="$HOME/.zshrc" ;;
+    esac
+    line='export PATH="$HOME/.local/bin:$PATH"'
+    [ "${shell_rc##*.}" = "fish" ] && line='fish_add_path $HOME/.local/bin'
+    if ! grep -qs '.local/bin' "$shell_rc"; then
+      mkdir -p "$(dirname "$shell_rc")"
+      printf '\n# Added by the Glass installer\n%s\n' "$line" >> "$shell_rc"
       info "Added ~/.local/bin to your PATH in ${shell_rc##*/}"
     fi
     ;;
@@ -61,6 +81,8 @@ info "Installed Glass $version"
 # An update replaces the binary; restart the background service onto it.
 if [ -f "$HOME/Library/LaunchAgents/dev.glassdesk.host.plist" ]; then
   launchctl kickstart -k "gui/$(id -u)/dev.glassdesk.host" 2>/dev/null && info "Restarted the Glass service"
+elif [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/glass.service" ]; then
+  systemctl --user restart glass 2>/dev/null && info "Restarted the Glass service"
 fi
 
 echo

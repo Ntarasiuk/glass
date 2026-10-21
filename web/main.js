@@ -25,6 +25,10 @@ const TOKEN_KEY = 'glass.token';
 const SWAP_KEY = 'glass.swapCmdOption';
 const CTRL_AS_CMD_KEY = 'glass.ctrlAsCmd';
 const DECODER_STEP_KEY = 'glass.decoderStep';
+const PC_KEYBOARD_KEY = 'glass.pcKeyboard';
+// Default to PC keyboard conventions on Linux, Windows and ChromeOS clients.
+const isPC = /Linux|Windows|CrOS/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
+const pcKeyboard = (storage((s) => s.getItem(PC_KEYBOARD_KEY)) ?? (isPC ? '1' : '0')) === '1';
 const ctrlAsCmd = storage((s) => s.getItem(CTRL_AS_CMD_KEY)) !== '0'; // on by default
 
 const screens = document.getElementById('screens');
@@ -90,6 +94,7 @@ const input = attachInput({
   onLocalShortcut: (code) => (code === 'KeyF' ? toggleFullscreen() : toggleStats()),
   swapCmdOption: storage((s) => s.getItem(SWAP_KEY)) === '1',
   ctrlAsCmd,
+  pcKeyboard,
 });
 
 const ui = createUI({
@@ -97,6 +102,12 @@ const ui = createUI({
   shortcuts: SHORTCUTS,
   swapCmdOption: storage((s) => s.getItem(SWAP_KEY)) === '1',
   ctrlAsCmd,
+  pcKeyboard,
+  onPcKeyboard: (on) => {
+    storage((s) => s.setItem(PC_KEYBOARD_KEY, on ? '1' : '0'));
+    input.setPcKeyboard(on);
+    log('info', `pc keyboard ${on ? 'on' : 'off'}`);
+  },
   onCtrlAsCmd: (on) => {
     storage((s) => s.setItem(CTRL_AS_CMD_KEY, on ? '1' : '0'));
     input.setCtrlAsCmd(on);
@@ -228,6 +239,8 @@ function onControl(msg) {
       // Nothing being streamed (e.g. capture failed): fall back to the first display.
       if (!msg.streams.length && displays.length) control({ t: 'selectDisplay', id: displays[0].id });
       ui.setAudioAvailable(msg.audio);
+      input.setHostOs(msg.host_os ?? 'macos');
+      ui.setHostOs(msg.host_os ?? 'macos');
       onLayout(msg.streams);
       log('info', 'welcome', { displays: displays.length, streams: msg.streams.map((d) => d.id), audio: msg.audio });
       break;

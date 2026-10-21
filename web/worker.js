@@ -5,7 +5,7 @@ import {
   AUDIO_HEADER_LEN, KIND_AUDIO, KIND_KEYFRAME_REQUEST, KIND_PONG, KIND_VIDEO,
   ping, readPong, readVideoHeader,
 } from './proto.js';
-import { VideoStream, setDecoderStep } from './video-stream.js';
+import { VideoStream, probeDecoders, setDecoderStep } from './video-stream.js';
 
 const PING_INTERVAL_MS = 500;
 const CLOCK_SAMPLES = 16;
@@ -66,6 +66,7 @@ self.onmessage = async ({ data }) => {
   if (data.type === 'init') {
     ({ url, certHash, token } = data);
     setDecoderStep(data.decoderStep ?? 0);
+    await probeDecoders(log);
     setInterval(() => datagramWriter?.write(ping(performance.now())).catch(() => {}), PING_INTERVAL_MS);
     setInterval(tick, 1000);
     run();

@@ -7,6 +7,7 @@ use objc2_core_graphics::{
     CGEventSourceStateID, CGEventTapLocation, CGEventType, CGMouseButton, CGScrollEventUnit,
 };
 
+const KVK_V: u16 = 0x09;
 // kVK_* keycodes for modifiers.
 const KVK_COMMAND: u16 = 0x37;
 const KVK_SHIFT: u16 = 0x38;
@@ -119,7 +120,12 @@ impl Injector {
         }
     }
 
-    /// Presses and releases a key with the currently held modifiers (e.g. Cmd+V).
+    /// Pastes the clipboard: Cmd+V, using the Cmd the client is already holding.
+    pub fn paste(&mut self) {
+        self.tap_key(KVK_V);
+    }
+
+    /// Presses and releases a key with the currently held modifiers.
     pub fn tap_key(&mut self, keycode: u16) {
         self.handle(InputEvent::KeyDown { keycode });
         self.handle(InputEvent::KeyUp { keycode });

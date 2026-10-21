@@ -1,12 +1,12 @@
 # Glass
 
-Low-latency remote desktop for macOS. Install it on a Mac, then see and control that Mac from a browser on an iPad, iPhone or another computer, typically 15–30 ms from screen capture to display.
+Low-latency remote desktop for macOS and Linux (Wayland, beta). Install it on the computer you want to control, then see and control it from a browser on an iPad, iPhone or another computer, typically 15–30 ms from screen capture to display.
 
 ```sh
 curl -fsSL glassdesk.dev | sh
 ```
 
-Run that on the Mac you want to control. It installs Glass and starts `glass setup`, which walks you through Tailscale, the background service and macOS permissions, then shows a QR code to open on your iPad. Full docs: [glassdesk.dev/docs](https://glassdesk.dev/docs) (also as [markdown](site/docs.md)).
+Run that on the computer you want to control. It installs Glass and starts `glass setup`, which walks you through Tailscale, the background service and macOS permissions, then shows a QR code to open on your iPad. Full docs: [glassdesk.dev/docs](https://glassdesk.dev/docs) (also as [markdown](site/docs.md)).
 
 ## Features
 
@@ -30,7 +30,7 @@ NSPasteboard, files ◀─▶ control + file streams ◀────────
 ```
 
 - `crates/glass-proto`: wire format (mirrored in `web/proto.js`).
-- `crates/glass-host`: the `glass` binary: capture, encode, audio, input injection, WebTransport/HTTPS server, setup wizard, LaunchAgent.
+- `crates/glass-host`: the `glass` binary: WebTransport/HTTPS server, sessions, files, setup wizard. Platform code lives in `src/macos/` (ScreenCaptureKit, VideoToolbox, CGEvent, launchd) and `src/linux/` (portal + PipeWire, OpenH264, uinput, wl-clipboard, systemd).
 - `web/`: browser client, no build step.
 - `site/`: glassdesk.dev, a Cloudflare Worker with static assets plus D1 for download counts and feedback.
 
@@ -50,6 +50,7 @@ Logs from both the host and connected browsers go to `logs/` (`host.log`, `clien
 ```sh
 cargo test                                  # protocol and host unit tests
 ./scripts/package.sh                        # universal release tarball in dist/
+scripts/linux/build.sh [test]               # Linux x86_64 build/tests in an Arch container
 cd site && npm install && npm run dev       # site locally (wrangler dev)
 ```
 

@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use wtransport::{RecvStream, SendStream};
 
-use crate::capture::DisplayInfo;
+use crate::media::DisplayInfo;
 
 /// Unidirectional stream type tags (first byte of the stream).
 pub const STREAM_INPUT: u8 = b'I';
@@ -40,7 +40,7 @@ pub enum ClientMsg {
 #[serde(tag = "t", rename_all = "camelCase")]
 pub enum ServerMsg {
     /// `streams[i]` is the display carried by video stream `i`.
-    Welcome { displays: Vec<DisplayInfo>, streams: Vec<DisplayInfo>, audio: bool },
+    Welcome { displays: Vec<DisplayInfo>, streams: Vec<DisplayInfo>, audio: bool, host_os: &'static str },
     Layout { streams: Vec<DisplayInfo> },
     Clipboard { text: String },
     FileSaved { name: String, path: String },
