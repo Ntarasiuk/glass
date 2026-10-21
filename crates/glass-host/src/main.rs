@@ -4,6 +4,7 @@ mod files;
 mod media;
 mod rate;
 mod remote;
+mod resolution;
 mod rtp;
 mod server;
 mod setup;

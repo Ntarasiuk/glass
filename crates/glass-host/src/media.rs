@@ -53,6 +53,8 @@ pub trait VideoSource: Send + Sync {
     fn set_bitrate(&self, bps: u32);
     /// Re-shares the bitrate between displays (called every second).
     fn rebalance(&self) {}
+    /// Encodes each stream at this width (`None` = native), from what viewers show.
+    fn set_target_widths(&self, _widths: &[Option<u32>]) {}
 }
 
 /// Where client input goes (the platform injector, or a recorder in tests).

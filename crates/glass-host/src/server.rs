@@ -452,6 +452,15 @@ async fn control(
             info!("{peer}: authenticated via {how} ({left} left)");
         }
     }
+    // This viewer's resolution request lasts as long as the session.
+    let viewport_id = crate::viewers::next_id();
+    struct ViewportGuard(u64);
+    impl Drop for ViewportGuard {
+        fn drop(&mut self) {
+            crate::resolution::set(self.0, None);
+        }
+    }
+    let _viewport = ViewportGuard(viewport_id);
     // Shown on the host (menu bar / notification) for as long as this session lasts.
     let how = match &auth {
         Auth::Token => crate::viewers::How::Token,
@@ -595,6 +604,14 @@ async fn control(
                         msg: format!("update: {e:#}"),
                     });
                 }
+            }
+            ClientMsg::Viewport { streams } => {
+                let streams = streams
+                    .into_iter()
+                    .take(MAX_STREAMS)
+                    .map(|s| s.map(|[w, h]| [w.min(16_384), h.min(16_384)]))
+                    .collect();
+                crate::resolution::set(viewport_id, Some(streams));
             }
             ClientMsg::Log { lines } => {
                 if let Some(path) = CLIENT_LOG.get() {

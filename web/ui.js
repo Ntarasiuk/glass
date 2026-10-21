@@ -6,7 +6,7 @@ const TOOLBAR_IDLE_MS = 3000;
 // Matches the slide-in transition in index.html (420 ms), plus a beat.
 const TOOLBAR_WAKE_MS = 450;
 
-export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken }) {
+export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken, resolution = 'auto', onResolution }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -217,8 +217,24 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
         }),
       );
     }
+    // Resolution: sized to this screen (sharper and faster), or the Mac's full size.
+    const native = displays.find((d) => d.id === streamed[0]) ?? displays[0];
+    items.push(
+      document.createElement('hr'),
+      menuItem('Auto', 'sized to this screen', {
+        checked: resolutionMode === 'auto',
+        onSelect: () => { setMenuOpen('displays', false); onResolution?.('auto'); },
+      }),
+      menuItem('This Mac', native ? `${native.width}×${native.height}` : 'full resolution', {
+        checked: resolutionMode === 'native',
+        onSelect: () => { setMenuOpen('displays', false); onResolution?.('native'); },
+      }),
+    );
+    lastDisplays = [displays, streamed];
     menus.displays.panel.replaceChildren(...items);
   }
+  let resolutionMode = resolution;
+  let lastDisplays;
 
   /** Names displays by where they sit in the macOS arrangement: Left / Right, Top / Bottom. */
   function positionNames(displays) {
@@ -326,6 +342,10 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     setGuest(guest) {
       $('btn-machines').classList.toggle('hidden', guest);
       if (guest) setMenuOpen('machines', false);
+    },
+    setResolution(mode) {
+      resolutionMode = mode;
+      if (lastDisplays) renderDisplays(...lastDisplays);
     },
     setStatsPressed(on) {
       $('btn-stats').setAttribute('aria-pressed', String(on));

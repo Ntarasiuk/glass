@@ -33,6 +33,8 @@ struct Stream {
     fps: Arc<std::sync::atomic::AtomicU32>,
     /// Recent output bytes (decaying), to share the bitrate by activity.
     activity: std::sync::atomic::AtomicU64,
+    /// Encoded width (may be below native: dynamic resolution).
+    width: usize,
 }
 
 pub struct Video {
@@ -43,6 +45,8 @@ pub struct Video {
     streams: Mutex<Vec<Stream>>,
     /// Current adaptive target; new streams start at it.
     bitrate: std::sync::atomic::AtomicU32,
+    /// Per stream: the width viewers need (`None` = native), from dynamic resolution.
+    target_widths: Mutex<Vec<Option<u32>>>,
 }
 
 impl Video {
@@ -59,6 +63,7 @@ impl Video {
             audio,
             streams: Mutex::new(Vec::new()),
             bitrate,
+            target_widths: Mutex::new(Vec::new()),
         }
     }
 
@@ -128,10 +133,18 @@ impl Video {
         let (w, h) = (display.info.width as f64, display.info.height as f64);
         // H.264 level 5.2 caps a frame at 36864 macroblocks (e.g. 4096x2304), so a 5K
         // display is downscaled until HEVC lands.
+        let target = self
+            .target_widths
+            .lock()
+            .unwrap()
+            .get(index as usize)
+            .copied()
+            .flatten();
         let scale = self
             .config
             .scale
-            .min((MAX_MACROBLOCKS * 256.0 / (w * h)).sqrt());
+            .min((MAX_MACROBLOCKS * 256.0 / (w * h)).sqrt())
+            .min(target.map_or(1.0, |t| t as f64 / w));
         let width = ((w * scale) as usize) & !1;
         let height = ((h * scale) as usize) & !1;
 
@@ -175,6 +188,7 @@ impl Video {
             keyframe,
             fps,
             activity: Default::default(),
+            width,
         })
     }
 
@@ -202,6 +216,48 @@ impl VideoSource for Video {
     /// `bps` is the total for all displays (not each): shared out by `rebalance`.
     fn set_bitrate(&self, bps: u32) {
         self.bitrate.store(bps, Ordering::Relaxed);
+        self.rebalance();
+    }
+
+    /// Restarts any stream whose encoded size should change (dynamic resolution).
+    fn set_target_widths(&self, widths: &[Option<u32>]) {
+        *self.target_widths.lock().unwrap() = widths.to_vec();
+        let Ok(displays) = capture::list_displays() else {
+            return;
+        };
+        let mut streams = self.streams.lock().unwrap();
+        for (index, want) in widths.iter().enumerate() {
+            let Some(current) = streams.get(index) else {
+                continue;
+            };
+            let native = current.display.width;
+            let want = want.map_or(native, |w| (w as usize).min(native));
+            // Within a few pixels is the same size (rounding to even, macroblock caps).
+            if current.width.abs_diff(want) <= 16 {
+                continue;
+            }
+            let Some(display) = displays.iter().find(|d| d.info.id == current.display.id) else {
+                continue;
+            };
+            let audio = (index == 0).then(|| self.audio.clone());
+            // Stop the old one first so the stream never has two encoders feeding it.
+            let old = std::mem::replace(
+                &mut streams[index],
+                match self.start(index as u8, display, audio) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("resizing stream {index}: {e:#}");
+                        continue;
+                    }
+                },
+            );
+            drop(old);
+            info!(
+                "stream {index}: now {}px wide for its viewers",
+                streams[index].width
+            );
+        }
+        drop(streams);
         self.rebalance();
     }
 

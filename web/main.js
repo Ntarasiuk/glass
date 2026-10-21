@@ -23,6 +23,7 @@ const SHORTCUTS = [
 ];
 
 const TOKEN_KEY = 'glass.token';
+const RESOLUTION_KEY = 'glass.resolution'; // 'auto' (sized to this screen) or 'native'
 const PASS_KEY = 'glass.pass'; // guest pass from a magic link: { pass, expires }
 const SWAP_KEY = 'glass.swapCmdOption';
 const CTRL_AS_CMD_KEY = 'glass.ctrlAsCmd';
@@ -71,11 +72,24 @@ const savedPass = (() => {
   } catch { return undefined; }
 })();
 let guest = false; // signed in with a magic link: no switching machines, no updating the host
+let resolutionMode = storage((s) => s.getItem(RESOLUTION_KEY)) === 'native' ? 'native' : 'auto';
 // Remote video over WebRTC (see videoFor / showStreams): declared early, set up below.
 let rtc;
 let rtpVideo = false;
 let streamCount = 1;
 const videos = [];
+// Dynamic resolution: tell the host how many device pixels each display gets here (its
+// area × pixel ratio × zoom), so it encodes no more and no less. "This Mac" asks for full
+// resolution. Sizes come from ResizeObserver, so measuring never forces a layout.
+let zoomScale = 1;
+const areas = new Map(); // element -> [css width, css height]
+const areaObserver = new ResizeObserver((entries) => {
+  for (const e of entries) areas.set(e.target, [e.contentRect.width, e.contentRect.height]);
+  queueViewport();
+});
+matchMedia(`(resolution: ${devicePixelRatio}dppx)`).addEventListener?.('change', () => queueViewport());
+let viewportTimer;
+let lastViewport = '';
 
 // Remote: no host serves this page, so there's no config to fetch.
 const config = remoteKey
@@ -136,6 +150,8 @@ const input = attachInput({
   ctrlAsCmd,
   pcKeyboard,
   onZoom: (s) => {
+    zoomScale = s;
+    queueViewport();
     document.getElementById('zoom-pill').classList.toggle('hidden', s === 1);
     document.getElementById('zoom-level').textContent = `${s.toFixed(1)}×`;
   },
@@ -166,6 +182,8 @@ const ui = createUI({
     log('info', `swap cmd/option ${on ? 'on' : 'off'}`);
   },
   onShortcut: (sc) => input.sendCombo(sc.keys),
+  resolution: resolutionMode,
+  onResolution: (mode) => setResolution(mode),
   onKeyboard: () => input.focusKeys(),
   onUploadFiles: uploadFiles,
   onRequestFiles: () => {
@@ -280,6 +298,7 @@ function videoFor(stream) {
     });
     screens.append(v);
     input.observeCanvas(v);
+    areaObserver.observe(v);
     videos.push(v);
   }
   return videos[stream];
@@ -301,6 +320,7 @@ function showStreams(count) {
     canvas.tabIndex = -1;
     screens.append(canvas);
     input.observeCanvas(canvas);
+    areaObserver.observe(canvas);
     const offscreen = canvas.transferControlToOffscreen();
     worker.postMessage({ type: 'canvas', stream: canvases.length, canvas: offscreen }, [offscreen]);
     canvases.push(canvas);
@@ -397,6 +417,7 @@ function onControl(msg) {
       // Remote: other machines aren't reachable from here, so no machines menu either.
       ui.setGuest(guest || Boolean(remoteKey));
       onLayout(msg.streams);
+      queueViewport(true);
       log('info', 'welcome', { displays: displays.length, streams: msg.streams.map((d) => d.id), audio: msg.audio });
       break;
     case 'layout':
@@ -577,6 +598,37 @@ setInterval(async () => {
     jitterBufferMs: buffer,
   });
 }, 1000);
+
+function queueViewport(force = false) {
+  if (force) lastViewport = '';
+  clearTimeout(viewportTimer);
+  viewportTimer = setTimeout(sendViewport, 300);
+}
+function sendViewport() {
+  const elements = rtpVideo ? videos : canvases;
+  const streams = [];
+  for (let i = 0; i < streamCount; i++) {
+    const area = areas.get(elements[i]);
+    if (resolutionMode === 'native' || !area || !area[0]) {
+      streams.push(null);
+      continue;
+    }
+    const scale = devicePixelRatio * zoomScale;
+    streams.push([Math.round(area[0] * scale), Math.round(area[1] * scale)]);
+  }
+  const msg = JSON.stringify(streams);
+  if (msg === lastViewport) return;
+  lastViewport = msg;
+  control({ t: 'viewport', streams });
+}
+
+function setResolution(mode) {
+  resolutionMode = mode;
+  storage((s) => s.setItem(RESOLUTION_KEY, mode));
+  ui.setResolution(mode);
+  queueViewport(true);
+  log('info', `resolution: ${mode}`);
+}
 
 function onLayout(streams) {
   for (const d of streams) if (!displays.some((x) => x.id === d.id)) displays.push(d);

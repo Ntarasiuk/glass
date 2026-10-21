@@ -87,6 +87,8 @@ pub struct TestVideo {
     slots: Vec<Arc<AtomicI32>>,
     keyframes: Vec<Arc<AtomicBool>>,
     shown: Mutex<Vec<u32>>,
+    /// Per display: the width to encode at (dynamic resolution).
+    widths: Vec<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl TestVideo {
@@ -111,15 +113,20 @@ impl TestVideo {
         let keyframes: Vec<_> = (0..DISPLAYS)
             .map(|_| Arc::new(AtomicBool::new(true)))
             .collect();
+        let widths: Vec<_> = (0..DISPLAYS)
+            .map(|_| Arc::new(std::sync::atomic::AtomicUsize::new(WIDTH)))
+            .collect();
         for i in 0..DISPLAYS {
             let (slot, keyframe, frames) = (slots[i].clone(), keyframes[i].clone(), frames.clone());
-            std::thread::spawn(move || pattern_loop(i, slot, keyframe, frames, fps));
+            let width = widths[i].clone();
+            std::thread::spawn(move || pattern_loop(i, slot, keyframe, width, frames, fps));
         }
         Self {
             displays,
             slots,
             keyframes,
             shown: Mutex::new(Vec::new()),
+            widths,
         }
     }
 }
@@ -132,6 +139,20 @@ impl VideoSource for TestVideo {
             .iter()
             .map(|&i| self.displays[i as usize].clone())
             .collect()
+    }
+
+    fn set_target_widths(&self, widths: &[Option<u32>]) {
+        for (d, slot) in self.slots.iter().enumerate() {
+            let s = slot.load(Ordering::Relaxed);
+            if s >= 0 {
+                let w = widths
+                    .get(s as usize)
+                    .copied()
+                    .flatten()
+                    .map_or(WIDTH, |w| (w as usize).min(WIDTH));
+                self.widths[d].store(w, Ordering::Relaxed);
+            }
+        }
     }
 
     fn request_keyframe(&self, stream: Option<u8>) {
@@ -179,10 +200,12 @@ fn pattern_loop(
     display: usize,
     slot: Arc<AtomicI32>,
     keyframe: Arc<AtomicBool>,
+    width: Arc<std::sync::atomic::AtomicUsize>,
     frames: broadcast::Sender<Arc<EncodedFrame>>,
     fps: u32,
 ) {
     let mut applied = BITRATE.load(Ordering::Relaxed);
+    let mut encoded_width = WIDTH;
     let mut encoder = Encoder::new(WIDTH, HEIGHT, fps, applied, 1.0).expect("test encoder");
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
     let mut next = Instant::now();
@@ -192,6 +215,16 @@ fn pattern_loop(
         let s = slot.load(Ordering::Relaxed);
         if s < 0 {
             continue;
+        }
+        // Dynamic resolution: a new size means a new encoder, starting on a keyframe.
+        let want = width.load(Ordering::Relaxed);
+        if want != encoded_width {
+            let scale = want as f64 / WIDTH as f64;
+            if let Ok(e) = Encoder::new(WIDTH, HEIGHT, fps, applied, scale) {
+                encoder = e;
+                encoded_width = want;
+                keyframe.store(true, Ordering::Relaxed);
+            }
         }
         let target = BITRATE.load(Ordering::Relaxed);
         if target != applied {

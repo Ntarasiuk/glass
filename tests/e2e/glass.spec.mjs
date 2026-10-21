@@ -253,13 +253,29 @@ test.describe('ports', () => {
 });
 
 test.describe('displays', () => {
+  it('encodes at the size this screen shows, or the full size on request', async ({ page, host }) => {
+    // A small window: the 640×360 display only needs ~300 px, so the host sends half
+    // size (the test encoder, like Linux's, scales by halves; Macs scale to any width).
+    await page.setViewportSize({ width: 300, height: 240 });
+    await open(page, host);
+    await expect.poll(() => hudText(page), { timeout: 15_000 }).toContain('320×180');
+    // "This Mac" asks for full resolution again.
+    await page.locator('#btn-displays').dispatchEvent('click');
+    await page.locator('.panel:not(.hidden) button', { hasText: 'This Mac' }).dispatchEvent('click');
+    await expect.poll(() => hudText(page), { timeout: 15_000 }).toContain('640×360');
+    expect(await page.evaluate(() => localStorage.getItem('glass.resolution'))).toBe('native');
+  });
+
   it('lists displays and switches between one and all', async ({ page, host }) => {
     await open(page, host);
     await page.locator('#btn-displays').click();
     const items = page.locator('#displays-panel button');
-    await expect(items).toHaveCount(3);
-    await expect(items.last()).toContainText('All displays');
-    await items.last().click();
+    // Two displays, "All displays", then the resolution choices (Auto, This Mac).
+    await expect(items).toHaveCount(5);
+    await expect(items.nth(2)).toContainText('All displays');
+    await expect(items.nth(3)).toContainText('Auto');
+    await expect(items.nth(4)).toContainText('This Mac');
+    await items.nth(2).click();
     await expectVideo(page, 2);
     await expect(page.locator('#screens canvas:not(.hidden)')).toHaveCount(2);
 

@@ -227,6 +227,13 @@
     #auth button:hover { filter: brightness(1.08); }
     #auth button:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 
+    /* Phones: the full toolbar is wider than the screen; tighten it, scroll as a last resort. */
+    @media (max-width: 440px) {
+      #toolbar { gap: 0; padding: 3px; max-width: calc(100vw - 2 * var(--right)); overflow-x: auto; scrollbar-width: none; }
+      #toolbar::-webkit-scrollbar { display: none; }
+      #toolbar button { width: 34px; height: 36px; flex: none; }
+      #toolbar svg { width: 18px; height: 18px; }
+    }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
     }

@@ -55,6 +55,9 @@ pub enum ClientMsg {
     NetStats(crate::rate::Report),
     /// Log lines from a client that has no web server to post them to (remote access).
     Log { lines: Vec<String> },
+    /// The device pixels each stream covers on this viewer's screen (`null`: full
+    /// resolution), for dynamic resolution.
+    Viewport { streams: Vec<Option<[u32; 2]>> },
 }
 
 #[derive(Debug, Clone, Serialize)]
