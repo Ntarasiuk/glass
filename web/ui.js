@@ -35,6 +35,14 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
   addEventListener('pointermove', (e) => {
     if (e.pointerType === 'mouse' && e.clientY < 72 && toolbar.classList.contains('idle')) wakeToolbar();
   }, { passive: true });
+  // Fingers can't hover, so a tucked toolbar shows a grab handle sized for a fingertip
+  // (CSS keys it off data-input). A tap on the tucked toolbar only wakes it.
+  const root = document.documentElement;
+  root.dataset.input = matchMedia('(hover: none)').matches ? 'touch' : 'mouse';
+  addEventListener('pointerdown', (e) => {
+    const input = e.pointerType === 'touch' ? 'touch' : 'mouse';
+    if (root.dataset.input !== input) root.dataset.input = input;
+  }, { capture: true, passive: true });
   wakeToolbar();
 
   // Toolbar buttons must not steal pointer events from the canvas logic or keep focus.

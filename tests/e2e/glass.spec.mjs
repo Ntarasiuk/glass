@@ -253,6 +253,29 @@ test.describe('input', () => {
     }
   });
 
+  it('touch: tapping the tucked toolbar handle wakes it without touching the remote screen', async ({ page, host }) => {
+    await open(page, host);
+    await touch(page, 0, [{ type: 'pointerdown', fx: 0.9, fy: 0.9 }, { type: 'pointerup', fx: 0.9, fy: 0.9 }]);
+    await expect(page.locator('#toolbar')).toHaveClass(/idle/, { timeout: 6000 });
+    await host.clearInput();
+    // Just under the tucked toolbar, where the grab handle hangs.
+    const hit = await page.evaluate(() => {
+      const r = document.getElementById('toolbar').getBoundingClientRect();
+      const x = r.left + r.width / 2;
+      const y = r.bottom + 14;
+      const target = document.elementFromPoint(x, y);
+      for (const type of ['pointerdown', 'pointerup', 'click']) {
+        target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: 'touch', pointerId: 101, clientX: x, clientY: y }));
+      }
+      return target.id;
+    });
+    expect(hit).toBe('toolbar');
+    await expect(page.locator('#toolbar')).not.toHaveClass(/idle/);
+    await expect(page.locator('.panel:not(.hidden)')).toHaveCount(0);
+    await page.waitForTimeout(300);
+    expect((await host.input('down')).events).toHaveLength(0);
+  });
+
   it('touch: tap clicks, long press right-clicks, two fingers scroll', async ({ page, host }) => {
     await open(page, host);
     await host.clearInput();
