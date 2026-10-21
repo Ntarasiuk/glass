@@ -3,10 +3,10 @@
 Low-latency remote desktop for macOS. Install it on a Mac, then see and control that Mac from a browser on an iPad, iPhone or another computer, typically 15–30 ms from screen capture to display.
 
 ```sh
-curl -fsSL getglass.lol | sh
+curl -fsSL glassdesk.dev | sh
 ```
 
-Run that on the Mac you want to control. It installs Glass and starts `glass setup`, which walks you through Tailscale, the background service and macOS permissions, then shows a QR code to open on your iPad. Full docs: [getglass.lol/docs](https://getglass.lol/docs) (also as [markdown](site/docs.md)).
+Run that on the Mac you want to control. It installs Glass and starts `glass setup`, which walks you through Tailscale, the background service and macOS permissions, then shows a QR code to open on your iPad. Full docs: [glassdesk.dev/docs](https://glassdesk.dev/docs) (also as [markdown](site/docs.md)).
 
 ## Features
 
@@ -32,7 +32,7 @@ NSPasteboard, files ◀─▶ control + file streams ◀────────
 - `crates/glass-proto`: wire format (mirrored in `web/proto.js`).
 - `crates/glass-host`: the `glass` binary: capture, encode, audio, input injection, WebTransport/HTTPS server, setup wizard, LaunchAgent.
 - `web/`: browser client, no build step.
-- `site/`: getglass.lol, a Cloudflare Worker with static assets plus D1 for download counts and feedback.
+- `site/`: glassdesk.dev, a Cloudflare Worker with static assets plus D1 for download counts and feedback.
 
 ## Development
 
@@ -60,7 +60,7 @@ Early but daily-driven. Known rough edges:
 - Updates ask for Screen Recording and Accessibility again, because unsigned binaries change identity on each build. Code signing would fix it.
 - Safari's hardware video decoder occasionally resets. Glass recovers in a fraction of a second and falls back to steadier decoder settings.
 
-Feedback: `glass feedback "…"`, the form at [getglass.lol](https://getglass.lol/#feedback), or GitHub issues.
+Feedback: `glass feedback "…"`, the form at [glassdesk.dev](https://glassdesk.dev/#feedback), or GitHub issues.
 
 ## License
 

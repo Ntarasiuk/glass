@@ -79,7 +79,7 @@ enum Command {
     Uninstall,
 }
 
-const FEEDBACK_URL: &str = "https://getglass.lol/api/feedback";
+const FEEDBACK_URL: &str = "https://glassdesk.dev/api/feedback";
 
 #[tokio::main]
 async fn main() -> Result<()> {

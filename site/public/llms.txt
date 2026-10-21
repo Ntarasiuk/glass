@@ -2,14 +2,15 @@
 
 > Glass is a free, low-latency remote desktop for macOS. Install it on a Mac, then see and control that Mac from a browser on an iPad, iPhone, or another computer. Typical latency is 15–30 ms from screen capture to display, including over Tailscale. Nothing to install on the viewing device.
 
-Install on the Mac to be controlled: `curl -fsSL getglass.lol | sh` (macOS 13+, Apple Silicon or Intel). The installer starts `glass setup`, a guided setup for Tailscale, the background service and permissions. Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free.
+Install on the Mac to be controlled: `curl -fsSL glassdesk.dev | sh` (macOS 13+, Apple Silicon or Intel). The installer starts `glass setup`, a guided setup for Tailscale, the background service and permissions. Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free and open source (MIT).
 
 ## Docs
 
-- [Full documentation](https://getglass.lol/llms-full.txt): everything in one file: install, setup, features, keyboard behaviour on iPad, CLI reference, architecture, security, troubleshooting, FAQ
-- [Documentation (HTML)](https://getglass.lol/docs): the same, as a web page
-- [Install script](https://getglass.lol/install.sh): what `curl -fsSL getglass.lol | sh` runs
+- [Full documentation](https://glassdesk.dev/llms-full.txt): everything in one file: install, setup, features, keyboard behaviour on iPad, CLI reference, architecture, security, troubleshooting, FAQ
+- [Documentation (HTML)](https://glassdesk.dev/docs): the same, as a web page
+- [Install script](https://glassdesk.dev/install.sh): what `curl -fsSL glassdesk.dev | sh` runs
+- [Source code](https://github.com/Ntarasiuk/glass): Rust host, browser client, and this website (MIT)
 
 ## Optional
 
-- [Feedback API](https://getglass.lol/docs.md#feedback): `POST https://getglass.lol/api/feedback` with JSON `{"message": "…"}`
+- [Feedback API](https://glassdesk.dev/docs.md#feedback): `POST https://glassdesk.dev/api/feedback` with JSON `{"message": "…"}`

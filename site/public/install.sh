@@ -1,13 +1,13 @@
 #!/bin/sh
-# Glass installer: https://getglass.lol
+# Glass installer: https://glassdesk.dev
 #
-#   curl -fsSL getglass.lol | sh
+#   curl -fsSL glassdesk.dev | sh
 #
 # Installs to ~/.glass, links `glass` into ~/.local/bin, then starts `glass setup`.
 # Re-run any time to update.
 set -eu
 
-BASE="${GLASS_BASE:-https://getglass.lol}"
+BASE="${GLASS_BASE:-https://glassdesk.dev}"
 PREFIX="$HOME/.glass"
 BIN_DIR="$HOME/.local/bin"
 TARBALL="glass-latest-darwin-universal.tar.gz"
@@ -59,8 +59,8 @@ version=$("$PREFIX/bin/glass" --version | cut -d' ' -f2)
 info "Installed Glass $version"
 
 # An update replaces the binary; restart the background service onto it.
-if [ -f "$HOME/Library/LaunchAgents/lol.getglass.host.plist" ]; then
-  launchctl kickstart -k "gui/$(id -u)/lol.getglass.host" 2>/dev/null && info "Restarted the Glass service"
+if [ -f "$HOME/Library/LaunchAgents/dev.glassdesk.host.plist" ]; then
+  launchctl kickstart -k "gui/$(id -u)/dev.glassdesk.host" 2>/dev/null && info "Restarted the Glass service"
 fi
 
 echo

@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-pub const LABEL: &str = "lol.getglass.host";
+pub const LABEL: &str = "dev.glassdesk.host";
 
 pub fn plist_path() -> PathBuf {
     crate::home().join("Library/LaunchAgents").join(format!("{LABEL}.plist"))

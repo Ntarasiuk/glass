@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Glass: low-latency remote desktop for your Mac</title>
   <meta name="description" content="Control your Mac from an iPad or any browser with 15–30 ms latency. Free, one-line install, multiple displays, audio, clipboard and file transfer, secure over Tailscale.">
-  <link rel="canonical" href="https://getglass.lol/">
+  <link rel="canonical" href="https://glassdesk.dev/">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="alternate" type="text/markdown" href="/docs.md" title="Glass documentation (Markdown)">
   <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://getglass.lol/">
+  <meta property="og:url" content="https://glassdesk.dev/">
   <meta property="og:title" content="Glass: your Mac, in any browser">
   <meta property="og:description" content="Low-latency remote desktop for macOS. 15–30 ms from your Mac's screen to your iPad. Nothing to install on the iPad.">
   <meta name="twitter:card" content="summary">
@@ -24,16 +24,16 @@
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
     "name": "Glass",
-    "url": "https://getglass.lol/",
+    "url": "https://glassdesk.dev/",
     "description": "Low-latency remote desktop for macOS. Install on a Mac with one command, then see and control it from a browser on an iPad, iPhone or another computer, with 15–30 ms latency.",
     "applicationCategory": "UtilitiesApplication",
     "operatingSystem": "macOS 13 or later (host); any browser with WebTransport and WebCodecs (viewer)",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
     "license": "https://opensource.org/licenses/MIT",
     "codeRepository": "https://github.com/Ntarasiuk/glass",
-    "installUrl": "https://getglass.lol/install.sh",
-    "downloadUrl": "https://getglass.lol/releases/glass-latest-darwin-universal.tar.gz",
-    "softwareHelp": { "@type": "CreativeWork", "url": "https://getglass.lol/docs" },
+    "installUrl": "https://glassdesk.dev/install.sh",
+    "downloadUrl": "https://glassdesk.dev/releases/glass-latest-darwin-universal.tar.gz",
+    "softwareHelp": { "@type": "CreativeWork", "url": "https://glassdesk.dev/docs" },
     "featureList": [
       "15–30 ms capture-to-display latency",
       "Browser viewer: no app on the iPad",
@@ -66,7 +66,7 @@
         <p class="lede">A remote desktop that feels local. About 20&nbsp;ms from your Mac's screen to your iPad, with no app to install on the iPad.</p>
 
         <div class="install">
-          <code id="cmd"><span class="dim">$</span> curl -fsSL getglass.lol | sh</code>
+          <code id="cmd"><span class="dim">$</span> curl -fsSL glassdesk.dev | sh</code>
           <button class="btn" id="copy" type="button">Copy</button>
         </div>
         <p class="hint">Run it on the Mac you want to control. A guided setup takes about two minutes. macOS 13+, free and <a href="https://github.com/Ntarasiuk/glass">open source</a>.</p>
@@ -137,7 +137,7 @@
     const copy = document.getElementById('copy');
     copy.addEventListener('click', async () => {
       try {
-        await navigator.clipboard.writeText('curl -fsSL getglass.lol | sh');
+        await navigator.clipboard.writeText('curl -fsSL glassdesk.dev | sh');
         copy.textContent = 'Copied';
       } catch {
         copy.textContent = 'Select it';

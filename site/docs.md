@@ -2,8 +2,8 @@
 
 > Glass is a free, low-latency remote desktop for macOS. Install it on a Mac, then see and control that Mac from a browser on an iPad, iPhone, or another computer. Typical latency is 15–30 ms from screen capture to display, including over Tailscale. Nothing to install on the viewing device.
 
-- Website: https://getglass.lol
-- Install (on the Mac to be controlled): `curl -fsSL getglass.lol | sh`
+- Website: https://glassdesk.dev
+- Install (on the Mac to be controlled): `curl -fsSL glassdesk.dev | sh`
 - Platforms: host is macOS 13+ (Apple Silicon and Intel). Viewer is any modern browser with WebTransport and WebCodecs: Safari 26.4+ (iPad, iPhone, Mac), Chrome, Edge and Firefox.
 - Price: free and open source (MIT): https://github.com/Ntarasiuk/glass
 
@@ -30,7 +30,7 @@ Features:
 On the Mac you want to control, run in Terminal:
 
 ```sh
-curl -fsSL getglass.lol | sh
+curl -fsSL glassdesk.dev | sh
 ```
 
 The installer:
@@ -47,7 +47,7 @@ Running the same command again updates Glass in place and restarts the backgroun
 The setup guide walks through four steps and checks each one live:
 
 1. **Tailscale (remote access).** Glass uses [Tailscale](https://tailscale.com) to reach the Mac securely from other devices, with no port forwarding. Setup checks that Tailscale is installed and signed in, and that **HTTPS Certificates** are enabled for your tailnet (one switch on https://login.tailscale.com/admin/dns; browsers require HTTPS for the APIs Glass uses). It then fetches a certificate for the Mac's tailnet name. You can skip this to use Glass only on the Mac itself.
-2. **Background service.** Glass installs a per-user LaunchAgent (`lol.getglass.host`) so it runs in the background, optionally starts at login, and restarts if it crashes.
+2. **Background service.** Glass installs a per-user LaunchAgent (`dev.glassdesk.host`) so it runs in the background, optionally starts at login, and restarts if it crashes.
 3. **Screen Recording permission.** macOS asks to let `glass` record the screen. Setup opens the right System Settings pane and waits until capture works.
 4. **Accessibility permission.** Needed to inject mouse and keyboard input. Setup opens the pane and waits until it's allowed.
 
@@ -113,7 +113,7 @@ Files:
 - `~/.config/glass/certs/`: Tailscale HTTPS certificate
 - `~/.config/glass/status.json`: live service status
 - `~/Library/Logs/Glass/`: host, client, and agent logs
-- `~/Library/LaunchAgents/lol.getglass.host.plist`: background service
+- `~/Library/LaunchAgents/dev.glassdesk.host.plist`: background service
 
 ## How it works
 
@@ -131,7 +131,7 @@ Files:
 - With Tailscale, traffic stays on your private tailnet and goes directly between devices when possible.
 - Access control: a device is let in if Tailscale reports it belongs to the same user as the Mac, or if it presents the access token. Glass sends nothing to a session (video, audio, clipboard, input) until it is authenticated.
 - Glass runs a LaunchAgent as your user, not as root.
-- The getglass.lol website counts downloads using a salted hash of the IP address (no raw IPs stored) and stores feedback you choose to send. The Glass app itself sends nothing to getglass.lol except feedback you submit.
+- The glassdesk.dev website counts downloads using a salted hash of the IP address (no raw IPs stored) and stores feedback you choose to send. The Glass app itself sends nothing to glassdesk.dev except feedback you submit.
 
 ## Requirements
 
@@ -171,6 +171,6 @@ Files:
 ## Feedback
 
 - From the Mac: `glass feedback "what happened or what you'd like"`
-- On the website: https://getglass.lol/#feedback
-- API: `POST https://getglass.lol/api/feedback` with JSON `{ "message": "…", "email": "optional" }`
+- On the website: https://glassdesk.dev/#feedback
+- API: `POST https://glassdesk.dev/api/feedback` with JSON `{ "message": "…", "email": "optional" }`
 - GitHub issues: https://github.com/Ntarasiuk/glass/issues

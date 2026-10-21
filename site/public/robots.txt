@@ -30,4 +30,4 @@ Allow: /
 User-agent: Applebot-Extended
 Allow: /
 
-Sitemap: https://getglass.lol/sitemap.xml
+Sitemap: https://glassdesk.dev/sitemap.xml

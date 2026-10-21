@@ -17,7 +17,7 @@
       "migrations_dir": "migrations"
     }
   ],
-  // Add once getglass.lol is registered: "routes": [{ "pattern": "getglass.lol", "custom_domain": true }],
+  "routes": [{ "pattern": "glassdesk.dev", "custom_domain": true }],
   "workers_dev": true,
   "observability": { "enabled": true }
 }

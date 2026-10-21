@@ -4,7 +4,7 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { marked } from 'marked';
 
-const SITE = 'https://getglass.lol';
+const SITE = 'https://glassdesk.dev';
 const docs = readFileSync('docs.md', 'utf8');
 
 // Full docs for LLMs and anyone who wants raw markdown.
@@ -19,13 +19,13 @@ writeFileSync(
 
 > ${summary}
 
-Install on the Mac to be controlled: \`curl -fsSL getglass.lol | sh\` (macOS 13+, Apple Silicon or Intel). The installer starts \`glass setup\`, a guided setup for Tailscale, the background service and permissions. Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free and open source (MIT).
+Install on the Mac to be controlled: \`curl -fsSL glassdesk.dev | sh\` (macOS 13+, Apple Silicon or Intel). The installer starts \`glass setup\`, a guided setup for Tailscale, the background service and permissions. Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free and open source (MIT).
 
 ## Docs
 
 - [Full documentation](${SITE}/llms-full.txt): everything in one file: install, setup, features, keyboard behaviour on iPad, CLI reference, architecture, security, troubleshooting, FAQ
 - [Documentation (HTML)](${SITE}/docs): the same, as a web page
-- [Install script](${SITE}/install.sh): what \`curl -fsSL getglass.lol | sh\` runs
+- [Install script](${SITE}/install.sh): what \`curl -fsSL glassdesk.dev | sh\` runs
 - [Source code](https://github.com/Ntarasiuk/glass): Rust host, browser client, and this website (MIT)
 
 ## Optional

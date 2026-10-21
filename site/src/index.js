@@ -1,9 +1,9 @@
-// getglass.lol: landing page, one-line installer, release downloads (counted in D1),
+// glassdesk.dev: landing page, one-line installer, release downloads (counted in D1),
 // and the feedback API. Static files come from ./public via the ASSETS binding.
 
 const FEEDBACK_MAX = 4000;
 const FEEDBACK_PER_HOUR = 5;
-// Command-line fetchers get the install script at the bare domain (`curl getglass.lol | sh`).
+// Command-line fetchers get the install script at the bare domain (`curl glassdesk.dev | sh`).
 const CLI_AGENT = /^(curl|wget|fetch|httpie|python-requests|go-http-client)\b/i;
 
 export default {
