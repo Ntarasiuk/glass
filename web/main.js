@@ -294,6 +294,9 @@ function onControl(msg) {
     case 'bitrate':
       targetMbps = msg.bps / 1e6;
       break;
+    case 'updateAvailable':
+      offerUpdate(msg);
+      break;
     case 'clipboard':
       log('info', 'mac clipboard changed', { length: msg.text.length });
       lastMacClipboard = msg.text;
@@ -345,6 +348,24 @@ function arrangement(list) {
   if (list.length < 2) return 'row';
   const spread = (key) => Math.max(...list.map((d) => d[key])) - Math.min(...list.map((d) => d[key]));
   return spread('x') >= spread('y') ? 'row' : 'column';
+}
+
+let updateOffered = false;
+function offerUpdate({ current, version }) {
+  if (updateOffered) return;
+  updateOffered = true;
+  ui.toast({
+    text: `Glass ${version} is available (this machine has ${current})`,
+    timeout: 0,
+    action: {
+      label: 'Update',
+      run: () => {
+        control({ t: 'update' });
+        log('info', 'update requested', { from: current, to: version });
+        ui.toast({ text: `Updating to ${version}… Glass reconnects when it's done.`, timeout: 15_000 });
+      },
+    },
+  });
 }
 
 function uploadFiles(files) {

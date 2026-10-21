@@ -1,0 +1,70 @@
+name: Release
+
+# Push a tag like v0.2.0 (matching Cargo.toml) to build, sign and publish a release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: 'aarch64-apple-darwin,x86_64-apple-darwin' }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install --locked apple-codesign
+      - name: Package and sign
+        env:
+          SIGNING_KEY: ${{ secrets.GLASS_SIGNING_KEY }}
+          SIGNING_CERT: ${{ secrets.GLASS_SIGNING_CERT }}
+        run: |
+          umask 077
+          printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/signing.key"
+          printf '%s\n' "$SIGNING_CERT" > "$RUNNER_TEMP/signing.crt"
+          GLASS_SIGNING_KEY="$RUNNER_TEMP/signing.key" GLASS_SIGNING_CERT="$RUNNER_TEMP/signing.crt" \
+            scripts/package.sh macos
+          rm -f "$RUNNER_TEMP/signing.key"
+      - uses: actions/upload-artifact@v4
+        with: { name: dist-macos, path: dist/ }
+
+  linux:
+    # Built on Ubuntu so the binary runs on older and newer glibc alike (Arch included).
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libpipewire-0.3-dev libclang-dev pkg-config nasm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/package.sh linux
+      - uses: actions/upload-artifact@v4
+        with: { name: dist-linux, path: dist/ }
+
+  publish:
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    env:
+      # Optional: without these the site is deployed by hand (cd site && npm run deploy).
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$version"; exit 1; }
+      - name: GitHub release
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: gh release create "$GITHUB_REF_NAME" dist/glass-[0-9]* --generate-notes --title "Glass $GITHUB_REF_NAME"
+      - uses: actions/setup-node@v4
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        with: { node-version: 24 }
+      - name: Deploy glassdesk.dev (installer serves the new release)
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        working-directory: site
+        run: npm ci && npm run deploy

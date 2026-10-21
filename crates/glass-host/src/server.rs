@@ -34,7 +34,10 @@ pub struct Shared {
     pub clipboard: Arc<dyn Clipboard>,
     /// Host-wide events fanned out to every authenticated session's control stream.
     pub events: broadcast::Sender<ServerMsg>,
-    pub token: String,
+    /// Read on every sign-in, so `glass token --reset` takes effect without a restart.
+    pub token_file: PathBuf,
+    /// Failed sign-ins per address, for brute-force protection.
+    pub auth_failures: Mutex<std::collections::HashMap<std::net::IpAddr, (u32, std::time::Instant)>>,
     /// Tailnet login of this Mac's owner; their devices skip the token.
     pub tailnet_owner: Option<String>,
     pub audio: AudioPackets,
@@ -257,11 +260,18 @@ async fn control(
 ) -> Result<()> {
     let shared = &ctx.shared;
     let hello = control::read_json::<ClientMsg>(&mut recv).await;
-    let token_ok = matches!(
-        &hello,
-        Ok(Some(ClientMsg::Hello { token: Some(t) })) if control::token_matches(t, &shared.token)
-    );
-    let peer = ctx.conn.remote_address().ip();
+    let peer = ctx.conn.remote_address().ip().to_canonical();
+    if auth_blocked(shared, peer) {
+        warn!("{peer}: rejected (too many failed sign-ins)");
+        control::write_json(&mut send, &ServerMsg::Error { msg: "unauthorized".into() }).await?;
+        // Let the message arrive before closing, so the client shows the token prompt.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        ctx.conn.close(1u32.into(), b"too many attempts");
+        return Ok(());
+    }
+    let expected = control::load_or_create_token(&shared.token_file).unwrap_or_default();
+    let token_ok = !expected.is_empty()
+        && matches!(&hello, Ok(Some(ClientMsg::Hello { token: Some(t) })) if control::token_matches(t, &expected));
     let tailnet_ok = !token_ok
         && matches!(hello, Ok(Some(ClientMsg::Hello { .. })))
         && match &shared.tailnet_owner {
@@ -269,6 +279,7 @@ async fn control(
             None => false,
         };
     if !(token_ok || tailnet_ok) {
+        record_auth_failure(shared, peer);
         warn!("{}: rejected (bad or missing token)", ctx.conn.remote_address());
         control::write_json(&mut send, &ServerMsg::Error { msg: "unauthorized".into() }).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -296,6 +307,9 @@ async fn control(
     control::write_json(&mut send, &welcome).await?;
     let bps = shared.rate.lock().unwrap().target();
     control::write_json(&mut send, &ServerMsg::Bitrate { bps }).await?;
+    if let Some(version) = crate::update::available() {
+        control::write_json(&mut send, &ServerMsg::UpdateAvailable { current: crate::update::CURRENT, version }).await?;
+    }
 
     let mut events = shared.events.subscribe();
     tokio::spawn(async move {
@@ -331,6 +345,13 @@ async fn control(
                     shared.video.request_keyframe(None);
                 }
                 info!("{}: video {}", ctx.conn.remote_address(), if on { "resumed" } else { "paused" });
+            }
+            ClientMsg::Update => {
+                if crate::testmode::enabled() {
+                    crate::testmode::record_update();
+                } else if let Err(e) = crate::update::start_self_update() {
+                    let _ = ctx.ctl_tx.send(ServerMsg::Error { msg: format!("update: {e:#}") });
+                }
             }
             ClientMsg::NetStats(report) => {
                 let changed = shared.rate.lock().unwrap().report(report, std::time::Instant::now());
@@ -381,6 +402,22 @@ async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Failed sign-ins allowed per address within `AUTH_WINDOW` before it's locked out.
+const AUTH_MAX_FAILURES: u32 = 10;
+const AUTH_WINDOW: Duration = Duration::from_secs(600);
+
+fn auth_blocked(shared: &Shared, peer: std::net::IpAddr) -> bool {
+    let mut failures = shared.auth_failures.lock().unwrap();
+    failures.retain(|_, (_, since)| since.elapsed() < AUTH_WINDOW);
+    failures.get(&peer).is_some_and(|(n, _)| *n >= AUTH_MAX_FAILURES)
+}
+
+fn record_auth_failure(shared: &Shared, peer: std::net::IpAddr) {
+    let mut failures = shared.auth_failures.lock().unwrap();
+    let entry = failures.entry(peer).or_insert((0, std::time::Instant::now()));
+    entry.0 += 1;
 }
 
 const AUTH_WAIT: Duration = Duration::from_secs(10);

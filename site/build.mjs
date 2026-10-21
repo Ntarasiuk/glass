@@ -7,6 +7,10 @@ import { marked } from 'marked';
 const SITE = 'https://glassdesk.dev';
 const docs = readFileSync('docs.md', 'utf8');
 
+// Hosts check this to offer updates.
+const version = readFileSync('../Cargo.toml', 'utf8').match(/^version = "(.+)"/m)[1];
+writeFileSync('public/version.json', JSON.stringify({ version }) + '\n');
+
 // The agent skill, so `curl … /skill.md` installs it.
 copyFileSync('../skills/glass/SKILL.md', 'public/skill.md');
 

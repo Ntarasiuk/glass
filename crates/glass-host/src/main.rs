@@ -8,6 +8,7 @@ mod soft_encode;
 mod status;
 mod testmode;
 mod tailscale;
+mod update;
 
 #[cfg(target_os = "macos")]
 #[path = "macos/mod.rs"]
@@ -103,6 +104,14 @@ enum Command {
     Feedback { message: Vec<String> },
     /// Stop the background service and remove it from login items.
     Uninstall,
+    /// Install the latest release (and restart the service onto it).
+    Update,
+    /// Show the access token for devices outside your tailnet.
+    Token {
+        /// Replace it with a new one; devices using the old token must sign in again.
+        #[arg(long)]
+        reset: bool,
+    },
 }
 
 const FEEDBACK_URL: &str = "https://glassdesk.dev/api/feedback";
@@ -121,6 +130,19 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::Feedback { message }) => send_feedback(&message.join(" ")),
+        Some(Command::Update) => update::run_cli(),
+        Some(Command::Token { reset }) => {
+            let path = default_token_file();
+            if *reset {
+                let _ = std::fs::remove_file(&path);
+            }
+            let token = control::load_or_create_token(&path)?;
+            println!("{token}");
+            if *reset {
+                eprintln!("New token saved. The running host uses it for new connections right away.");
+            }
+            Ok(())
+        }
         Some(Command::Uninstall) => {
             agent::uninstall()?;
             println!("Glass service removed. Delete ~/.glass and ~/.config/glass to remove everything.");
@@ -264,6 +286,7 @@ async fn run_host(args: Args) -> Result<()> {
         (video, Box::new(input::Injector::new(display.id)), Arc::new(clipboard::SystemClipboard), tailnet_owner, awake)
     };
     status::set_capturing(true);
+    update::watch();
 
     let test_routes = args.test.then(|| {
         testmode::routes(events.clone(), files::downloads_dir())
@@ -274,7 +297,8 @@ async fn run_host(args: Args) -> Result<()> {
         video,
         clipboard,
         events,
-        token: token.clone(),
+        token_file: args.token_file.clone(),
+        auth_failures: Mutex::default(),
         tailnet_owner,
         audio,
         rate: Mutex::new(rate::RateControl::new((args.mbps * 1_000_000) as u32)),

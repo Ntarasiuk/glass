@@ -34,6 +34,8 @@ pub enum ClientMsg {
     Audio { on: bool },
     /// Pause video while the client tab is hidden (frees its hardware decoder).
     Video { on: bool },
+    /// Install the latest release on the host (it restarts; clients reconnect).
+    Update,
     /// Last second's receive stats, for adaptive bitrate.
     NetStats(crate::rate::Report),
 }
@@ -46,6 +48,7 @@ pub enum ServerMsg {
     Layout { streams: Vec<DisplayInfo> },
     /// Current adaptive target bitrate per stream.
     Bitrate { bps: u32 },
+    UpdateAvailable { current: &'static str, version: String },
     Clipboard { text: String },
     FileSaved { name: String, path: String },
     Error { msg: String },

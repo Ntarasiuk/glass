@@ -29,6 +29,13 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static DROP_FRAMES: AtomicU32 = AtomicU32::new(0);
 /// Corrupt the next frame after its checksum is computed.
 static CORRUPT_NEXT: AtomicBool = AtomicBool::new(false);
+/// Self-update requests, readable at /test/updates.
+static UPDATES: AtomicU32 = AtomicU32::new(0);
+
+pub fn record_update() {
+    UPDATES.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Current adaptive bitrate, readable at /test/bitrate.
 static BITRATE: AtomicU32 = AtomicU32::new(0);
 
@@ -304,6 +311,7 @@ pub fn routes(events: broadcast::Sender<ServerMsg>, downloads: PathBuf) -> axum:
             "/test/drop",
             post(|Query(q): Query<DropQuery>| async move { DROP_FRAMES.store(q.frames, Ordering::Relaxed) }),
         )
+        .route("/test/updates", get(|| async { Json(serde_json::json!({"count": UPDATES.load(Ordering::Relaxed)})) }))
         .route("/test/bitrate", get(|| async { Json(serde_json::json!({"bps": BITRATE.load(Ordering::Relaxed)})) }))
         .route("/test/corrupt", post(|| async { CORRUPT_NEXT.store(true, Ordering::Relaxed) }))
         .route(

@@ -14,8 +14,9 @@ let nextPort = 21000 + (Number(process.env.TEST_PARALLEL_INDEX ?? 0) * 20);
 
 export class Host {
   /** `os`: what the host reports itself as (macos or linux). */
-  constructor({ configDir, os = 'macos' } = {}) {
+  constructor({ configDir, os = 'macos', latest } = {}) {
     this.os = os;
+    this.latest = latest;
     this.dir = mkdtempSync(join(tmpdir(), 'glass-e2e-'));
     this.configDir = configDir ?? join(this.dir, 'config');
     this.http = nextPort++;
@@ -34,7 +35,10 @@ export class Host {
         '--downloads-dir', join(this.dir, 'downloads'),
         '--fps', '30',
       ],
-      { env: { ...process.env, GLASS_CONFIG_DIR: this.configDir, GLASS_TEST_OS: this.os }, stdio: 'ignore' },
+      {
+        env: { ...process.env, GLASS_CONFIG_DIR: this.configDir, GLASS_TEST_OS: this.os, ...(this.latest && { GLASS_TEST_LATEST: this.latest }) },
+        stdio: 'ignore',
+      },
     );
     for (let i = 0; i < 100; i++) {
       try {

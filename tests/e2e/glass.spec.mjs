@@ -2,7 +2,8 @@
 // The host streams a test pattern on two fake 640×360 displays and records input.
 
 import { test, expect } from '@playwright/test';
-import { Host, expectVideo, hudText, pickMenuItem, stats, touch } from './harness.mjs';
+import { execFileSync } from 'node:child_process';
+import { BINARY, Host, expectVideo, hudText, pickMenuItem, stats, touch } from './harness.mjs';
 
 /** One host per test, stopped afterwards. */
 const it = test.extend({
@@ -21,11 +22,52 @@ async function open(page, host, options) {
   await expectVideo(page);
 }
 
+/** Raw sign-in over WebTransport; returns the host's first control message as text. */
+function signIn(page, host, token) {
+  return page.evaluate(
+    async ({ wt, token }) => {
+      const config = await fetch('/config.json').then((r) => r.json());
+      const t = new WebTransport(`https://localhost:${wt}/`, {
+        serverCertificateHashes: [{ algorithm: 'sha-256', value: new Uint8Array(config.certHash) }],
+      });
+      await t.ready;
+      const { readable, writable } = await t.createBidirectionalStream();
+      const body = new TextEncoder().encode(JSON.stringify({ t: 'hello', token }));
+      const frame = new Uint8Array(4 + body.length);
+      new DataView(frame.buffer).setUint32(0, body.length, true);
+      frame.set(body, 4);
+      await writable.getWriter().write(frame);
+      const { value } = await readable.getReader().read();
+      t.close();
+      return new TextDecoder().decode(value.slice(4));
+    },
+    { wt: host.wt, token },
+  );
+}
+
 async function keys(host, type) {
   return (await host.input(type)).events.map((e) => e.keycode);
 }
 
 test.describe('connecting', () => {
+  it('locks out an address after repeated wrong tokens', async ({ page, host }) => {
+    const attempt = (token) => signIn(page, host, token);
+    await page.goto(`${host.base}/config.json`);
+    expect(await attempt(host.token)).toContain('welcome');
+    for (let i = 0; i < 10; i++) expect(await attempt('wrong')).toContain('unauthorized');
+    // Locked out now, even with the right token.
+    expect(await attempt(host.token)).toContain('unauthorized');
+  });
+
+  it('glass token --reset takes effect without a restart', async ({ page, host }) => {
+    await page.goto(`${host.base}/config.json`);
+    const old = host.token;
+    execFileSync(BINARY, ['token', '--reset'], { env: { ...process.env, GLASS_CONFIG_DIR: host.configDir }, stdio: 'pipe' });
+    expect(host.token).not.toBe(old);
+    expect(await signIn(page, host, old)).toContain('unauthorized');
+    expect(await signIn(page, host, host.token)).toContain('welcome');
+  });
+
   it('decodes video with low latency', async ({ page, host }) => {
     await open(page, host);
     await expect.poll(async () => (await stats(page)).fps, { timeout: 10_000 }).toBeGreaterThan(15);
@@ -409,6 +451,26 @@ test.describe('machines', () => {
 });
 
 test.describe('updates', () => {
+  test('offers a newer release and asks the host to install it', async ({ page }) => {
+    const host = await new Host({ latest: '9.9.9' }).start();
+    try {
+      await open(page, host);
+      const toast = page.locator('.toast', { hasText: 'Glass 9.9.9 is available' });
+      await expect(toast).toBeVisible();
+      await toast.locator('button', { hasText: 'Update' }).click();
+      await expect.poll(async () => (await host.get('/test/updates')).count).toBe(1);
+      await expect(page.locator('.toast', { hasText: 'Updating to 9.9.9' })).toBeVisible();
+    } finally {
+      await host.stop();
+    }
+  });
+
+  it('offers nothing when up to date', async ({ page, host }) => {
+    await open(page, host);
+    await page.waitForTimeout(1000);
+    await expect(page.locator('.toast', { hasText: 'is available' })).toHaveCount(0);
+  });
+
   it('reloads into new client code after an update', async ({ page, host }) => {
     await open(page, host);
     const { version } = await host.get('/config.json');
