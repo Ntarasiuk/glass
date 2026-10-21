@@ -62,7 +62,7 @@ This gets the Tailscale HTTPS certificate, installs and starts the background se
 ```json
 {
   "ok": false,
-  "url": "https://studio.tail1234.ts.net:8080/",
+  "url": "https://studio.tail1234.ts.net/",
   "running": true, "capturing": false, "input": false,
   "needs": [
     { "step": "screen-recording", "action": "Allow \"glass\" in System Settings › …", "on_screen": true },
@@ -101,10 +101,10 @@ run '~/.glass/bin/glass status --json'
 Done when `running`, `status.capturing` and `status.accessibility` are all true. Then check it from this machine:
 
 ```sh
-curl -fsS https://<host>:8080/config.json
+curl -fsS https://<host>:8080/config.json   # :8080 always works; the URL from status may have no port
 ```
 
-Finish by telling the user the URL (`https://<host>:8080/`). It also appears in the **Machines** menu of any Glass tab, and devices on their tailnet connect without a token.
+Finish by telling the user the URL from `glass status --json` (usually `https://<host>/`, else `https://<host>:8080/`). It also appears in the **Machines** menu of any Glass tab, and devices on their tailnet connect without a token.
 
 ## Get someone a link
 

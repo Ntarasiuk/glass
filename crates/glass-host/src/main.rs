@@ -45,6 +45,10 @@ struct Args {
     /// Port for the web client (TCP).
     #[arg(long, default_value_t = 8080)]
     http_port: u16,
+    /// Also serve the web client here when it's free, so links need no port (standard
+    /// HTTPS). 0 turns it off. Only with TLS; on Linux `glass setup` uses `tailscale serve`.
+    #[arg(long, default_value_t = 443)]
+    https_port: u16,
     /// Port for WebTransport (UDP).
     #[arg(long, default_value_t = 4433)]
     wt_port: u16,
@@ -348,7 +352,28 @@ async fn run_host(args: Args) -> Result<()> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "localhost".into());
     let scheme = if tls.is_some() { "https" } else { "http" };
-    status::start(Some(format!("{scheme}://{host}:{}/", args.http_port)));
+    // The standard HTTPS port, if we can have it: then URLs carry no port at all.
+    let https_listener = match (&tls, args.https_port) {
+        (Some(_), port) if port != 0 => match std::net::TcpListener::bind(("0.0.0.0", port)) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                info!(
+                    "port {port} unavailable ({e}); links use :{}",
+                    args.http_port
+                );
+                None
+            }
+        },
+        _ => None,
+    };
+    let portless = https_listener.is_some()
+        || (tls.is_some() && tailscale::serves_https_to(args.http_port).await);
+    let url = if portless {
+        format!("{scheme}://{host}/")
+    } else {
+        format!("{scheme}://{host}:{}/", args.http_port)
+    };
+    status::start(Some(url.clone()));
 
     let (video, injector, clipboard, tailnet_owner, _awake): (
         Arc<dyn media::VideoSource>,
@@ -448,11 +473,12 @@ async fn run_host(args: Args) -> Result<()> {
         audio,
         rate: Mutex::new(rate::RateControl::new((args.mbps * 1_000_000) as u32)),
     });
-    info!("open {scheme}://{host}:{}/#t={token}", args.http_port);
+    info!("open {url}#t={token}");
     server::run(
         shared,
         paths.web_dir,
         args.http_port,
+        https_listener,
         args.wt_port,
         args.wt_host,
         tls,

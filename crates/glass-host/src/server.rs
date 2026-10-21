@@ -54,6 +54,7 @@ pub async fn run(
     shared: Arc<Shared>,
     web_dir: PathBuf,
     http_port: u16,
+    https_listener: Option<std::net::TcpListener>,
     wt_port: u16,
     wt_host: Option<String>,
     tls: Option<TlsFiles>,
@@ -118,6 +119,18 @@ pub async fn run(
             Some(t) => {
                 let rustls =
                     axum_server::tls_rustls::RustlsConfig::from_pem_file(&t.cert, &t.key).await?;
+                if let Some(listener) = https_listener {
+                    let port = listener.local_addr()?.port();
+                    listener.set_nonblocking(true)?;
+                    let server = axum_server::from_tcp_rustls(listener, rustls.clone())?;
+                    let app = app.clone();
+                    info!("web client at https://<host>/ (port {port})");
+                    tokio::spawn(async move {
+                        if let Err(e) = server.serve(app.into_make_service()).await {
+                            warn!("port {port}: {e}");
+                        }
+                    });
+                }
                 info!("web client at https://<host>:{http_port}");
                 axum_server::bind_rustls(addr, rustls)
                     .serve(app.into_make_service())

@@ -49,6 +49,42 @@ pub async fn self_login() -> Result<String> {
         .context("no login name for self")
 }
 
+/// Whether `tailscale serve` already forwards HTTPS on 443 to Glass on `port` (how Linux
+/// gets port-less URLs, since binding 443 there needs root).
+pub async fn serves_https_to(port: u16) -> bool {
+    json(&["serve", "status", "--json"])
+        .await
+        .is_ok_and(|v| serve_status_proxies_to(&v, port))
+}
+
+/// Makes `tailscale serve` forward https://<this machine>/ to Glass on `port`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub async fn serve_https_to(port: u16) -> Result<()> {
+    let target = format!("https+insecure://localhost:{port}");
+    let out = tokio::process::Command::new(cli())
+        .args(["serve", "--bg", &target])
+        .output()
+        .await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "tailscale serve: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(())
+}
+
+fn serve_status_proxies_to(status: &Value, port: u16) -> bool {
+    let target = format!("localhost:{port}");
+    status["Web"].as_object().is_some_and(|web| {
+        web.iter().any(|(host, conf)| {
+            host.ends_with(":443")
+                && conf["Handlers"]["/"]["Proxy"]
+                    .as_str()
+                    .is_some_and(|p| p.contains(&target))
+        })
+    })
+}
+
 /// A device on the tailnet that belongs to this Mac's owner.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Machine {
@@ -213,5 +249,16 @@ mod tests {
                 .unwrap()
                 .to_canonical()
         ));
+    }
+
+    #[test]
+    fn reads_serve_status() {
+        let on: Value = serde_json::from_str(
+            r#"{"TCP":{"443":{"HTTPS":true}},"Web":{"box.tail1.ts.net:443":{"Handlers":{"/":{"Proxy":"https+insecure://localhost:8080"}}}}}"#,
+        )
+        .unwrap();
+        assert!(serve_status_proxies_to(&on, 8080));
+        assert!(!serve_status_proxies_to(&on, 9090));
+        assert!(!serve_status_proxies_to(&serde_json::json!({}), 8080));
     }
 }

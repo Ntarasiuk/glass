@@ -74,7 +74,7 @@ The skill drives two commands you can also use in your own scripts:
 ## Connecting
 
 1. Install Tailscale on the iPad (or other device) and sign in with the same account as the Mac.
-2. Open `https://<your-mac>.<your-tailnet>.ts.net:8080` (shown at the end of setup, and by `glass status`).
+2. Open `https://<your-mac>.<your-tailnet>.ts.net` (shown at the end of setup, and by `glass status`). The same address with `:8080` also works.
 3. Optional: in Safari or Chrome, tap **Share → Add to Home Screen**, then launch Glass from its icon. It runs fullscreen with no browser UI, so Safari's own shortcuts (⌘W, ⌘T, ⌘L, ⌘R) reach the Mac instead.
 
 Devices that aren't on your tailnet, or belong to another tailnet user, are asked for the access token (`glass token` shows it; `glass token --set` lets you choose one). A link containing `#t=<token>` signs a browser in once and is then remembered.
@@ -130,7 +130,7 @@ glass uninstall     Stop the background service and remove it from login items
 glass --version
 ```
 
-Host options: `--http-port` (default 8080), `--wt-port` (UDP, default 4433), `--fps` (default 60), `--mbps` (default 30), `--scale`, `--cert`/`--key` (custom TLS), `--token-file`, `--web-dir`, `--log-dir`.
+Host options: `--http-port` (default 8080), `--https-port` (default 443: also serve there when free, so URLs need no port; 0 turns it off), `--wt-port` (UDP, default 4433), `--fps` (default 60), `--mbps` (default 30), `--scale`, `--cert`/`--key` (custom TLS), `--token-file`, `--web-dir`, `--log-dir`.
 
 Files:
 
@@ -159,6 +159,7 @@ The same one-liner installs Glass on Linux x86_64. The Linux host uses:
 - **Screen capture:** xdg-desktop-portal ScreenCast over PipeWire. On Hyprland (Omarchy), the share picker asks once which screen to share; Glass saves a restore token so it doesn't ask again.
 - **Encoding:** software H.264 (OpenH264, screen-content mode). Screens larger than 2560×1600 are halved before encoding, to keep the frame rate up. Hardware VA-API encoding is planned.
 - **Input:** a virtual keyboard and absolute pointer through `/dev/uinput`. `glass setup` installs a one-line udev rule (`/etc/udev/rules.d/60-glass-uinput.rules`) giving the logged-in user access; this needs `sudo` once.
+- **Address:** Linux only lets root listen on port 443, so `glass setup` runs `tailscale serve` to forward `https://<machine>.<tailnet>.ts.net/` to Glass. If that isn't possible, use the `:8080` address.
 - **Clipboard:** `wl-copy` / `wl-paste` (wl-clipboard).
 - **Audio:** the default output's monitor, through PipeWire.
 - **Background service:** a systemd user unit (`~/.config/systemd/user/glass.service`) tied to the graphical session. Logs: `journalctl --user -u glass` and `~/.local/state/glass/`.

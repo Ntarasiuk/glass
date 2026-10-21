@@ -24,6 +24,9 @@ pub async fn run() -> Result<()> {
 
     let tailnet = tailscale_step().await?;
     platform::setup::prepare().await?;
+    if tailnet.is_some() {
+        portless_step().await?;
+    }
     service_step()?;
     let status = wait_for_host()?;
     platform::setup::permissions(status)?;
@@ -130,12 +133,40 @@ fn wait_for_host() -> Result<Status> {
     }
 }
 
+/// Linux can't listen on 443 without root, so Tailscale forwards it to Glass instead and
+/// links need no port. (macOS listens on 443 itself.) Optional: :8080 works regardless.
+#[cfg(target_os = "linux")]
+async fn portless_step() -> Result<()> {
+    if tailscale::serves_https_to(8080).await {
+        return Ok(());
+    }
+    match tailscale::serve_https_to(8080).await {
+        Ok(()) => log::success("Links work without a port number (tailscale serve)")?,
+        Err(e) => log::remark(format!("Links will include :8080 ({e:#})"))?,
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn portless_step() -> Result<()> {
+    Ok(())
+}
+
+/// The address the running host reports (port-less when it has 443), else the :8080 one.
+fn web_url(tailnet_name: &str) -> String {
+    crate::status::read()
+        .filter(|s| s.is_fresh())
+        .and_then(|s| s.url)
+        .filter(|u| u.contains(tailnet_name))
+        .unwrap_or_else(|| format!("https://{tailnet_name}:8080/"))
+}
+
 fn finish(tailnet: Option<String>) -> Result<()> {
     let token = std::fs::read_to_string(crate::default_token_file()).unwrap_or_default();
     let token = token.trim();
     match tailnet {
         Some(name) => {
-            let url = format!("https://{name}:8080/");
+            let url = web_url(&name);
             note(
                 "Connect from your iPad",
                 format!(
@@ -262,6 +293,13 @@ pub async fn run_unattended(json: bool) -> Result<()> {
     };
 
     needs.extend(platform::setup::prepare_unattended());
+    if tailnet.is_some() {
+        #[cfg(target_os = "linux")]
+        if !tailscale::serves_https_to(8080).await {
+            // Optional; without it links just include :8080.
+            let _ = tailscale::serve_https_to(8080).await;
+        }
+    }
     let service = agent::install(true);
     if let Err(e) = &service {
         needs.push(Need {
@@ -301,10 +339,7 @@ pub async fn run_unattended(json: bool) -> Result<()> {
         ok: needs.is_empty(),
         version: env!("CARGO_PKG_VERSION"),
         os: platform::os_version(),
-        url: tailnet
-            .as_ref()
-            .map(|n| format!("https://{n}:8080/"))
-            .or(s.url.clone()),
+        url: tailnet.as_deref().map(web_url).or(s.url.clone()),
         tailnet_name: tailnet,
         running,
         capturing: s.capturing,
