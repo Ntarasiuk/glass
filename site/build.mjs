@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 // Generates the docs in every format from docs.md (the single source), and copies the
 // latest release into public/. Run before `wrangler deploy` (npm run deploy does).
 
@@ -90,9 +91,8 @@ const releases = readdirSync('public/releases');
 const latest = releases.filter((f) => /^glass-latest-.*\.tar\.gz$/.test(f));
 if (!latest.length) console.warn('warning: no release found; run scripts/package.sh first');
 for (const f of latest) {
-  const platform = f.replace(/^glass-latest-/, '').replace(/\.tar\.gz$/, '');
-  const versioned = releases.find((r) => r.endsWith(`-${platform}.tar.gz.sha256`) && !r.startsWith('glass-latest'));
-  const sum = readFileSync(`public/releases/${versioned}`, 'utf8').split(/\s+/)[0];
+  // Hash the file itself: with several versions around, any lookup by name can pick a stale one.
+  const sum = createHash('sha256').update(readFileSync(`public/releases/${f}`)).digest('hex');
   writeFileSync(`public/releases/${f}.sha256`, `${sum}  ${f}\n`);
 }
 
