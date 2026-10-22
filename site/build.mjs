@@ -128,13 +128,17 @@ ${body}
 `,
 );
 
-// The release the home page's SoftwareApplication describes.
-const home = readFileSync('public/index.html', 'utf8');
-writeFileSync('public/index.html', home.replace(/"softwareVersion": "[^"]*"/, `"softwareVersion": "${version}"`));
+// Home page: the release its SoftwareApplication describes, and the stylesheet inlined so
+// first paint needs only the HTML (about 5 KB compressed, one round trip).
+const home = readFileSync('index.html', 'utf8')
+  .replace(/"softwareVersion": "[^"]*"/, `"softwareVersion": "${version}"`)
+  .replace('<link rel="stylesheet" href="/style.css">', () => `<style>\n${readFileSync('public/style.css', 'utf8')}</style>`);
+if (!home.includes('<style>')) throw new Error('index.html: stylesheet link not found');
+writeFileSync('public/index.html', home);
 
 // Sitemap: the HTML pages, each dated by its source's last commit.
 const pages = [
-  ['/', 'public/index.html'],
+  ['/', 'index.html'],
   ['/features', 'public/features/index.html'],
   ['/docs', 'docs.md'],
 ];
@@ -167,7 +171,7 @@ for (const f of latest) {
   writeFileSync(`public/releases/${f}.sha256`, `${sum}  ${f}\n`);
 }
 
-console.log('built: skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, index.md, sitemap.xml, app/, releases/');
+console.log('built: index.html, skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, index.md, sitemap.xml, app/, releases/');
 
 /** YYYY-MM-DD of the last commit touching a file (today when uncommitted). */
 function lastModified(file) {

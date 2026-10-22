@@ -12,7 +12,7 @@ const CLI_AGENT = /^(curl|wget|fetch|httpie|python-requests|go-http-client)\b/i;
 
 // Agent discovery on the home page: Link relations, and a markdown twin for Accept: text/markdown.
 const HOME_LINKS = [
-  '</>; rel="canonical"',
+  '<https://glassdesk.dev/>; rel="canonical"',
   '</index.md>; rel="alternate"; type="text/markdown"',
   '</sitemap.xml>; rel="sitemap"; type="application/xml"',
   '</llms.txt>; rel="describedby"; type="text/plain"',
