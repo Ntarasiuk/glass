@@ -69,6 +69,11 @@ pub fn start(url: Option<String>) {
     });
 }
 
+/// The host's latest status, if it's started (the menu bar reads this).
+pub fn current() -> Option<Status> {
+    CURRENT.lock().unwrap().clone()
+}
+
 pub fn set_capturing(capturing: bool) {
     if let Some(s) = CURRENT.lock().unwrap().as_mut() {
         s.capturing = capturing;
