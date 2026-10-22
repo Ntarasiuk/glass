@@ -10,10 +10,27 @@ const FEEDBACK_PER_HOUR = 5;
 // Command-line fetchers get the install script at the bare domain (`curl glassdesk.dev | sh`).
 const CLI_AGENT = /^(curl|wget|fetch|httpie|python-requests|go-http-client)\b/i;
 
+// Agent discovery on the home page: Link relations, and a markdown twin for Accept: text/markdown.
+const HOME_LINKS = [
+  '</>; rel="canonical"',
+  '</index.md>; rel="alternate"; type="text/markdown"',
+  '</sitemap.xml>; rel="sitemap"; type="application/xml"',
+  '</llms.txt>; rel="describedby"; type="text/plain"',
+  '</docs>; rel="help"',
+].join(', ');
+const HSTS = 'max-age=31536000; includeSubDomains';
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const ua = request.headers.get('user-agent') ?? '';
+
+    // HTTPS only (`curl -fsSL glassdesk.dev` follows the redirect).
+    // CF-Visitor carries the client's scheme at the edge (local dev has none).
+    if (/"scheme":"http"/.test(request.headers.get('cf-visitor') ?? '')) {
+      url.protocol = 'https:';
+      return Response.redirect(url.toString(), 301);
+    }
 
     if (url.pathname === '/api/feedback') {
       if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
@@ -38,8 +55,19 @@ export default {
       ctx.waitUntil(recordDownload(env, request, 'script', 'install.sh'));
       const res = await env.ASSETS.fetch(new URL('/install.sh', url));
       return new Response(res.body, {
-        headers: { 'content-type': 'text/x-shellscript; charset=utf-8', 'cache-control': 'no-store' },
+        headers: { 'content-type': 'text/x-shellscript; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
       });
+    }
+
+    if (url.pathname === '/' && (request.method === 'GET' || request.method === 'HEAD')) {
+      const markdown = /\btext\/markdown\b/i.test(request.headers.get('accept') ?? '');
+      const res = await env.ASSETS.fetch(markdown ? new Request(new URL('/index.md', url), request) : request);
+      const out = new Response(res.body, res);
+      if (markdown) out.headers.set('content-type', 'text/markdown; charset=utf-8');
+      out.headers.append('vary', 'Accept');
+      out.headers.set('link', HOME_LINKS);
+      out.headers.set('strict-transport-security', HSTS);
+      return out;
     }
 
     if (url.pathname.startsWith('/releases/') && url.pathname.endsWith('.tar.gz')) {

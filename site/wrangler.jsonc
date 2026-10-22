@@ -6,6 +6,8 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
+    // /docs and /features (no trailing slash) are the canonical URLs.
+    "html_handling": "drop-trailing-slash",
     // The Worker decides who gets the install script and counts downloads.
     "run_worker_first": ["/", "/install.sh", "/releases/*", "/api/*", "/signal/*"]
   },

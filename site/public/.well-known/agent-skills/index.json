@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+  "skills": [
+    {
+      "name": "glass",
+      "type": "skill-md",
+      "description": "Install and set up Glass on a Mac or Linux machine (on the user's Tailscale tailnet, over SSH), check its status, and make one-time links to control it from any browser.",
+      "url": "https://glassdesk.dev/skill.md"
+    }
+  ]
+}

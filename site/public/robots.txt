@@ -1,4 +1,6 @@
 # Everyone, including AI crawlers, is welcome. Docs for LLMs: /llms.txt and /llms-full.txt
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
+
 User-agent: *
 Allow: /
 Disallow: /api/

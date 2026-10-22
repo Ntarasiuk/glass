@@ -214,23 +214,25 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 
 **Is Glass free?** Yes, and open source under the MIT license: https://github.com/Ntarasiuk/glass
 
-**Do I need to install anything on the iPad?** No, just a browser (and Tailscale for remote access).
+**Do I need to install anything on the iPad?** No, just a browser. Tailscale is optional: a one-time link from `glass link --anywhere` works without it.
 
-**Can I use it without Tailscale?** On the Mac itself (localhost), yes. For other devices, Glass needs an HTTPS certificate the browser trusts; Tailscale provides one automatically. Advanced users can pass their own certificate with `--cert`/`--key`.
+**Can I use it without Tailscale?** Yes. `glass link --anywhere` makes a one-time link that connects any browser directly over WebRTC, end-to-end encrypted, with no open ports. On a tailnet, Glass uses WebTransport with a certificate Tailscale provides; advanced users can pass their own with `--cert`/`--key`.
 
-**How is it different from Chrome Remote Desktop?** Chrome Remote Desktop uses WebRTC's video-call pipeline, which buffers for smoothness. Glass skips that: no jitter buffer, hardware decode straight to canvas, and UDP-style datagrams. Glass also streams multiple displays at once, transfers files, and recovers from iPad tab suspension automatically.
+**How is it different from Chrome Remote Desktop?** Chrome Remote Desktop uses a video-call pipeline tuned for smoothness. Glass is tuned for latency: on a tailnet it skips WebRTC entirely (UDP-style WebTransport datagrams, hardware decode straight to canvas, no jitter buffer), and from anywhere it uses WebRTC with the smallest jitter buffer the browser allows. Glass also streams multiple displays at once, transfers files, and recovers from iPad tab suspension automatically.
 
-**How is it different from Parsec, Moonlight, or Jump Desktop?** Those need a native app on the viewing device. Glass runs in a browser, aims for similar latency, and is built specifically around a Mac host.
+**How is it different from Parsec, Moonlight, or Jump Desktop?** Those need a native app on the viewing device. Glass runs in a browser, aims for similar latency, and is built for Mac and Linux hosts.
 
-**Does it work on Linux?** Yes, as a viewer in any modern browser, and as a host on Wayland (beta). **Windows hosts?** Not yet.
+**Does it work on Linux?** Yes, as a viewer in any modern browser, and as a host on Wayland (beta).
 
-**Does it stream audio?** Yes, Mac system audio, toggled per device.
+**Does it work on Windows?** As a viewer, yes, in any modern browser. Windows can't be the computer you control yet.
+
+**Does it stream audio?** Yes, the host's system audio, toggled per device.
 
 **Can I control a locked Mac?** Yes; type your password at the lock screen. FileVault still requires one local login after a reboot.
 
 ## Feedback
 
 - From the Mac: `glass feedback "what happened or what you'd like"`
-- On the website: https://glassdesk.dev/#feedback
+- On the website: https://glassdesk.dev/features#feedback
 - API: `POST https://glassdesk.dev/api/feedback` with JSON `{ "message": "…", "email": "optional" }`
 - GitHub issues: https://github.com/Ntarasiuk/glass/issues

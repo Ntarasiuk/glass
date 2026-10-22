@@ -61,12 +61,41 @@ test('docs exist in every format and agree', async () => {
   const llms = await (await get('/llms.txt')).text();
   assert.match(llms, /^# Glass\n\n> /);
   assert.match(llms, /llms-full\.txt/);
-  assert.equal((await get('/docs/')).status, 200);
+  // /docs is canonical; the trailing-slash form redirects to it.
+  assert.equal((await get('/docs')).status, 200);
+  assert.match((await get('/docs/')).headers.get('location') ?? '', /\/docs$/);
   const skill = await (await get('/skill.md')).text();
   assert.match(skill, /^---\nname: glass\ndescription: /);
   assert.match(skill, /glass setup --yes --json/);
   const robots = await (await get('/robots.txt')).text();
   for (const bot of ['GPTBot', 'ClaudeBot', 'PerplexityBot']) assert.match(robots, new RegExp(bot));
+  assert.match(robots, /^Content-Signal: /m);
+});
+
+test('search engines and agents find every page, its card and its answers', async () => {
+  const home = await get('/', 'Mozilla/5.0');
+  assert.match(home.headers.get('link') ?? '', /<\/index\.md>; rel="alternate"; type="text\/markdown"/);
+  assert.match(home.headers.get('strict-transport-security') ?? '', /max-age=/);
+  const html = await home.text();
+  assert.match(html, /<meta property="og:image" content="https:\/\/glassdesk\.dev\/og\.png">/);
+  assert.match(html, /"softwareVersion": "\d+\.\d+\.\d+"/);
+  assert.equal((await get('/og.png')).status, 200);
+
+  const md = await fetch(`${BASE}/`, { headers: { accept: 'text/markdown' } });
+  assert.match(md.headers.get('content-type') ?? '', /text\/markdown/);
+  assert.match(await md.text(), /^# Glass\n/);
+
+  const sitemap = await (await get('/sitemap.xml')).text();
+  for (const path of ['/', '/features', '/docs']) assert.match(sitemap, new RegExp(`<loc>https://glassdesk\\.dev${path}</loc><lastmod>\\d{4}-\\d{2}-\\d{2}</lastmod>`));
+
+  const docs = await (await get('/docs')).text();
+  const ld = JSON.parse(/<script type="application\/ld\+json">(.*?)<\/script>/s.exec(docs)[1]);
+  const faq = ld['@graph'].find((n) => n['@type'] === 'FAQPage');
+  assert.ok(faq.mainEntity.length >= 5);
+  assert.ok(faq.mainEntity.every((q) => q.name.endsWith('?') && q.acceptedAnswer.text.length > 10));
+
+  const skills = await (await get('/.well-known/agent-skills/index.json')).json();
+  assert.equal(skills.skills[0].url, 'https://glassdesk.dev/skill.md');
 });
 
 const hasReleases = existsSync(join(SITE, 'public/releases/glass-latest-darwin-universal.tar.gz'));

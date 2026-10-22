@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 // Generates the docs in every format from docs.md (the single source), and copies the
 // latest release into public/. Run before `wrangler deploy` (npm run deploy does).
@@ -43,8 +44,41 @@ Install on the computer to be controlled: \`curl -fsSL glassdesk.dev | sh\` (mac
 `,
 );
 
+// The home page's markdown twin, for agents asking / for text/markdown (src/index.js).
+writeFileSync('public/index.md', readFileSync('public/llms.txt', 'utf8'));
+
+// FAQ answers as schema.org Questions (AI answers quote them; no Google rich result since 2026-05).
+const faqSection = docs.split(/^## FAQ\n/m)[1]?.split(/^## /m)[0] ?? '';
+const faq = [...faqSection.matchAll(/\*\*(.+?\?)\*\* (.+?)(?= \*\*|$)/gm)].map(([, q, a]) => ({
+  '@type': 'Question',
+  name: q,
+  acceptedAnswer: { '@type': 'Answer', text: a.replace(/`/g, '').trim() },
+}));
+if (faq.length < 5) throw new Error(`docs FAQ: parsed only ${faq.length} questions`);
+
 // HTML docs page.
-const title = 'Glass documentation';
+const title = 'Glass documentation: install, setup and remote access';
+const docsDescription =
+  'How to install and set up Glass, connect from an iPad or any browser, reach your computer from anywhere, and fix problems. CLI reference and FAQ.';
+const docsLd = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'TechArticle',
+      '@id': `${SITE}/docs#article`,
+      url: `${SITE}/docs`,
+      headline: title,
+      description: docsDescription,
+      about: { '@id': `${SITE}/#software` },
+      author: { '@id': `${SITE}/#author` },
+      isPartOf: { '@id': `${SITE}/#website` },
+      dateModified: lastModified('docs.md'),
+      inLanguage: 'en',
+    },
+    { '@type': 'FAQPage', '@id': `${SITE}/docs#faq`, url: `${SITE}/docs#faq`, mainEntity: faq },
+  ],
+};
+const ogImageAlt = 'Glass: your computer, in any browser. About 20 ms from your Mac or Linux screen to an iPad, phone or laptop.';
 const body = marked.parse(docs.replace(/^# Glass\n/, '# Glass documentation\n'));
 mkdirSync('public/docs', { recursive: true });
 writeFileSync(
@@ -55,20 +89,33 @@ writeFileSync(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${title}</title>
-  <meta name="description" content="${summary.replace(/"/g, '&quot;')}">
+  <meta name="description" content="${docsDescription}">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <link rel="canonical" href="${SITE}/docs">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Glass">
+  <meta property="og:url" content="${SITE}/docs">
+  <meta property="og:title" content="${title}">
+  <meta property="og:description" content="${docsDescription}">
+  <meta property="og:image" content="${SITE}/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="${ogImageAlt}">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="${SITE}/og.png">
+  <meta name="twitter:image:alt" content="${ogImageAlt}">
+  <script type="application/ld+json">${JSON.stringify(docsLd).replace(/</g, '\\u003c')}</script>
   <link rel="alternate" type="text/markdown" href="/docs.md">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+  <link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/hanken-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <div class="wrap">
     <header class="site">
       <a class="brand" href="/"><img src="/icon.svg" alt="" width="26" height="26">Glass</a>
-      <nav class="site" aria-label="Main"><a href="/">Home</a><a href="/docs.md">Markdown</a><a href="/llms.txt">llms.txt</a></nav>
+      <nav class="site" aria-label="Main"><a href="/">Home</a><a href="/features">Features</a><a href="/docs.md">Markdown</a><a href="/llms.txt">llms.txt</a></nav>
     </header>
     <main class="doc">
 ${body}
@@ -77,6 +124,25 @@ ${body}
   </div>
 </body>
 </html>
+`,
+);
+
+// The release the home page's SoftwareApplication describes.
+const home = readFileSync('public/index.html', 'utf8');
+writeFileSync('public/index.html', home.replace(/"softwareVersion": "[^"]*"/, `"softwareVersion": "${version}"`));
+
+// Sitemap: the HTML pages, each dated by its source's last commit.
+const pages = [
+  ['/', 'public/index.html'],
+  ['/features', 'public/features/index.html'],
+  ['/docs', 'docs.md'],
+];
+writeFileSync(
+  'public/sitemap.xml',
+  `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${pages.map(([path, src]) => `  <url><loc>${SITE}${path}</loc><lastmod>${lastModified(src)}</lastmod></url>`).join('\n')}
+</urlset>
 `,
 );
 
@@ -100,4 +166,14 @@ for (const f of latest) {
   writeFileSync(`public/releases/${f}.sha256`, `${sum}  ${f}\n`);
 }
 
-console.log('built: skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, app/, releases/');
+console.log('built: skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, index.md, sitemap.xml, app/, releases/');
+
+/** YYYY-MM-DD of the last commit touching a file (today when uncommitted). */
+function lastModified(file) {
+  try {
+    const date = execFileSync('git', ['log', '-1', '--format=%cs', '--', file], { encoding: 'utf8' }).trim();
+    const dirty = execFileSync('git', ['status', '--porcelain', '--', file], { encoding: 'utf8' }).trim();
+    if (date && !dirty) return date;
+  } catch {}
+  return new Date().toISOString().slice(0, 10);
+}

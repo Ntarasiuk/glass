@@ -3,52 +3,118 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Glass: a remote desktop that feels local</title>
-  <meta name="description" content="Control your Mac or Linux computer from an iPad or any browser with about 20 ms of latency, on your Tailscale network or from anywhere with a one-time link. Free and open source. One-line install, multiple displays, audio, clipboard and files, end-to-end encrypted.">
+  <title>Glass: a low-latency remote desktop for Mac and Linux</title>
+  <meta name="description" content="Control your Mac or Linux computer from an iPad or any browser with about 20 ms of delay. Free, open source, end-to-end encrypted, one-line install.">
   <link rel="canonical" href="https://glassdesk.dev/">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-512.png">
   <link rel="alternate" type="text/markdown" href="/docs.md" title="Glass documentation (Markdown)">
   <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Glass">
   <meta property="og:url" content="https://glassdesk.dev/">
   <meta property="og:title" content="Glass: your computer, in any browser">
   <meta property="og:description" content="A remote desktop that feels local: about 20 ms from your Mac or Linux screen to your iPad, at home or from anywhere. Free, open source, one-line install.">
-  <meta name="twitter:card" content="summary">
+  <meta property="og:image" content="https://glassdesk.dev/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Glass: your computer, in any browser. About 20 ms from your Mac or Linux screen to an iPad, phone or laptop.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Glass: your computer, in any browser">
+  <meta name="twitter:description" content="A remote desktop that feels local: about 20 ms from your Mac or Linux screen to your iPad, at home or from anywhere. Free, open source, one-line install.">
+  <meta name="twitter:image" content="https://glassdesk.dev/og.png">
+  <meta name="twitter:image:alt" content="Glass: your computer, in any browser. About 20 ms from your Mac or Linux screen to an iPad, phone or laptop.">
   <meta name="theme-color" content="#07080a">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/hanken-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/style.css">
   <script type="application/ld+json">
-  {
-    "@context": "https://schema.org",
-    "@type": "SoftwareApplication",
-    "name": "Glass",
-    "url": "https://glassdesk.dev/",
-    "description": "Low-latency remote desktop for macOS and Linux. Install with one command, then see and control the computer from a browser on an iPad, iPhone or another computer, with 15–30 ms latency.",
-    "applicationCategory": "UtilitiesApplication",
-    "operatingSystem": "macOS 13 or later, or Linux on Wayland (host); any browser with WebTransport and WebCodecs (viewer)",
-    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-    "license": "https://opensource.org/licenses/MIT",
-    "codeRepository": "https://github.com/Ntarasiuk/glass",
-    "installUrl": "https://glassdesk.dev/install.sh",
-    "downloadUrl": "https://glassdesk.dev/releases/glass-latest-darwin-universal.tar.gz",
-    "softwareHelp": { "@type": "CreativeWork", "url": "https://glassdesk.dev/docs" },
-    "featureList": [
-      "15–30 ms capture-to-display latency",
-      "Browser viewer: no app on the iPad",
-      "Mouse, keyboard, touch and pinch-to-zoom",
-      "Unlock a locked Mac remotely",
-      "Multiple displays, side by side",
-      "Switch between your machines",
-      "System audio, clipboard sync and file transfer",
-      "Adapts to bad networks",
-      "Secure access over Tailscale",
-      "Remote access from anywhere over WebRTC: direct, end-to-end encrypted, no open ports",
-      "One-time access links with per-device passes",
-      "Set up by an AI agent over SSH"
-    ]
-  }
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://glassdesk.dev/#website",
+      "url": "https://glassdesk.dev/",
+      "name": "Glass",
+      "description": "Control your Mac or Linux computer from an iPad or any browser with about 20 ms of delay. Free, open source, end-to-end encrypted, one-line install.",
+      "publisher": {
+        "@id": "https://glassdesk.dev/#author"
+      },
+      "inLanguage": "en"
+    },
+    {
+      "@type": "WebPage",
+      "@id": "https://glassdesk.dev/#webpage",
+      "url": "https://glassdesk.dev/",
+      "name": "Glass: a low-latency remote desktop for Mac and Linux",
+      "isPartOf": {
+        "@id": "https://glassdesk.dev/#website"
+      },
+      "about": {
+        "@id": "https://glassdesk.dev/#software"
+      },
+      "primaryImageOfPage": {
+        "@type": "ImageObject",
+        "url": "https://glassdesk.dev/og.png",
+        "width": 1200,
+        "height": 630
+      },
+      "inLanguage": "en"
+    },
+    {
+      "@type": "Person",
+      "@id": "https://glassdesk.dev/#author",
+      "name": "Nathan Tarasiuk",
+      "url": "https://github.com/Ntarasiuk",
+      "sameAs": [
+        "https://github.com/Ntarasiuk"
+      ]
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://glassdesk.dev/#software",
+      "name": "Glass",
+      "url": "https://glassdesk.dev/",
+      "description": "Low-latency remote desktop for macOS and Linux. Install with one command, then see and control the computer from a browser on an iPad, iPhone or another computer, with 15–30 ms latency.",
+      "applicationCategory": "UtilitiesApplication",
+      "operatingSystem": "macOS 13 or later, or Linux on Wayland (host); any browser with WebTransport and WebCodecs (viewer)",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "license": "https://opensource.org/licenses/MIT",
+      "codeRepository": "https://github.com/Ntarasiuk/glass",
+      "installUrl": "https://glassdesk.dev/install.sh",
+      "downloadUrl": "https://glassdesk.dev/releases/glass-latest-darwin-universal.tar.gz",
+      "softwareHelp": {
+        "@type": "CreativeWork",
+        "url": "https://glassdesk.dev/docs"
+      },
+      "featureList": [
+        "15–30 ms capture-to-display latency",
+        "Browser viewer: no app on the iPad",
+        "Mouse, keyboard, touch and pinch-to-zoom",
+        "Unlock a locked Mac remotely",
+        "Multiple displays, side by side",
+        "Switch between your machines",
+        "System audio, clipboard sync and file transfer",
+        "Adapts to bad networks",
+        "Secure access over Tailscale",
+        "Remote access from anywhere over WebRTC: direct, end-to-end encrypted, no open ports",
+        "One-time access links with per-device passes",
+        "Set up by an AI agent over SSH"
+      ],
+      "author": {
+        "@id": "https://glassdesk.dev/#author"
+      },
+      "image": "https://glassdesk.dev/og.png",
+      "softwareVersion": "0.3.2"
+    }
+  ]
+}
   </script>
 </head>
 <body>
