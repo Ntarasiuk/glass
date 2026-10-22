@@ -39,6 +39,13 @@ const MACHINE_CONNECT_TIMEOUT_MS = 12_000;
 // Default to PC keyboard conventions on Linux, Windows and ChromeOS clients.
 const isPC = /Linux|Windows|CrOS/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
 const pcKeyboard = (storage((s) => s.getItem(PC_KEYBOARD_KEY)) ?? (isPC ? '1' : '0')) === '1';
+// Phones and iPads freeze hidden pages and have few hardware decoders, so a hidden tab
+// gives its decoders up at once (iPadOS reports itself as a Mac with a touchscreen).
+const mobile = /iPhone|iPad|Android/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+// Desktop browsers also call a window hidden whenever another one covers it (every Alt+Tab
+// to a maximized app on Windows). Keep streaming that long, so switching back is instant
+// instead of waiting for a keyframe and a new decoder.
+const PAUSE_HIDDEN_AFTER_MS = 60_000;
 const ctrlAsCmd = storage((s) => s.getItem(CTRL_AS_CMD_KEY)) !== '0'; // on by default
 
 const screens = document.getElementById('screens');
@@ -818,12 +825,19 @@ async function toggleFullscreen() {
 }
 
 // iPadOS suspends background tabs; reconnect as soon as we're back.
+let pauseTimer;
 document.addEventListener('visibilitychange', () => {
   log('info', `visibility: ${document.visibilityState}`);
-  worker.postMessage({ type: 'visible', visible: document.visibilityState === 'visible' });
+  clearTimeout(pauseTimer);
   if (document.visibilityState === 'visible') {
+    worker.postMessage({ type: 'visible', visible: true });
     worker.postMessage({ type: 'wake' });
     reloadIfUpdated('visible');
+    return;
   }
+  const pause = () => worker.postMessage({ type: 'visible', visible: false });
+  // Synchronously on mobile: the page may be frozen before a timer could run.
+  if (mobile) pause();
+  else pauseTimer = setTimeout(pause, PAUSE_HIDDEN_AFTER_MS);
 });
 addEventListener('online', () => worker.postMessage({ type: 'wake' }));
