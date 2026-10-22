@@ -84,6 +84,9 @@ test('search engines and agents find every page, its card and its answers', asyn
   const md = await fetch(`${BASE}/`, { headers: { accept: 'text/markdown' } });
   assert.match(md.headers.get('content-type') ?? '', /text\/markdown/);
   assert.match(await md.text(), /^# Glass\n/);
+  // An agent using curl still gets markdown when it asks for it; `curl … | sh` gets the script.
+  const curlMd = await fetch(`${BASE}/`, { headers: { accept: 'text/markdown', 'user-agent': 'curl/8.7.1' } });
+  assert.match(await curlMd.text(), /^# Glass\n/);
 
   const sitemap = await (await get('/sitemap.xml')).text();
   for (const path of ['/', '/features', '/docs']) assert.match(sitemap, new RegExp(`<loc>https://glassdesk\\.dev${path}</loc><lastmod>\\d{4}-\\d{2}-\\d{2}</lastmod>`));

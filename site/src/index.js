@@ -50,7 +50,9 @@ export default {
       return env.INTRODUCER.get(env.INTRODUCER.idFromName(id)).fetch(new Request(target, { headers }));
     }
 
-    const wantsScript = url.pathname === '/install.sh' || (url.pathname === '/' && CLI_AGENT.test(ua));
+    // An agent asking for markdown gets the page's markdown twin, even from curl; `curl … | sh` never asks.
+    const wantsMarkdown = /\btext\/markdown\b/i.test(request.headers.get('accept') ?? '');
+    const wantsScript = url.pathname === '/install.sh' || (url.pathname === '/' && CLI_AGENT.test(ua) && !wantsMarkdown);
     if (wantsScript) {
       ctx.waitUntil(recordDownload(env, request, 'script', 'install.sh'));
       const res = await env.ASSETS.fetch(new URL('/install.sh', url));
@@ -60,10 +62,9 @@ export default {
     }
 
     if (url.pathname === '/' && (request.method === 'GET' || request.method === 'HEAD')) {
-      const markdown = /\btext\/markdown\b/i.test(request.headers.get('accept') ?? '');
-      const res = await env.ASSETS.fetch(markdown ? new Request(new URL('/index.md', url), request) : request);
+      const res = await env.ASSETS.fetch(wantsMarkdown ? new Request(new URL('/index.md', url), request) : request);
       const out = new Response(res.body, res);
-      if (markdown) out.headers.set('content-type', 'text/markdown; charset=utf-8');
+      if (wantsMarkdown) out.headers.set('content-type', 'text/markdown; charset=utf-8');
       out.headers.append('vary', 'Accept');
       out.headers.set('link', HOME_LINKS);
       out.headers.set('strict-transport-security', HSTS);
