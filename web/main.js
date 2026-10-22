@@ -673,7 +673,6 @@ function showStreams(count) {
   worker.postMessage({ type: 'streams', count });
 }
 showStreams(1);
-if (document.visibilityState !== 'visible') worker.postMessage({ type: 'visible', visible: false });
 
 const videoSizes = [];
 let status = 'connecting…';
@@ -1455,12 +1454,48 @@ async function toggleFullscreen() {
   await navigator.keyboard?.lock?.().catch(() => {});
 }
 
-// iPadOS suspends background tabs; reconnect as soon as we're back.
+// A page can be reported hidden while it is on screen and in use: Edge on Windows did, for
+// minutes at a time (its window-occlusion check misfires, e.g. under an always-on-top
+// overlay), which froze the picture while clicks still reached the Mac. Input only reaches a
+// page that's on screen, so it counts: a hidden page pauses only after going
+// PAUSE_HIDDEN_AFTER_MS without input, and input resumes a paused one (on mobile too, which
+// then waits like a desktop page: it was evidently on screen).
 let pauseTimer;
+let hiddenAt = 0;
+let lastInputAt = -Infinity;
+let pausedHidden = false;
+
+function pause() {
+  pausedHidden = true;
+  worker.postMessage({ type: 'visible', visible: false });
+}
+
+/** Pauses a hidden page once it has gone PAUSE_HIDDEN_AFTER_MS unused. */
+function pauseWhenIdle() {
+  clearTimeout(pauseTimer);
+  const wait = Math.max(hiddenAt, lastInputAt) + PAUSE_HIDDEN_AFTER_MS - performance.now();
+  if (wait > 0) pauseTimer = setTimeout(pauseWhenIdle, wait);
+  else pause();
+}
+
+for (const type of ['pointerdown', 'pointermove', 'keydown', 'wheel']) {
+  addEventListener(type, () => {
+    lastInputAt = performance.now();
+    if (!pausedHidden) return;
+    pausedHidden = false;
+    log('info', 'input while reported hidden: video resumed');
+    worker.postMessage({ type: 'visible', visible: true });
+    worker.postMessage({ type: 'wake' });
+    if (document.visibilityState === 'hidden') pauseWhenIdle();
+  }, { capture: true, passive: true });
+}
+
+// iPadOS suspends background tabs; reconnect as soon as we're back.
 document.addEventListener('visibilitychange', () => {
   log('info', `visibility: ${document.visibilityState}`);
   clearTimeout(pauseTimer);
   if (document.visibilityState === 'visible') {
+    pausedHidden = false;
     worker.postMessage({ type: 'visible', visible: !padOn });
     worker.postMessage({ type: 'wake' });
     reloadIfUpdated('visible');
@@ -1468,18 +1503,24 @@ document.addEventListener('visibilitychange', () => {
   }
   // Floating in picture in picture: still on screen, so keep the video going.
   if (floating()) return;
-  const pause = () => worker.postMessage({ type: 'visible', visible: false });
-  // Synchronously on mobile: the page may be frozen before a timer could run.
-  if (mobile) pause();
-  else pauseTimer = setTimeout(pause, PAUSE_HIDDEN_AFTER_MS);
+  onHidden();
 });
 function floating() {
   return Boolean(document.pictureInPictureElement || window.documentPictureInPicture?.window);
 }
 // Back from picture in picture with the page still hidden: pause now.
 document.addEventListener('leavepictureinpicture', () => {
-  if (document.visibilityState === 'hidden') worker.postMessage({ type: 'visible', visible: false });
+  if (document.visibilityState === 'hidden') pause();
 }, true);
+
+function onHidden() {
+  hiddenAt = performance.now();
+  // Synchronously on mobile: the page may be frozen before a timer could run.
+  if (mobile) pause();
+  else pauseWhenIdle();
+}
+// Opened in a background tab, or reloaded while reported hidden.
+if (document.visibilityState !== 'visible') onHidden();
 addEventListener('online', () => worker.postMessage({ type: 'wake' }));
 // Leaving (a reload included): end the session now. Safari can keep a dead page's
 // connection open otherwise, and the host would list this device twice.
