@@ -19,7 +19,7 @@ use objc2_core_video::CVImageBuffer;
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
-    SCStreamOutput, SCStreamOutputType, SCWindow,
+    SCStreamDelegate, SCStreamErrorCode, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 
 use super::audio::Packetizer;
@@ -55,6 +55,8 @@ pub struct FrameState {
     refreshes: std::sync::atomic::AtomicU32,
     tiny: std::sync::atomic::AtomicU32,
     queue: dispatch2::DispatchRetained<DispatchQueue>,
+    /// ScreenCaptureKit ended the stream (e.g. its display slept); it won't resume by itself.
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 /// A still screen is re-encoded this often for a while, so it sharpens to near-lossless
@@ -184,6 +186,27 @@ define_class!(
             state.schedule_idle_check();
         }
     }
+
+    unsafe impl SCStreamDelegate for StreamOutput {
+        #[unsafe(method(stream:didStopWithError:))]
+        unsafe fn stream_did_stop(&self, _stream: &SCStream, error: &NSError) {
+            let ivars = self.ivars();
+            // Stopped from this Mac's screen-recording indicator: leave it stopped.
+            if error.code() == SCStreamErrorCode::UserStopped.0 {
+                tracing::info!("display {}: capture stopped from this Mac", ivars.display);
+                return;
+            }
+            tracing::warn!(
+                "display {}: capture stopped: {}",
+                ivars.display,
+                error.localizedDescription()
+            );
+            ivars
+                .state
+                .stopped
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 );
 
 impl StreamOutput {
@@ -273,6 +296,13 @@ impl Capture {
         };
         let (width, height, bgra) = copy_bgra(&image)?;
         Some(crate::lossless::RawFrame { width, height, bgra, capture_us })
+    }
+
+    /// ScreenCaptureKit ended this stream; only a new one brings frames back.
+    pub fn stopped(&self) -> bool {
+        self.state
+            .stopped
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -571,9 +601,6 @@ pub fn start(
         config.setChannelCount(2);
     }
 
-    let stream = unsafe {
-        SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &config, None)
-    };
     let queue = DispatchQueue::new("glass.capture", DispatchQueueAttr::SERIAL);
     let state = Arc::new(FrameState {
         encoder,
@@ -585,8 +612,18 @@ pub fn start(
         refreshes: Default::default(),
         tiny: Default::default(),
         queue: queue.clone(),
+        stopped: Default::default(),
     });
     let output = StreamOutput::new(state.clone(), audio, source_id);
+    // The output is also the delegate, to hear when ScreenCaptureKit ends the stream.
+    let stream = unsafe {
+        SCStream::initWithFilter_configuration_delegate(
+            SCStream::alloc(),
+            &filter,
+            &config,
+            Some(ProtocolObject::from_ref(&*output)),
+        )
+    };
     // Separate queue so audio never waits behind a frame being encoded.
     let audio_queue = DispatchQueue::new("glass.audio", DispatchQueueAttr::SERIAL);
     unsafe {
