@@ -512,7 +512,7 @@
     <form class="glass" novalidate>
       <svg class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
       <h1>Sign in to this computer</h1>
-      <p>This device isn't on the same Tailscale account, so it needs the access token. On the host, run <code>glass token</code>.</p>
+      <p>This device isn't on the same Tailscale account as this computer. Ask its owner to run <code>glass link</code> on it and send you the link, or to give you the token from <code>glass token</code>.</p>
       <p id="auth-error" class="error hidden" role="alert">That token didn't work. Check it and try again.</p>
       <input name="token" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Access token" aria-label="Access token" required>
       <button type="submit">Connect</button>

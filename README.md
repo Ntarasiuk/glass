@@ -97,6 +97,7 @@ Run it again any time to update. Prefer to read it first? [install.sh](site/publ
 ```sh
 glass setup              # guided setup: Tailscale, background service, permissions, QR code
 glass status             # running? capturing? permissions? connect URL
+glass restart            # restart the background service
 glass link               # one-time link + QR code for another device
 glass link --anywhere    # the same, from any network (WebRTC, end-to-end encrypted)
 glass link --view-only --no-files --for 1h   # limited access

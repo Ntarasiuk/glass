@@ -156,6 +156,8 @@ enum Command {
         #[arg(long)]
         token_file: Option<PathBuf>,
     },
+    /// Restart the background service (viewers reconnect by themselves).
+    Restart,
     /// Stop the background service and remove it from login items.
     Uninstall,
     /// Install the latest release (and restart the service onto it).
@@ -475,6 +477,25 @@ fn decide_cli(id: Option<u64>, allow: bool) -> Result<()> {
     Ok(())
 }
 
+/// `glass restart`: restarts the service and waits until it's back.
+fn restart_service() -> Result<()> {
+    anyhow::ensure!(agent::is_installed(), "Glass isn't installed as a background service; run `glass setup`");
+    let before = status::read().map(|s| s.pid);
+    agent::restart()?;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(20) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if let Some(s) = status::read()
+            && Some(s.pid) != before
+            && s.is_fresh()
+        {
+            println!("Glass restarted (pid {}). Viewers reconnect by themselves.", s.pid);
+            return Ok(());
+        }
+    }
+    anyhow::bail!("Glass hasn't come back yet; check `glass status` and the logs")
+}
+
 /// `glass remote on|off|status`.
 fn remote_cli(action: &str) -> Result<()> {
     match action {
@@ -709,6 +730,7 @@ async fn async_main(args: Args) -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Restart) => restart_service(),
         Some(Command::Uninstall) => {
             agent::uninstall()?;
             println!(

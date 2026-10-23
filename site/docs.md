@@ -257,6 +257,7 @@ glass token --reset Replace it with a new random token
 glass token --set   Choose your own token (prompted; or piped: echo … | glass token --set)
 glass mcp [--machine NAME]   MCP server letting an AI agent use this computer (or NAME on your tailnet)
 glass feedback "…"  Send feedback to the developers
+glass restart       Restart the background service (viewers reconnect by themselves)
 glass uninstall     Stop the background service and remove it from login items
 glass --version
 ```
@@ -335,6 +336,8 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 ## Troubleshooting
 
 - **"Glass isn't running":** run `glass status`, then check `~/Library/Logs/Glass/agent.log` and `host.log`.
+- **Restarting Glass:** `glass restart` on the computer, or **Computer › Restart Glass** in the viewer. After turning on HTTPS Certificates for your tailnet (or moving the computer to another tailnet), run `glass setup` instead: it fetches the new certificate and restarts the service.
+- **Asked for a token on someone else's computer:** Glass lets in only devices signed into Tailscale as the computer's owner. Ask them to run `glass link` and send you the link (or give you the token from `glass token`).
 - **Black screen after connecting:** Glass sends the current frame on connect; if it persists, check Screen Recording permission (`glass status`) and re-run `glass setup`.
 - **Mouse and keyboard don't work:** Accessibility permission is missing. Re-run `glass setup` or enable Glass under System Settings → Privacy & Security → Accessibility.
 - **After updating, permissions are asked again:** releases are signed with the same identity, so macOS keeps Screen Recording and Accessibility across updates. Glass you built yourself, or a copy you run from a terminal, is a different app to macOS and needs its own grant. Re-run `glass setup` to grant it.
