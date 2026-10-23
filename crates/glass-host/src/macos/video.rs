@@ -78,6 +78,8 @@ pub struct Video {
     hevc: AtomicBool,
     /// HEVC 4:2:2 for sharp text (crate::sharp decides; only while HEVC is on).
     rext: AtomicBool,
+    /// Capture in BGRA for lossless refreshes (sharp text).
+    full_colour: AtomicBool,
 }
 
 impl Video {
@@ -97,6 +99,7 @@ impl Video {
             target_widths: Mutex::new(Vec::new()),
             hevc: AtomicBool::new(false),
             rext: AtomicBool::new(false),
+            full_colour: AtomicBool::new(false),
         }
     }
 
@@ -227,6 +230,7 @@ impl Video {
             encoder.clone(),
             fps.clone(),
             audio,
+            self.full_colour.load(Ordering::Relaxed),
         )?;
         let id = info.id;
         let window = matches!(target, Target::Window(_));
@@ -329,6 +333,24 @@ impl VideoSource for Video {
     }
     fn supports_rext(&self) -> bool {
         super::encode::supports_rext()
+    }
+    fn supports_lossless(&self) -> bool {
+        true
+    }
+    /// BGRA capture, so a still screen can go out losslessly (VideoToolbox converts).
+    fn set_full_colour(&self, on: bool) {
+        if self.full_colour.swap(on, Ordering::Relaxed) != on {
+            self.restart_all("full colour");
+            info!("capture colour: {}", if on { "BGRA (lossless refresh)" } else { "4:2:0" });
+        }
+    }
+    fn frame_generation(&self, stream: u8) -> Option<u64> {
+        let streams = self.streams.lock().unwrap();
+        streams.get(stream as usize).map(|s| s.capture.generation())
+    }
+    fn raw_frame(&self, stream: u8) -> Option<Arc<crate::lossless::RawFrame>> {
+        let streams = self.streams.lock().unwrap();
+        streams.get(stream as usize)?.capture.read_bgra().map(Arc::new)
     }
     /// Sharp text: HEVC 4:2:2 instead of 4:2:0 (applies while HEVC is on).
     fn set_rext(&self, on: bool) -> bool {

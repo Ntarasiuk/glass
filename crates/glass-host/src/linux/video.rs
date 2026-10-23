@@ -361,6 +361,7 @@ fn encode_loop(
                     keyframe,
                     capture_us,
                     hevc: false,
+                    refresh: false,
                 }));
             }
             Ok(None) => {}

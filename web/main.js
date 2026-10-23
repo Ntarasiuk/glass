@@ -754,7 +754,7 @@ function renderHud(d) {
   latency.className = latencyClass(d.latencyAvg);
   latency.textContent = `${d.latencyAvg.toFixed(1)} ms`;
   const lines = [
-    hudLine(host, `  ${status}  ${codec}${sharpMode === 'off' ? '' : ` · ${sharpMode}`}  ${videoSizes.filter(Boolean).join(' + ')}`),
+    hudLine(host, `  ${status}  ${codec}${sharpMode === 'off' ? '' : ` · ${d.holding ? '4:4:4' : sharpMode}`}  ${videoSizes.filter(Boolean).join(' + ')}`),
     hudLine('latency ', latency, ` (max ${d.latencyMax.toFixed(1)})  rtt ${d.rtt.toFixed(1)} ms`),
     hudLine(
       `${d.fps} fps  ${d.mbps.toFixed(1)} Mbps` + (targetMbps ? ` (target ${targetMbps.toFixed(0)})` : '') + `  dropped ${d.dropped}`,

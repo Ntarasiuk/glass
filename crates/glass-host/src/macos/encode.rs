@@ -257,7 +257,8 @@ impl Encoder {
         self.force_keyframe.load(Ordering::Relaxed)
     }
 
-    pub fn encode(&self, image: &CVImageBuffer, pts: CMTime, capture_us: u64) {
+    /// `refresh`: the picture is unchanged since the last encode (see FLAG_REFRESH).
+    pub fn encode(&self, image: &CVImageBuffer, pts: CMTime, capture_us: u64, refresh: bool) {
         let keyframe = self.force_keyframe.swap(false, Ordering::Relaxed);
         // Keyframes go uncapped: capping them makes them bigger, not sharper (measured
         // 661 → 981 KB), which stalls a slow link. The cap returns on the next frame.
@@ -299,6 +300,7 @@ impl Encoder {
                     last_size.store(frame.data.len() as u64, Ordering::Relaxed);
                     on_frame(EncodedFrame {
                         capture_us,
+                        refresh,
                         ..frame
                     });
                 }
@@ -430,6 +432,7 @@ unsafe fn annex_b(sample: &CMSampleBuffer, hevc: bool) -> Option<EncodedFrame> {
         keyframe,
         capture_us: 0,
         hevc,
+        refresh: false,
     })
 }
 

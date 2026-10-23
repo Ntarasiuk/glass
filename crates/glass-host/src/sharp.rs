@@ -74,6 +74,16 @@ pub fn set(session: u64, on: bool) {
     recompute();
 }
 
+/// This session has sharp text on.
+pub fn session_on(session: u64) -> bool {
+    VIEWERS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&session))
+        .is_some_and(|v| v.on)
+}
+
 /// Re-decides after a change (viewers, their choice, or the codec).
 pub fn recompute() {
     let viewers: Vec<(bool, bool)> = VIEWERS
@@ -107,6 +117,8 @@ pub fn recompute() {
     );
     // Restarting encoders blocks on ScreenCaptureKit; the policy change is immediate.
     std::thread::spawn(move || {
+        // Full-colour capture, so a still screen can also go out losslessly (4:4:4).
+        shared.video.set_full_colour(sharp);
         let used = shared.video.set_rext(rext);
         REXT.store(used, Ordering::Relaxed);
         crate::server::reapply_policy();

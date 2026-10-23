@@ -43,6 +43,9 @@ pub fn audio_packet(seq: u32, capture_us: u64, channels: u8, pcm: &[i16]) -> Vec
 pub const FLAG_KEYFRAME: u8 = 1;
 /// The frame is HEVC rather than H.264.
 pub const FLAG_HEVC: u8 = 2;
+/// A re-encode of a picture that hasn't changed (idle refinement, keyframe on request):
+/// a viewer showing a lossless refresh of it may keep that on top.
+pub const FLAG_REFRESH: u8 = 4;
 /// Upper nibble of `flags`: which display stream the frame belongs to.
 pub const STREAM_SHIFT: u8 = 4;
 pub const MAX_STREAMS: usize = 4;

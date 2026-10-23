@@ -15,7 +15,9 @@ export const BINARY = process.env.GLASS_BIN ?? join(ROOT, 'target/release/glass-
 // Each parallel worker gets its own block of ports, below the OS's ephemeral range (so the
 // browser's own sockets can't take one between our check and the host binding it).
 const PORTS_PER_WORKER = 400;
-const firstPort = 21000 + Number(process.env.TEST_PARALLEL_INDEX ?? 0) * PORTS_PER_WORKER;
+// GLASS_E2E_PORT_BASE moves the whole range, so two test runs on one machine don't collide.
+const firstPort =
+  Number(process.env.GLASS_E2E_PORT_BASE ?? 21000) + Number(process.env.TEST_PARALLEL_INDEX ?? 0) * PORTS_PER_WORKER;
 let nextOffset = 0;
 
 // Free on both IPv4 and IPv6: the host binds 0.0.0.0, which an IPv6-only check misses.

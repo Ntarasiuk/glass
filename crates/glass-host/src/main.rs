@@ -7,6 +7,7 @@ mod files;
 mod forward;
 mod gamepad;
 mod ipc;
+mod lossless;
 mod media;
 mod mic;
 mod notify;

@@ -15,6 +15,8 @@ use crate::media::DisplayInfo;
 /// Unidirectional stream type tags (first byte of the stream).
 pub const STREAM_INPUT: u8 = b'I';
 pub const STREAM_FILE: u8 = b'F';
+/// host -> client: a lossless (PNG) picture of part of a stream, see `lossless`.
+pub const STREAM_LOSSLESS: u8 = b'P';
 
 const MAX_MESSAGE: usize = 16 << 20;
 
@@ -65,6 +67,8 @@ pub enum ClientMsg {
     /// Sharp text: native size, a finer encoding policy and (HEVC) 4:2:2 colour, for
     /// reading. Shared by every viewer; not for view-only links.
     Sharp { on: bool },
+    /// The viewer couldn't use a lossless refresh (stale, or no base): send a whole one next.
+    LosslessReset,
     /// Stream just this display.
     SelectDisplay { id: u32 },
     /// Stream every display side by side.
@@ -210,6 +214,8 @@ pub struct Features {
     pub hevc: bool,
     /// Ports an owner may open through `/fwd/<port>/` (tailnet only).
     pub forward_ports: Vec<u16>,
+    /// Sharp text can add lossless (full-colour, 4:4:4) pictures of a still screen.
+    pub lossless: bool,
 }
 
 /// Header that follows the `STREAM_FILE` tag in either direction.

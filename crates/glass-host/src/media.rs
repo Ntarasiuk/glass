@@ -29,6 +29,8 @@ pub struct EncodedFrame {
     pub capture_us: u64,
     /// HEVC (Annex B, VPS/SPS/PPS before keyframes) instead of H.264.
     pub hevc: bool,
+    /// Re-encodes a picture that hasn't changed (see `glass_proto::FLAG_REFRESH`).
+    pub refresh: bool,
 }
 
 /// A window that can be streamed on its own (single-app streaming).
@@ -85,6 +87,21 @@ pub trait VideoSource: Send + Sync {
     }
     /// Encode in HEVC (`true`) or H.264; returns the codec now in use.
     fn set_hevc(&self, _hevc: bool) -> bool {
+        false
+    }
+    /// The latest captured picture of stream `stream`, in full colour, for lossless refresh
+    /// (`None` when it isn't captured in full colour). May block briefly.
+    fn raw_frame(&self, _stream: u8) -> Option<std::sync::Arc<crate::lossless::RawFrame>> {
+        None
+    }
+    /// Bumped each time stream `stream` captures a new picture.
+    fn frame_generation(&self, _stream: u8) -> Option<u64> {
+        None
+    }
+    /// Capture in full colour (BGRA), so `raw_frame` has pictures to send losslessly.
+    fn set_full_colour(&self, _on: bool) {}
+    /// Can this source provide raw frames at all?
+    fn supports_lossless(&self) -> bool {
         false
     }
     /// Sharp text: HEVC 4:2:2 instead of 4:2:0 while HEVC is on; returns whether it's in use.
