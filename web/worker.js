@@ -202,7 +202,7 @@ async function connect() {
   // Control stream first: the host ignores everything else until hello is accepted.
   const control = await transport.createBidirectionalStream();
   controlWriter = control.writable.getWriter();
-  sendControl({ t: 'hello', token, link, pass, device, codecs });
+  sendControl({ t: 'hello', token, link, pass, device, codecs, ua: navigator.userAgent });
   if (audioOn) sendControl({ t: 'audio', on: true });
   if (micOn) sendControl({ t: 'mic', on: true });
   if (!visible) sendControl({ t: 'video', on: false });

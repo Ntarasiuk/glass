@@ -1,4 +1,5 @@
 mod access;
+mod admin;
 mod approval;
 mod codec;
 mod connlog;
@@ -12,6 +13,7 @@ mod mic;
 mod notify;
 mod oidc;
 mod passkey;
+mod posture;
 mod power;
 mod privacy;
 mod recording;

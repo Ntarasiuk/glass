@@ -39,6 +39,9 @@ pub struct Challenge {
     /// For "get": the credential to use, base64url.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+    /// The browser must verify the user (device posture), not just see a tap.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub uv: bool,
 }
 
 /// The browser's answer; binary fields are base64url. `mode: "error"` when the browser
@@ -80,6 +83,7 @@ pub async fn register(
         challenge: challenge.clone(),
         user: format!("Glass guest ({user})"),
         credential: None,
+        uv: crate::settings::load().posture_passkey_uv,
     });
     control::write_json(send, &msg).await?;
     let Some(r) = answer(recv).await? else {
@@ -123,6 +127,7 @@ pub async fn verify(
         challenge: challenge.clone(),
         user: String::new(),
         credential: Some(key.id.clone()),
+        uv: crate::settings::load().posture_passkey_uv,
     });
     control::write_json(send, &msg).await?;
     let Some(r) = answer(recv).await? else {
@@ -138,6 +143,8 @@ pub async fn verify(
         &decode(r.signature.as_deref().context("no signature")?)?,
         &challenge,
     )?;
+    let auth_data = decode(r.authenticator_data.as_deref().unwrap_or_default())?;
+    check_user_verified(&auth_data, crate::settings::load().posture_passkey_uv)?;
     ensure!(
         crate::access::advance_passkey_counter(access_file, pass, counter)?,
         "the passkey's counter went backwards (a copied key?)"
@@ -205,6 +212,17 @@ fn check_client_data(raw: &[u8], kind: &str, challenge: &str) -> Result<String> 
     Ok(data.origin)
 }
 
+/// Device posture (`glass config posture-require-passkey-uv on`): the authenticator must
+/// have verified the user (Face ID, Touch ID, a PIN), not just seen a tap.
+fn check_user_verified(auth_data: &[u8], required: bool) -> Result<()> {
+    // flags bit 2: UV.
+    ensure!(
+        !required || auth_data.get(32).is_some_and(|f| f & 0x04 != 0),
+        "this computer requires a passkey with Face ID, Touch ID or a PIN"
+    );
+    Ok(())
+}
+
 /// Verifies a WebAuthn assertion; returns the authenticator's signature counter.
 fn check_assertion(
     point: &[u8],
@@ -224,6 +242,22 @@ fn check_assertion(
         .map_err(|_| anyhow::anyhow!("bad passkey signature"))?;
     info!("passkey verified (origin {origin})");
     Ok(u32::from_be_bytes(auth_data[33..37].try_into().unwrap()))
+}
+
+#[cfg(test)]
+mod uv_tests {
+    use super::check_user_verified;
+
+    #[test]
+    fn user_verification_only_when_required() {
+        let mut auth = vec![0u8; 37];
+        auth[32] = 0x01; // present, not verified
+        assert!(check_user_verified(&auth, false).is_ok());
+        assert!(check_user_verified(&auth, true).is_err());
+        auth[32] = 0x05;
+        assert!(check_user_verified(&auth, true).is_ok());
+        assert!(check_user_verified(&[], true).is_err());
+    }
 }
 
 #[cfg(test)]

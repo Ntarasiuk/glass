@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <link rel="icon" href="../icon.svg">
+  <title>Glass console</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0c0e;
+      --surface: rgb(22 23 26 / 0.78);
+      --surface-hover: rgb(255 255 255 / 0.08);
+      --border: rgb(255 255 255 / 0.09);
+      --text: #f2f3f5;
+      --text-dim: #a8acb5;
+      --accent: #5cb2ff;
+      --accent-ink: #04121f;
+      --good: #6fdc8c;
+      --warn: #f2c14e;
+      --bad: #ff7a7a;
+      --radius: 14px;
+      --radius-sm: 9px;
+      --shadow: 0 10px 30px rgb(0 0 0 / 0.45), 0 2px 6px rgb(0 0 0 / 0.35);
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    html, body { margin: 0; background: radial-gradient(1200px 600px at 80% -10%, rgb(92 178 255 / 0.12), transparent), var(--bg); min-height: 100%; }
+    body { font: 14px/1.45 var(--font); color: var(--text); -webkit-font-smoothing: antialiased; padding: max(20px, env(safe-area-inset-top)) 20px 40px; }
+    main { max-width: 1040px; margin: 0 auto; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    header { max-width: 1040px; margin: 0 auto 18px; display: flex; align-items: baseline; gap: 12px; }
+    header h1 { font-size: 22px; letter-spacing: -0.02em; margin: 0; }
+    header .meta { color: var(--text-dim); font-size: 13px; }
+    section {
+      background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); border-radius: var(--radius);
+      -webkit-backdrop-filter: blur(24px) saturate(1.4); backdrop-filter: blur(24px) saturate(1.4);
+      padding: 16px 18px; display: grid; gap: 10px; align-content: start; min-width: 0;
+    }
+    section.wide { grid-column: 1 / -1; }
+    h2 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+    .dim { color: var(--text-dim); font-size: 13px; }
+    ul.rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+    ul.rows li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-sm); }
+    ul.rows li:hover { background: var(--surface-hover); }
+    ul.rows li .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    ul.rows li .tag { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+    h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); margin: 8px 10px 2px; font-weight: 600; }
+    button, .button {
+      padding: 6px 12px; border: 0; border-radius: var(--radius-sm); background: var(--surface-hover); color: var(--text);
+      font: inherit; font-size: 13px; font-weight: 550; cursor: pointer; text-decoration: none; white-space: nowrap;
+    }
+    button:hover, .button:hover { background: rgb(255 255 255 / 0.13); }
+    button.primary { background: var(--accent); color: var(--accent-ink); font-weight: 650; }
+    button.danger { color: var(--bad); }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    input[type=text], input:not([type]), select {
+      padding: 7px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: rgb(0 0 0 / 0.35);
+      color: var(--text); font: inherit; min-width: 0;
+    }
+    label.check { display: inline-flex; gap: 6px; align-items: center; margin-right: 12px; font-size: 13px; }
+    .form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .made { display: grid; grid-template-columns: 120px 1fr; gap: 12px; align-items: center; }
+    .made svg { width: 120px; height: 120px; border-radius: 6px; }
+    .made code { font: 12px var(--mono); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    td { padding: 6px 8px; border-top: 1px solid var(--border); vertical-align: top; }
+    td.key { font: 12.5px var(--mono); white-space: nowrap; }
+    td input { width: 100%; box-sizing: border-box; }
+    pre.log { margin: 0; max-height: 320px; overflow: auto; font: 12px/1.6 var(--mono); color: var(--text-dim); white-space: pre-wrap; }
+    .error { color: var(--bad); font-size: 13px; }
+    #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); padding: 10px 16px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }
+    .hidden { display: none !important; }
+    @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Glass console</h1>
+    <span class="meta" id="version"></span>
+  </header>
+  <p id="denied" class="hidden" style="max-width:1040px;margin:0 auto 16px">This console is for the computer's owner. Open it from the viewer's Computer menu, or from one of your own tailnet devices.</p>
+  <main id="console" class="hidden">
+    <section id="people">
+      <h2>Connected now</h2>
+      <ul class="rows" id="viewers"></ul>
+      <h2>Waiting to be let in</h2>
+      <ul class="rows" id="pending"></ul>
+    </section>
+    <section id="links">
+      <h2>New link</h2>
+      <form class="form" id="link-form">
+        <label class="check"><input type="checkbox" name="view_only"> View only</label>
+        <label class="check"><input type="checkbox" name="no_files"> No files</label>
+        <label class="check"><input type="checkbox" name="no_clipboard"> No clipboard</label>
+        <label class="check"><input type="checkbox" name="ask"> Ask first</label>
+        <label class="check"><input type="checkbox" name="passkey"> Passkey</label>
+        <select name="duration" aria-label="Access lasts">
+          <option value="1h">1 hour</option>
+          <option value="24h" selected>24 hours</option>
+          <option value="7d">7 days</option>
+          <option value="30d">30 days</option>
+        </select>
+        <label class="check"><input type="checkbox" name="anywhere"> From anywhere</label>
+        <button class="primary" type="submit">Make link</button>
+      </form>
+      <div class="made hidden" id="made"><div id="qr"></div><div><code id="made-url"></code><p class="dim" id="made-summary"></p></div></div>
+      <h2>Devices with links</h2>
+      <ul class="rows" id="passes"></ul>
+    </section>
+    <section id="book" class="wide">
+      <h2>Address book</h2>
+      <p class="dim">Your tailnet machines, in your own groups. The groups also show in the viewer's machines menu.</p>
+      <div id="machines"></div>
+      <form class="form" id="group-form">
+        <input name="name" placeholder="New group" aria-label="New group name" maxlength="40">
+        <button type="submit">Add group</button>
+      </form>
+    </section>
+    <section id="rules">
+      <h2>Access rules</h2>
+      <p class="dim">What people signing in with single sign-on or a directory get, by email, domain or group.</p>
+      <ul class="rows" id="acl"></ul>
+      <form class="form" id="acl-form">
+        <input name="match" placeholder="you@example.com, @example.com, group:design" aria-label="Who">
+        <label class="check"><input type="checkbox" name="view_only"> View only</label>
+        <label class="check"><input type="checkbox" name="no_files"> No files</label>
+        <label class="check"><input type="checkbox" name="ask"> Ask first</label>
+        <button type="submit">Add rule</button>
+      </form>
+      <p class="error hidden" id="acl-error"></p>
+    </section>
+    <section id="settings-section">
+      <h2>Settings</h2>
+      <table><tbody id="settings"></tbody></table>
+    </section>
+    <section id="history" class="wide">
+      <h2>Connection history</h2>
+      <pre class="log" id="log"></pre>
+    </section>
+  </main>
+  <div id="toast" class="hidden" role="status" aria-live="polite"></div>
+  <script type="module" src="admin.js"></script>
+</body>
+</html>

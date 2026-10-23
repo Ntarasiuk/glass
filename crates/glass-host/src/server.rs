@@ -126,6 +126,7 @@ pub async fn run(
         .merge(extra_routes.unwrap_or_default())
         .merge(crate::forward::routes())
         .merge(crate::oidc::routes())
+        .merge(crate::admin::routes())
         .route("/config.json", get(client_config))
         .route(
             "/machines.json",
@@ -377,15 +378,16 @@ async fn control(
         return Ok(());
     }
     let hello_ok = matches!(hello, Ok(Some(ClientMsg::Hello { .. })));
-    let (token, link, pass, hello_device, codecs) = match hello {
+    let (token, link, pass, hello_device, codecs, ua) = match hello {
         Ok(Some(ClientMsg::Hello {
             token,
             link,
             pass,
             device,
             codecs,
-        })) => (token, link, pass, device, codecs),
-        _ => (None, None, None, None, Vec::new()),
+            ua,
+        })) => (token, link, pass, device, codecs, ua),
+        _ => (None, None, None, None, Vec::new(), None),
     };
     let mut device = crate::viewers::clean_device(hello_device.as_deref());
     let remote = ctx.relayed.is_some();
@@ -545,6 +547,17 @@ async fn control(
         Auth::Guest { scope, .. } => scope.describe(),
         _ => String::new(),
     };
+
+    // Device posture: what this computer requires of devices, checked before asking anyone.
+    if let Err(why) = crate::posture::check(peer, ctx.relayed.is_some(), ua.as_deref()).await {
+        warn!("{peer}: refused by device posture: {why}");
+        refused(&device, &format!("posture: {why}"));
+        let msg = format!("Not allowed: {why}.");
+        control::write_json(&mut send, &ServerMsg::Denied { msg }).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        ctx.conn.close(1u32.into(), b"device posture");
+        return Ok(());
+    }
 
     // Ask before connecting: the person at the computer allows (or denies) this viewer.
     let settings = crate::settings::load();
@@ -1331,7 +1344,7 @@ async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_j
     if let Some((at, list)) = cache.as_ref()
         && at.elapsed() < MACHINES_TTL
     {
-        return Json(serde_json::json!({ "machines": list }));
+        return Json(serde_json::json!({ "machines": list, "groups": crate::admin::load_groups().groups }));
     }
     let list = match tailscale::machines().await {
         Ok(found) => {
@@ -1378,7 +1391,7 @@ async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_j
         }
     };
     *cache = Some((std::time::Instant::now(), list.clone()));
-    Json(serde_json::json!({ "machines": list }))
+    Json(serde_json::json!({ "machines": list, "groups": crate::admin::load_groups().groups }))
 }
 
 /// If a Glass host answers at `https://<dns>:<port>/config.json`, its WebTransport port.

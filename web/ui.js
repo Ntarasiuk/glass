@@ -292,7 +292,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   renderShortcuts();
 
   /** `current` is the id ("host" or "host:port") of the machine this session is on. */
-  function renderMachines(machines, current) {
+  function renderMachines(machines, current, groups = []) {
     if (!machines) {
       menus.machines.panel.replaceChildren(menuItem('Looking for machines…', '', { onSelect: () => {} }));
       return;
@@ -313,6 +313,24 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       return item;
     });
     if (!items.length) items.push(menuItem('No machines found', 'needs Tailscale', { onSelect: () => {} }));
+    // Groups from the console's address book, as headings; the rest after them.
+    const groupOf = (m) => groups.find((g) => g.machines.includes(m.dns?.toLowerCase()))?.name;
+    if (groups.length && machines.some(groupOf)) {
+      const heading = (text) => {
+        const p = document.createElement('p');
+        p.className = 'note';
+        p.textContent = text;
+        return p;
+      };
+      const out = [];
+      for (const g of [...groups.map((g) => g.name), undefined]) {
+        const members = machines.map((m, i) => [m, items[i]]).filter(([m]) => groupOf(m) === g);
+        if (!members.length) continue;
+        out.push(heading(g ?? 'Other'), ...members.map(([, item]) => item));
+      }
+      menus.machines.panel.replaceChildren(...out);
+      return;
+    }
     menus.machines.panel.replaceChildren(...items);
   }
 
@@ -435,8 +453,20 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       restart('Restart Glass', 'reconnects in seconds', true, "Restart Glass on this computer? You'll reconnect in a few seconds."),
       restart('Restart computer', 'reconnects after login', false, "Restart this computer? Open apps are asked to quit. Glass reconnects once it's back and someone is logged in."),
     );
+    if (consoleUrl) {
+      items.push(
+        document.createElement('hr'),
+        menuItem('Console', 'links, people, settings', {
+          onSelect: () => {
+            setMenuOpen('more', false);
+            open(consoleUrl, '_blank', 'noopener');
+          },
+        }),
+      );
+    }
     menus.more.panel.replaceChildren(...items);
   }
+  let consoleUrl; // the owner's console (/admin/), from the Computer menu
   let canFit = true;
   let sharpAvailable = false;
   let sharpOn = false;
@@ -586,8 +616,9 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       if (lastDisplays) renderDisplays(...lastDisplays);
     },
     /** The computer menu: owners only; the privacy item only where the host supports it. */
-    setComputerControls({ isOwner, privacy }) {
+    setComputerControls({ isOwner, privacy, console: url }) {
       privacyAvailable = privacy;
+      consoleUrl = isOwner ? url : undefined;
       $('btn-more').classList.toggle('hidden', !isOwner);
       if (!isOwner) setMenuOpen('more', false);
       renderMore();

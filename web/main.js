@@ -558,7 +558,14 @@ function onControl(msg) {
       ui.setPerms(perms);
       chat.setAvailable(true);
       restarting = undefined;
-      ui.setComputerControls({ isOwner: msg.perms ? msg.perms.owner : !guest, privacy: Boolean(msg.features?.privacy) });
+      ui.setComputerControls({
+        isOwner: msg.perms ? msg.perms.owner : !guest,
+        privacy: Boolean(msg.features?.privacy),
+        // The console is served by the host this page came from (not over remote access).
+        console: !remoteKey && currentHost === homeHost
+          ? (signedInToken ? `${location.origin}/admin/auth?t=${encodeURIComponent(signedInToken)}` : `${location.origin}/admin/`)
+          : undefined,
+      });
       ui.setPrivacyOn(false);
       ui.setWindowsAvailable(Boolean(msg.features?.windows));
       // Sharp text is this device's choice: ask again on every (re)connect.
@@ -767,9 +774,9 @@ function renderHud(d) {
 async function loadMachines() {
   ui.renderMachines(undefined, currentHost);
   try {
-    const { machines } = await fetch('machines.json').then((r) => r.json());
+    const { machines, groups = [] } = await fetch('machines.json').then((r) => r.json());
     machineNames = Object.fromEntries(machines.map((m) => [machineId(m), m.name]));
-    ui.renderMachines(machines.map((m) => ({ ...m, id: machineId(m) })), currentHost);
+    ui.renderMachines(machines.map((m) => ({ ...m, id: machineId(m) })), currentHost, groups);
   } catch {
     ui.renderMachines([], currentHost);
   }

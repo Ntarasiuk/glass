@@ -233,6 +233,15 @@ pub async fn is_trusted(peer: IpAddr, owner: &str) -> bool {
     }
 }
 
+/// What Tailscale knows about a tailnet peer, for device posture: `None` off the tailnet.
+pub async fn whois(peer: IpAddr) -> Option<Value> {
+    let peer = peer.to_canonical();
+    if !is_tailscale_ip(peer) {
+        return None;
+    }
+    json(&["whois", "--json", &peer.to_string()]).await.ok()
+}
+
 /// A tailnet device's name (e.g. "nathans-ipad"), for showing who's connected.
 pub async fn device_name(peer: IpAddr) -> Option<String> {
     let who = json(&["whois", "--json", &peer.to_canonical().to_string()])

@@ -38,6 +38,17 @@ pub struct Settings {
     pub oidc_allow: Vec<String>,
     /// What SSO users may do: full control, or view only.
     pub oidc_view_only: bool,
+    /// Device posture: tailnet devices must carry one of these Tailscale tags (e.g.
+    /// tag:trusted), unless they're the owner's own. Empty: no tag check.
+    pub posture_tailnet_tags: Vec<String>,
+    /// Device posture: allowed operating systems (macos, ios, windows, linux, android,
+    /// chromeos). Empty: any.
+    pub posture_os: Vec<String>,
+    /// Device posture: oldest browser major version let in (Chrome, Safari, Firefox,
+    /// Edge). 0: any.
+    pub posture_min_browser: u32,
+    /// Device posture: passkey links must use user verification (Face ID, Touch ID, a PIN).
+    pub posture_passkey_uv: bool,
 }
 
 /// The OIDC client secret lives in its own owner-only file, not in settings.json.
@@ -110,6 +121,10 @@ pub const KEYS: &[(&str, &str)] = &[
     ("oidc-client-secret", "its client secret (stored separately, owner-only)"),
     ("oidc-allow", "who may sign in: emails or @domain, comma-separated"),
     ("oidc-scope", "full or view-only: what SSO users may do"),
+    ("posture-tailnet-tags", "tailnet devices must carry one of these tags, e.g. tag:trusted"),
+    ("posture-os", "allowed operating systems, e.g. macos,ios,windows"),
+    ("posture-min-browser", "oldest browser major version let in, e.g. 120 (0: any)"),
+    ("posture-require-passkey-uv", "on/off: passkey links need Face ID, Touch ID or a PIN"),
 ];
 
 /// A relay must be HTTPS (browsers need a secure page for WebRTC and passkeys), except
@@ -143,6 +158,15 @@ fn on_off(v: &str) -> Result<bool> {
     }
 }
 
+/// "a, b,c" → ["a", "b", "c"], lowercased.
+fn list(value: &str) -> Vec<String> {
+    value
+        .split([',', ' '])
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+        .collect()
+}
+
 fn show_bool(b: bool) -> String {
     if b { "on" } else { "off" }.into()
 }
@@ -170,6 +194,10 @@ impl Settings {
             "oidc-client-secret" => if oidc_secret().is_some() { "(set)" } else { "" }.into(),
             "oidc-allow" => self.oidc_allow.join(","),
             "oidc-scope" => if self.oidc_view_only { "view-only" } else { "full" }.into(),
+            "posture-tailnet-tags" => self.posture_tailnet_tags.join(","),
+            "posture-os" => self.posture_os.join(","),
+            "posture-min-browser" => self.posture_min_browser.to_string(),
+            "posture-require-passkey-uv" => show_bool(self.posture_passkey_uv),
             _ => anyhow::bail!("unknown setting {key}; see glass config"),
         })
     }
@@ -256,6 +284,31 @@ impl Settings {
                     _ => anyhow::bail!("expected full or view-only"),
                 }
             }
+            "posture-tailnet-tags" => {
+                self.posture_tailnet_tags = list(value)
+                    .into_iter()
+                    .map(|t| if t.starts_with("tag:") { t } else { format!("tag:{t}") })
+                    .collect()
+            }
+            "posture-os" => {
+                let os = list(value);
+                for o in &os {
+                    anyhow::ensure!(
+                        crate::posture::OS_NAMES.contains(&o.as_str()),
+                        "unknown OS {o}; use {}",
+                        crate::posture::OS_NAMES.join(", ")
+                    );
+                }
+                self.posture_os = os;
+            }
+            "posture-min-browser" => {
+                self.posture_min_browser = if value.is_empty() {
+                    0
+                } else {
+                    value.parse().map_err(|_| anyhow::anyhow!("expected a version number like 120"))?
+                }
+            }
+            "posture-require-passkey-uv" => self.posture_passkey_uv = on_off(value)?,
             _ => anyhow::bail!("unknown setting {key}; see glass config"),
         }
         Ok(())

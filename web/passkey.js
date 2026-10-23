@@ -5,7 +5,9 @@ const b64 = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).repla
 const unb64 = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
 
 /** Answers a host `passkey` message; `{ mode: 'error' }` if the browser declines. */
-export async function answerPasskey({ mode, challenge, user, credential }) {
+export async function answerPasskey({ mode, challenge, user, credential, uv = false }) {
+  // The host may require Face ID / Touch ID / a PIN (device posture), not just a tap.
+  const userVerification = uv ? 'required' : 'preferred';
   try {
     if (mode === 'create') {
       const cred = await navigator.credentials.create({
@@ -14,7 +16,7 @@ export async function answerPasskey({ mode, challenge, user, credential }) {
           rp: { name: 'Glass' },
           user: { id: crypto.getRandomValues(new Uint8Array(16)), name: user, displayName: user },
           pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
-          authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
+          authenticatorSelection: { residentKey: 'preferred', userVerification },
           timeout: 120_000,
         },
       });
@@ -30,7 +32,7 @@ export async function answerPasskey({ mode, challenge, user, credential }) {
       publicKey: {
         challenge: unb64(challenge),
         allowCredentials: [{ type: 'public-key', id: unb64(credential) }],
-        userVerification: 'preferred',
+        userVerification,
         timeout: 120_000,
       },
     });

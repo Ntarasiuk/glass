@@ -35,6 +35,9 @@ pub enum ClientMsg {
         /// Video codecs this viewer can decode, e.g. ["h264", "hevc"].
         #[serde(default)]
         codecs: Vec<String>,
+        /// The browser's user agent, for device posture checks.
+        #[serde(default)]
+        ua: Option<String>,
     },
     /// The browser's answer to a `passkey` request (WebAuthn), all fields base64url.
     Passkey(crate::passkey::Response),
