@@ -147,6 +147,7 @@ function nextClipboard(timeoutMs) {
 const statusEl = document.getElementById('status');
 // Friendly machine names from the last machines.json, by machine id.
 let machineNames = {};
+const brandNames = {}; // machine -> its `glass config name`
 const STATS_KEY = 'glass.stats';
 let statsVisible = storage((s) => s.getItem(STATS_KEY)) === '1';
 hud.classList.toggle('hidden', !statsVisible);
@@ -421,6 +422,7 @@ function onControl(msg) {
       machineFailures = 0;
       clearTimeout(machineTimer);
       displays = msg.displays;
+      applyBranding(msg);
       // Nothing being streamed (e.g. capture failed): fall back to the first display.
       if (!msg.streams.length && displays.length) control({ t: 'selectDisplay', id: displays[0].id });
       ui.setAudioAvailable(msg.audio);
@@ -485,8 +487,28 @@ function deviceLabel() {
 }
 
 function machineName(id) {
+  if (brandNames[id]) return brandNames[id];
   if (remoteKey) return 'your computer';
   return machineNames[id] ?? id.split('.')[0].split(':')[0];
+}
+
+// Branding (glass config name / accent), from a machine's welcome.
+function applyBranding({ name, accent }) {
+  if (name) brandNames[currentHost] = name;
+  else delete brandNames[currentHost];
+  document.title = name ?? 'Glass';
+  const root = document.documentElement.style;
+  if (/^#[0-9a-f]{6}$/i.test(accent ?? '')) {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(accent.slice(i, i + 2), 16) / 255);
+    // WCAG relative luminance: dark ink on light accents, light ink on dark ones.
+    const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+    const luminance = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+    root.setProperty('--accent', accent);
+    root.setProperty('--accent-ink', luminance > 0.18 ? '#04121f' : '#ffffff');
+  } else {
+    root.removeProperty('--accent');
+    root.removeProperty('--accent-ink');
+  }
 }
 
 function showStatus(state, title, detail = '') {
