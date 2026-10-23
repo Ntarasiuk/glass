@@ -9,6 +9,7 @@ export const KIND_MIC = 6;
 export const AUDIO_HEADER_LEN = 16;
 export const FLAG_KEYFRAME = 1;
 export const FLAG_HEVC = 2;
+export const FLAG_REFRESH = 4;
 export const VIDEO_HEADER_LEN = 20;
 export const INPUT_EVENT_LEN = 12;
 

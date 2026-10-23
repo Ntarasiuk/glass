@@ -121,6 +121,13 @@ pub fn take_corrupt() -> bool {
 
 // ---- Video: a moving test pattern per fake display ----
 
+/// The pattern stops moving (as if the screen went still), for lossless-refresh tests.
+static PAUSED: AtomicBool = AtomicBool::new(false);
+/// Sharp text asked for full-colour pictures: keep the latest one per source.
+static FULL_COLOUR: AtomicBool = AtomicBool::new(false);
+type Latest = Mutex<Vec<(u64, Option<Arc<crate::lossless::RawFrame>>)>>;
+static LATEST: Latest = Mutex::new(Vec::new());
+
 pub struct TestVideo {
     /// The fake displays, then the fake windows (as streams they look the same).
     sources: Vec<DisplayInfo>,
@@ -169,6 +176,7 @@ impl TestVideo {
             .iter()
             .map(|d| Arc::new(std::sync::atomic::AtomicUsize::new(d.width)))
             .collect();
+        LATEST.lock().unwrap().resize(count, (0, None));
         for i in 0..count {
             let (slot, keyframe, frames) = (slots[i].clone(), keyframes[i].clone(), frames.clone());
             let width = widths[i].clone();
@@ -185,7 +193,34 @@ impl TestVideo {
     }
 }
 
+impl TestVideo {
+    /// The source currently carried by `stream`.
+    fn source_of(&self, stream: u8) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|s| s.load(Ordering::Relaxed) == stream as i32)
+    }
+}
+
 impl VideoSource for TestVideo {
+    fn supports_lossless(&self) -> bool {
+        true
+    }
+
+    fn set_full_colour(&self, on: bool) {
+        FULL_COLOUR.store(on, Ordering::Relaxed);
+    }
+
+    fn frame_generation(&self, stream: u8) -> Option<u64> {
+        let d = self.source_of(stream)?;
+        LATEST.lock().unwrap().get(d).map(|(g, _)| *g)
+    }
+
+    fn raw_frame(&self, stream: u8) -> Option<Arc<crate::lossless::RawFrame>> {
+        let d = self.source_of(stream)?;
+        LATEST.lock().unwrap().get(d).and_then(|(_, f)| f.clone())
+    }
+
     fn streams(&self) -> Vec<DisplayInfo> {
         self.shown
             .lock()
@@ -295,7 +330,10 @@ fn pattern_loop(
     let mut encoder = Encoder::new(w, h, fps, applied, 1.0).expect("test encoder");
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
     let mut next = Instant::now();
-    for n in 0u64.. {
+    // The pattern's position: frozen while paused, so frames repeat the same picture.
+    let mut shown = 0u64;
+    let mut last_encoded = None;
+    loop {
         next += interval;
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
         let s = slot.load(Ordering::Relaxed);
@@ -317,15 +355,33 @@ fn pattern_loop(
             encoder.set_bitrate(target);
             applied = target;
         }
-        let frame = render(display, w, h, n);
+        if !PAUSED.load(Ordering::Relaxed) {
+            shown += 1;
+        }
+        let frame = render(display, w, h, shown);
+        let capture_us = now_us();
+        if FULL_COLOUR.load(Ordering::Relaxed) {
+            let raw = crate::lossless::RawFrame {
+                width: frame.width,
+                height: frame.height,
+                bgra: frame.data.clone(),
+                capture_us,
+            };
+            if let Some(slot) = LATEST.lock().unwrap().get_mut(display) {
+                *slot = (slot.0 + 1, Some(Arc::new(raw)));
+            }
+        }
         let force = keyframe.swap(false, Ordering::Relaxed);
         if let Ok(Some((data, key))) = encoder.encode(&frame, force) {
+            let refresh = last_encoded == Some(shown);
+            last_encoded = Some(shown);
             let _ = frames.send(Arc::new(EncodedFrame {
                 stream: s as u8,
                 data,
                 keyframe: key,
-                capture_us: now_us(),
+                capture_us,
                 hevc: false,
+                refresh,
             }));
         }
     }
@@ -463,6 +519,11 @@ struct DecideQuery {
 }
 
 #[derive(serde::Deserialize)]
+struct PauseQuery {
+    on: bool,
+}
+
+#[derive(serde::Deserialize)]
 struct DropQuery {
     frames: u32,
 }
@@ -514,6 +575,10 @@ pub fn routes(events: broadcast::Sender<ServerMsg>, downloads: PathBuf) -> axum:
                     Json(serde_json::json!({"ok": ok}))
                 },
             ),
+        )
+        .route(
+            "/test/pause",
+            post(|Query(q): Query<PauseQuery>| async move { PAUSED.store(q.on, Ordering::Relaxed) }),
         )
         .route("/test/corrupt", post(|| async { CORRUPT_NEXT.store(true, Ordering::Relaxed) }))
         .route(

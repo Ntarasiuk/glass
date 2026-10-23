@@ -34,7 +34,8 @@ const PIXEL_FORMAT_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
 
 /// The most recent captured frame, kept so a keyframe can be produced on demand: a static
 /// screen yields no new frames, and a client that just connected would otherwise wait.
-struct LastFrame(Option<CFRetained<CVImageBuffer>>);
+/// With its capture time, for lossless refresh.
+struct LastFrame(Option<CFRetained<CVImageBuffer>>, u64);
 // CVPixelBuffers are thread-safe, reference-counted CF objects.
 unsafe impl Send for LastFrame {}
 
@@ -64,7 +65,8 @@ const MAX_REFRESHES: u32 = 36;
 const TINY_FRAME: u64 = 1024;
 
 impl FrameState {
-    fn encode_last(&self) {
+    /// `refresh`: the image was encoded before (only refining it), not a new one.
+    fn encode_last(&self, refresh: bool) {
         let Some(image) = self.last.lock().unwrap().0.clone() else {
             return;
         };
@@ -72,7 +74,7 @@ impl FrameState {
         self.last_encoded_us
             .store(now, std::sync::atomic::Ordering::Relaxed);
         self.encoder
-            .encode(&image, unsafe { CMTime::new(now as i64, 1_000_000) }, now);
+            .encode(&image, unsafe { CMTime::new(now as i64, 1_000_000) }, now, refresh);
     }
 
     /// After a frame (sent or skipped): if nothing newer arrives, send what was skipped,
@@ -91,7 +93,7 @@ impl FrameState {
                 return; // newer frames took over
             }
             if state.unsent.swap(false, Relaxed) {
-                state.encode_last();
+                state.encode_last(false);
             } else {
                 if state.encoder.last_frame_size() < TINY_FRAME {
                     state.tiny.fetch_add(1, Relaxed);
@@ -101,7 +103,7 @@ impl FrameState {
                 {
                     return;
                 }
-                state.encode_last();
+                state.encode_last(true);
             }
             state.schedule_idle_check();
         });
@@ -176,9 +178,9 @@ define_class!(
             } else {
                 state.unsent.store(false, Relaxed);
                 state.last_encoded_us.store(capture_us, Relaxed);
-                state.encoder.encode(&image, pts, capture_us);
+                state.encoder.encode(&image, pts, capture_us, false);
             }
-            state.last.lock().unwrap().0 = Some(image);
+            *state.last.lock().unwrap() = LastFrame(Some(image), capture_us);
             state.schedule_idle_check();
         }
     }
@@ -219,7 +221,53 @@ impl Capture {
     /// new frames). With a keyframe pending, this delivers it even if the screen is static.
     pub fn refresh(&self) {
         let state = self.state.clone();
-        self.queue.exec_async(move || state.encode_last());
+        // A skipped (newer) image is news; otherwise it's the picture already sent.
+        self.queue.exec_async(move || {
+            let fresh = state.unsent.swap(false, std::sync::atomic::Ordering::Relaxed);
+            state.encode_last(!fresh)
+        });
+    }
+
+    /// Bumped on every new image.
+    pub fn generation(&self) -> u64 {
+        self.state.generation.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The last image as packed BGRA, if it was captured in full colour (BGRA).
+    pub fn read_bgra(&self) -> Option<crate::lossless::RawFrame> {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
+            CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+        let (image, capture_us) = {
+            let last = self.state.last.lock().unwrap();
+            (last.0.clone()?, last.1)
+        };
+        if CVPixelBufferGetPixelFormatType(&image) != PIXEL_FORMAT_BGRA {
+            return None;
+        }
+        let (w, h) = (CVPixelBufferGetWidth(&image), CVPixelBufferGetHeight(&image));
+        if unsafe { CVPixelBufferLockBaseAddress(&image, CVPixelBufferLockFlags::ReadOnly) } != 0 {
+            return None;
+        }
+        let base = CVPixelBufferGetBaseAddress(&image) as *const u8;
+        let stride = CVPixelBufferGetBytesPerRow(&image);
+        let mut bgra = Vec::with_capacity(w * h * 4);
+        if !base.is_null() && stride >= w * 4 {
+            for y in 0..h {
+                // SAFETY: locked, and each row holds at least w * 4 bytes.
+                let row = unsafe { std::slice::from_raw_parts(base.add(y * stride), w * 4) };
+                bgra.extend_from_slice(row);
+            }
+        }
+        unsafe { CVPixelBufferUnlockBaseAddress(&image, CVPixelBufferLockFlags::ReadOnly) };
+        (bgra.len() == w * h * 4).then_some(crate::lossless::RawFrame {
+            width: w,
+            height: h,
+            bgra,
+            capture_us,
+        })
     }
 }
 
@@ -399,6 +447,8 @@ pub fn start(
     encoder: Arc<Encoder>,
     fps_cap: Arc<std::sync::atomic::AtomicU32>,
     audio: Option<Arc<std::sync::Mutex<Packetizer>>>,
+    // Full colour: for the 4:2:2 encoder, or for lossless refreshes (sharp text).
+    bgra: bool,
 ) -> Result<Capture> {
     let captures_audio = audio.is_some();
     let (filter, source_id) = match source {
@@ -424,7 +474,7 @@ pub fn start(
         config.setWidth(width);
         config.setHeight(height);
         config.setMinimumFrameInterval(CMTime::new(1, fps));
-        config.setPixelFormat(if encoder.wants_bgra() {
+        config.setPixelFormat(if bgra || encoder.wants_bgra() {
             PIXEL_FORMAT_BGRA
         } else {
             PIXEL_FORMAT_420V
@@ -444,7 +494,7 @@ pub fn start(
     let queue = DispatchQueue::new("glass.capture", DispatchQueueAttr::SERIAL);
     let state = Arc::new(FrameState {
         encoder,
-        last: std::sync::Mutex::new(LastFrame(None)),
+        last: std::sync::Mutex::new(LastFrame(None, 0)),
         fps_cap,
         last_encoded_us: Default::default(),
         generation: Default::default(),

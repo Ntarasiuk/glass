@@ -10,6 +10,7 @@ mod forward;
 mod gamepad;
 mod ipc;
 mod ldap;
+mod lossless;
 mod media;
 mod mic;
 mod notify;

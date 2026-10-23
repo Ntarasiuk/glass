@@ -639,6 +639,18 @@ async fn control(
     );
     let _sharp = crate::sharp::joined(session_id, codecs.iter().any(|c| c == "hevc-rext"));
     let mut sharp_on = false;
+    // Sharp text's lossless pictures of a still screen; <video> (RTP) viewers can't show them.
+    let rtp_viewer = ctx.relayed.as_ref().is_some_and(|r| r.rtp_video);
+    let lossless_reset = Arc::new(AtomicBool::new(false));
+    if shared.video.supports_lossless() && !rtp_viewer {
+        let (conn, shared, reset) = (ctx.conn.clone(), shared.clone(), lossless_reset.clone());
+        tokio::spawn(crate::lossless::run(
+            conn,
+            shared,
+            move || crate::sharp::session_on(session_id),
+            reset,
+        ));
+    }
     // Shown on the host (menu bar / notification) for as long as this session lasts.
     let _viewing = crate::viewers::joined(viewer, ctx.conn.clone());
     // Recording every session (glass config record on), or when an owner asks.
@@ -692,6 +704,8 @@ async fn control(
         } else {
             Vec::new()
         },
+        lossless: shared.video.supports_lossless()
+            && !ctx.relayed.as_ref().is_some_and(|r| r.rtp_video),
     };
     let welcome = ServerMsg::Welcome {
         displays,
@@ -808,6 +822,7 @@ async fn control(
             ClientMsg::Fit { size } => fit(&ctx, viewport_id, size).await?,
             // Sharp text keeps this viewer at native size, whatever its screen.
             ClientMsg::Viewport { .. } if sharp_on => {}
+            ClientMsg::LosslessReset => lossless_reset.store(true, Ordering::Relaxed),
             ClientMsg::Sharp { .. } if !perms.input => refuse("This link is view only."),
             ClientMsg::Sharp { on } => {
                 sharp_on = on;
@@ -1306,7 +1321,12 @@ fn send_frame(
         glass_proto::FLAG_KEYFRAME
     } else {
         0
-    } | if frame.hevc { glass_proto::FLAG_HEVC } else { 0 };
+    } | if frame.hevc { glass_proto::FLAG_HEVC } else { 0 }
+        | if frame.refresh {
+            glass_proto::FLAG_REFRESH
+        } else {
+            0
+        };
     let mut dgrams = glass_proto::fragment_with_flags(
         &frame.data,
         frame.stream,

@@ -1,7 +1,7 @@
 // One display's video: fragment reassembly, loss detection, WebCodecs decode and drawing.
 // The worker owns one per streamed display.
 
-import { fletcher16, FLAG_HEVC, FLAG_KEYFRAME, VIDEO_HEADER_LEN } from './proto.js';
+import { fletcher16, FLAG_HEVC, FLAG_KEYFRAME, FLAG_REFRESH, VIDEO_HEADER_LEN } from './proto.js';
 
 const KEYFRAME_RETRY_MS = 250;
 
@@ -85,6 +85,44 @@ export class VideoStream {
     this.pending.clear();
     this.lastDecodedId = undefined;
     this.waitingForKeyframe = true;
+    this.dropLossless();
+  }
+
+  /**
+   * Lossless refresh (sharp text): the host's exact picture of a still screen, a PNG of
+   * the part `h` (x, y, w, h of fw × fh) that changed since its last one. It's kept on top
+   * of the video until the screen really changes; frames that only refine the same picture
+   * (FLAG_REFRESH) are drawn under it. False if it couldn't be used (the host then sends a
+   * whole picture next).
+   */
+  onLossless(h, bitmap) {
+    const ctx = this.ctx;
+    const whole = h.x === 0 && h.y === 0 && h.w === h.fw && h.h === h.fh;
+    // Older than what's on screen, or a part without the picture it belongs to.
+    const stale = h.capture_us < this.changedUs;
+    const base = this.backing && this.backing.canvas.width === h.fw && this.backing.canvas.height === h.fh;
+    if (!ctx || stale || (!base && !whole)) {
+      bitmap.close();
+      return false;
+    }
+    if (!base) this.backing = new OffscreenCanvas(h.fw, h.fh).getContext('2d', { alpha: false });
+    this.backing.drawImage(bitmap, h.x, h.y);
+    bitmap.close();
+    this.holding = true;
+    this.drawBacking();
+    return true;
+  }
+
+  drawBacking() {
+    const { canvas } = this.ctx;
+    this.ctx.drawImage(this.backing.canvas, 0, 0, canvas.width, canvas.height);
+  }
+
+  dropLossless() {
+    this.holding = false;
+    this.backing = undefined;
+    this.changedUs = 0;
+    this.refreshes = new Set(); // capture times of frames that only refine the picture
   }
 
   /** Gives up the hardware decoder (hidden tab or stream no longer shown). */
@@ -104,6 +142,7 @@ export class VideoStream {
         received: 0,
         keyframe: (h.flags & FLAG_KEYFRAME) !== 0,
         hevc: (h.flags & FLAG_HEVC) !== 0,
+        refresh: (h.flags & FLAG_REFRESH) !== 0,
         captureUs: h.captureUs,
         checksum: h.checksum,
       };
@@ -144,6 +183,10 @@ export class VideoStream {
     this.lastDecodedId = id;
     this.lastChunk = { type: frame.keyframe ? 'key' : 'delta', size: data.byteLength, id, nals: nalTypes(data, frame.hevc) };
     this.sinceKeyframe = frame.keyframe ? 0 : this.sinceKeyframe + 1;
+    if (frame.refresh) {
+      if (this.refreshes.size > 64) this.refreshes.clear();
+      this.refreshes.add(frame.captureUs);
+    }
     this.decoder.decode(new EncodedVideoChunk({ type: frame.keyframe ? 'key' : 'delta', timestamp: frame.captureUs, data }));
   }
 
@@ -217,7 +260,13 @@ export class VideoStream {
         ctx.canvas.height = h;
         this.env.post({ type: 'size', stream: this.index, width: w, height: h });
       }
+      // A real change ends a lossless picture; a refinement of the same one doesn't.
+      if (!this.refreshes.delete(videoFrame.timestamp)) {
+        this.holding = false;
+        this.changedUs = Math.max(this.changedUs, videoFrame.timestamp);
+      }
       ctx.drawImage(videoFrame, 0, 0);
+      if (this.holding) this.drawBacking();
     }
     const hostNow = this.env.hostNowUs();
     videoFrame.close();

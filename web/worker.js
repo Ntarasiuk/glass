@@ -22,6 +22,7 @@ self.addEventListener('unhandledrejection', (e) =>
 
 const STREAM_INPUT = 0x49; // 'I'
 const STREAM_FILE = 0x46; // 'F'
+const STREAM_LOSSLESS = 0x50; // 'P': a lossless picture (sharp text)
 const encoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -59,7 +60,7 @@ let clockOffsetUs = 0;
 let clockSynced = false;
 let rttMs = 0;
 
-const stats = { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0 };
+const stats = { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0, lossless: 0 };
 
 const streamEnv = {
   log,
@@ -353,14 +354,40 @@ async function acceptIncoming(t) {
   for (;;) {
     const { value: stream, done } = await reader.read();
     if (done) return;
-    receiveFile(stream).catch((e) => log('error', `receive file failed: ${e.message ?? e}`));
+    receiveStream(stream).catch((e) => log('error', `receive stream failed: ${e.message ?? e}`));
   }
 }
 
-async function receiveFile(readable) {
+async function receiveStream(readable) {
   const r = byteReader(readable);
   const tag = await r.read(1);
-  if (!tag || tag[0] !== STREAM_FILE) return;
+  if (tag?.[0] === STREAM_FILE) return receiveFile(r);
+  if (tag?.[0] === STREAM_LOSSLESS) return receiveLossless(r);
+}
+
+/** A lossless picture of part of a stream: header (x, y, w, h of fw × fh), then a PNG. */
+async function receiveLossless(r) {
+  const len = await r.read(4);
+  const h = JSON.parse(textDecoder.decode(await r.read(new DataView(len.buffer).getUint32(0, true))));
+  const chunks = [];
+  for await (const chunk of r.rest()) chunks.push(chunk);
+  const stream = streams[h.stream];
+  if (!stream) return;
+  const bitmap = await createImageBitmap(new Blob(chunks, { type: 'image/png' }));
+  if (!stream.onLossless(h, bitmap)) {
+    sendControl({ t: 'losslessReset' });
+    return;
+  }
+  stats.lossless++;
+  // One pixel of what's now on screen, so tests can check it's exact.
+  const cx = h.x + (h.w >> 1);
+  const cy = h.y + (h.h >> 1);
+  const scale = stream.ctx.canvas.width / h.fw;
+  const [red, green, blue] = stream.ctx.getImageData(Math.floor(cx * scale), Math.floor(cy * scale), 1, 1).data;
+  log('info', 'lossless refresh', { stream: h.stream, x: h.x, y: h.y, w: h.w, h: h.h, fw: h.fw, fh: h.fh, pixel: [cx, cy, red, green, blue] });
+}
+
+async function receiveFile(r) {
   const len = await r.read(4);
   const header = JSON.parse(textDecoder.decode(await r.read(new DataView(len.buffer).getUint32(0, true))));
   const id = `${Date.now()}-${header.name}`;
@@ -435,8 +462,11 @@ function reportStats() {
     audioPackets,
     audioLost,
     audioUnderruns,
+    lossless: stats.lossless,
+    // Showing a lossless picture now (until the screen changes).
+    holding: streams.some((v) => v?.holding),
   });
   audioPackets = 0;
   audioLost = 0;
-  Object.assign(stats, { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0 });
+  Object.assign(stats, { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0, lossless: 0 });
 }
