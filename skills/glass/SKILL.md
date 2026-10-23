@@ -122,7 +122,7 @@ Limit a link with `--view-only`, `--no-files`, `--no-clipboard`, `--ask` (the pe
 
 ## Use the computer yourself (MCP)
 
-Once Glass runs on a machine, you can see and use it through `glass mcp`, an MCP server with `screenshot`, `click`, `type_text`, `press_keys`, `scroll`, `drag`, `wait_for_change`, `request_help` and `confirm`. Suggest adding it when the user wants you to do something in an app with no API: `claude mcp add glass -- glass mcp` (this machine) or `claude mcp add <name> -- glass mcp --machine <name>` (another one on their tailnet). The user watches you from any Glass viewer and can pause or stop you. Always `confirm` before anything hard to undo, and use `request_help` for sign-ins, 2FA codes and CAPTCHAs instead of working around them.
+Once Glass runs on a machine, you can see and use it through `glass mcp`, an MCP server with `screenshot`, `click`, `type_text`, `press_keys`, `scroll`, `drag`, `wait_for_change`, `request_help` and `confirm`. Suggest adding it when the user wants you to do something in an app with no API: `claude mcp add -s user glass -- glass mcp`. One server reaches every machine: `list_machines`, then pass `machine: "<name>"` to any tool. The user watches you from any Glass viewer and can pause or stop you. Always `confirm` before anything hard to undo, and use `request_help` for sign-ins, 2FA codes and CAPTCHAs instead of working around them.
 
 ## Troubleshooting
 

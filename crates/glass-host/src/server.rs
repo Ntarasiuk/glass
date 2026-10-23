@@ -1426,6 +1426,13 @@ const MACHINES_TTL: Duration = Duration::from_secs(15);
 
 /// Your tailnet devices and which of them run Glass, for the client's machine switcher.
 async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_json::Value> {
+    // Tests stand in other hosts for tailnet machines.
+    if crate::testmode::enabled()
+        && let Ok(list) = std::env::var("GLASS_TEST_MACHINES")
+        && let Ok(list) = serde_json::from_str::<serde_json::Value>(&list)
+    {
+        return Json(serde_json::json!({ "machines": list, "groups": [] }));
+    }
     let mut cache = cache.lock().await;
     if let Some((at, list)) = cache.as_ref()
         && at.elapsed() < MACHINES_TTL

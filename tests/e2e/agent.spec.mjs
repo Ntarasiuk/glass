@@ -105,6 +105,45 @@ it('an agent sees, clicks, types and asks, and the viewer steers it', async ({ p
   }
 });
 
+it('drives another machine on the tailnet by name', async ({ browser, host }) => {
+  const other = await new Host({ env: { GLASS_TEST_TRUST_LOOPBACK: '1' } }).start();
+  const machines = [
+    { name: 'This Mac', dns: 'this.example.ts.net', glass: true, online: true, os: 'macOS', self: true },
+    { name: 'Mac mini', dns: 'mac-mini.example.ts.net', glass: true, online: true, os: 'macOS', self: false, url: other.base },
+    { name: 'Old laptop', dns: 'old.example.ts.net', glass: false, online: true, os: 'Linux', self: false },
+  ];
+  await host.stop();
+  const home = await new Host({ configDir: host.configDir, env: { GLASS_TEST_MACHINES: JSON.stringify(machines) } }).start();
+  const agent = mcp(home);
+  try {
+    const list = JSON.parse((await agent.tool('list_machines')).content[0].text);
+    expect(list.map((m) => m.name)).toEqual(['This Mac', 'Mac mini', 'Old laptop']);
+
+    // The viewer on the other machine sees the agent at work there.
+    const page = await (await browser.newContext()).newPage();
+    await page.goto(other.url());
+    await expectVideo(page);
+    await other.clearInput();
+    await home.clearInput();
+    expect((await agent.tool('click', { machine: 'mac-mini', x: 320, y: 180 })).isError).toBeFalsy();
+    expect((await other.input()).events.map((e) => e.t)).toEqual(['move', 'down', 'up']);
+    expect((await home.input()).events).toHaveLength(0);
+    await expect(page.locator('#agent-label')).toContainText('click');
+
+    const shot = await agent.tool('screenshot', { machine: 'Mac mini' });
+    expect(shot.content[0].type).toBe('image');
+    // And one that can't be driven says why.
+    const missing = await agent.tool('screenshot', { machine: 'Old laptop' });
+    expect(missing.isError).toBe(true);
+    expect(missing.content[0].text).toContain("Glass isn't running on Old laptop");
+    expect((await agent.tool('click', { machine: 'nope', x: 1, y: 1 })).content[0].text).toContain('no machine called');
+  } finally {
+    agent.close();
+    await home.stop();
+    await other.stop();
+  }
+});
+
 it('only the owner can drive it', async ({ host }) => {
   const r = await fetch(`${host.base}/agent/v1/displays`);
   expect(r.status).toBe(403);

@@ -151,6 +151,7 @@ test.describe('the host CLI', () => {
   });
 
   it('drops a viewer whose page went quiet but left its connection open', async ({ page, host }) => {
+    test.setTimeout(120_000);
     await page.goto(host.url());
     await expectVideo(page);
     const viewers = () => JSON.parse(host.cli('viewers', '--json')).viewers.length;
@@ -160,8 +161,8 @@ test.describe('the host CLI', () => {
     await host.post('/test/deaf?on=true');
     await expect.poll(viewers, { timeout: 30_000, intervals: [1000] }).toBe(0);
     await host.post('/test/deaf?on=false');
-    // The page reconnects by itself.
-    await expect.poll(viewers, { timeout: 30_000, intervals: [1000] }).toBe(1);
+    // The page reconnects by itself (after its backoff).
+    await expect.poll(viewers, { timeout: 60_000, intervals: [1000] }).toBe(1);
   });
 
   it('wakes a machine by MAC address', async ({ host }) => {

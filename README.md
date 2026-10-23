@@ -64,7 +64,7 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Single sign-on.** Point `glass config oidc-issuer` at Google, Entra, Okta or any OpenID Connect provider, or `glass config ldap-url` at your directory, and accounts sign in without a token. Access rules (`glass acl`) pick what each email, domain or group may do; SCIM provisioning keeps users and groups in sync and cuts off deactivated accounts.
 - **Power.** Wake a sleeping machine (Wake-on-LAN) from the machines menu, restart Glass or the whole computer and reconnect.
 - **Self-hostable relay.** Run the WebRTC introducer and TURN yourself ([site/selfhost](site/selfhost)) and point Glass at it with `glass config relay`.
-- **Let an AI agent drive.** `glass mcp` gives Claude Code (or any MCP client) your computer's screens, pointer and keyboard. You watch every step from your phone, pause or stop it, approve anything risky, and hand it a 2FA code when it's stuck.
+- **Let an AI agent drive.** `glass mcp` gives Claude Code (or any MCP client) the screens, pointer and keyboard of every computer on your tailnet running Glass ("on the Mac mini, …"). You watch every step from your phone, pause or stop it, approve anything risky, and hand it a 2FA code when it's stuck.
 - **Agent-ready.** Ask Claude Code to "set up Glass on my Mac mini" and it does it over SSH ([skill](#set-up-with-an-ai-agent)).
 
 ## How it compares
