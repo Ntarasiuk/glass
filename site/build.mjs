@@ -170,15 +170,21 @@ if (missing()) {
     execFileSync('gh', ['release', 'download', `v${version}`, '-R', 'Ntarasiuk/glass', '-D', dist, '-p', `glass-${version}-*`, '--clobber'], { stdio: 'inherit' });
   } catch {}
 }
-if (missing()) throw new Error(`no ${version} release in ${dist}: run scripts/package.sh, or wait for the v${version} release workflow`);
-for (const f of readdirSync(dist).filter((f) => !f.startsWith('glass-latest-'))) {
-  copyFileSync(`${dist}/${f}`, `public/releases/${f}`);
+// A deploy (npm run deploy) must ship this version; tests and local builds can do without.
+const why = `no ${version} release in ${dist}: run scripts/package.sh, or wait for the v${version} release workflow`;
+if (missing() && process.env.GLASS_DEPLOY) throw new Error(why);
+if (missing()) console.warn(`warning: ${why}`);
+if (existsSync(dist)) {
+  for (const f of readdirSync(dist, { withFileTypes: true }).filter((e) => e.isFile() && !e.name.startsWith('glass-latest-')).map((e) => e.name)) {
+    copyFileSync(`${dist}/${f}`, `public/releases/${f}`);
+  }
 }
 for (const p of PLATFORMS) {
-  copyFileSync(`${dist}/glass-${version}-${p}.tar.gz`, `public/releases/glass-latest-${p}.tar.gz`);
+  const release = `${dist}/glass-${version}-${p}.tar.gz`;
+  if (existsSync(release)) copyFileSync(release, `public/releases/glass-latest-${p}.tar.gz`);
 }
 // The installer verifies each platform's "latest" tarball against this checksum.
-const latest = PLATFORMS.map((p) => `glass-latest-${p}.tar.gz`);
+const latest = PLATFORMS.map((p) => `glass-latest-${p}.tar.gz`).filter((f) => existsSync(`public/releases/${f}`));
 for (const f of latest) {
   // Hash the file itself: with several versions around, any lookup by name can pick a stale one.
   const sum = createHash('sha256').update(readFileSync(`public/releases/${f}`)).digest('hex');
