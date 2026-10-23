@@ -307,6 +307,58 @@
     #chat-panel .chat-form input { flex: 1; min-width: 0; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: rgb(0 0 0 / 0.35); color: var(--text); font: inherit; -webkit-user-select: text; user-select: text; }
     #chat-panel .chat-form button { width: auto; padding: 8px 12px; background: var(--accent); color: var(--accent-ink); font-weight: 650; justify-content: center; }
     #chat-panel .chat-form button:hover { background: var(--accent); filter: brightness(1.08); }
+    /* An agent at work (glass mcp): status top left, its questions below, a marker where it points. */
+    #agent-dock {
+      position: fixed; top: var(--top); left: max(10px, env(safe-area-inset-left));
+      display: grid; gap: 8px; justify-items: start; width: min(460px, calc(100vw - 20px));
+      max-height: calc(100dvh - var(--top) - 20px); overflow-y: auto;
+      /* Only its cards take touches; the space around them stays the remote screen's. */
+      pointer-events: none;
+    }
+    #agent-dock > * { pointer-events: auto; }
+    #agent-bar {
+      display: flex; align-items: flex-start; gap: 4px; padding: 4px 4px 4px 12px; border-radius: var(--radius);
+      max-width: 100%; box-sizing: border-box; font-size: 13px;
+    }
+    #agent-bar details { flex: 1; min-width: 0; padding: 7px 0; }
+    #agent-bar summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+    #agent-bar summary::-webkit-details-marker { display: none; }
+    #agent-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #agent-bar .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: agent-breathe 1.6s ease-in-out infinite; }
+    #agent-bar[data-state="paused"] .dot { background: var(--warn); animation: none; }
+    #agent-bar[data-state="stopped"] .dot { background: var(--bad); animation: none; }
+    @keyframes agent-breathe { 50% { opacity: 0.35; } }
+    #agent-recent { margin: 8px 0 2px; padding-left: 18px; color: var(--text-dim); font-size: 12.5px; display: grid; gap: 3px; }
+    #agent-bar button {
+      flex: none; padding: 7px 11px; border: 0; border-radius: var(--radius-sm); background: transparent;
+      color: var(--text); font: inherit; cursor: pointer;
+    }
+    #agent-bar button:hover { background: var(--surface-hover); }
+    #agent-stop { color: var(--bad) !important; }
+    #agent-bar[data-state="stopped"] #agent-stop { color: var(--text) !important; }
+    #agent-asks { display: grid; gap: 8px; width: min(380px, 100%); }
+    #agent-asks:empty { display: none; }
+    .agent-ask { padding: 14px; border-radius: var(--radius); animation: rise 300ms var(--ease-out); }
+    .agent-ask strong { display: block; font-size: 13px; color: var(--accent); }
+    .agent-ask p { margin: 6px 0 10px; font-size: 14.5px; line-height: 1.4; }
+    .agent-ask p.dim { color: var(--text-dim); font-size: 13px; margin: 0; }
+    .agent-ask input {
+      width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+      background: rgb(0 0 0 / 0.25); color: var(--text); font: inherit; font-size: 14px;
+    }
+    .agent-ask .row { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+    .agent-ask button {
+      padding: 8px 14px; border: 0; border-radius: var(--radius-sm); background: var(--surface-hover);
+      color: var(--text); font: inherit; font-size: 14px; cursor: pointer;
+    }
+    .agent-ask button.primary { background: var(--accent); color: var(--accent-ink); font-weight: 650; }
+    #agent-marker {
+      position: fixed; left: -14px; top: -14px; width: 28px; height: 28px; border-radius: 50%;
+      border: 2px solid var(--accent); box-shadow: 0 0 0 2px rgb(0 0 0 / 0.35); pointer-events: none;
+    }
+    #agent-marker.pulse { animation: agent-ping 900ms var(--ease-out) forwards; }
+    @keyframes agent-ping { from { opacity: 1; scale: 0.6; } 60% { opacity: 1; scale: 1; } to { opacity: 0; scale: 1.5; } }
+    #agent-bar button:focus-visible, .agent-ask button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
     /* Display previews along the bottom, in the band below the picture when there's room. */
     #thumbs {
       position: fixed; left: 50%; bottom: max(10px, env(safe-area-inset-bottom)); transform: translateX(-50%);
@@ -435,6 +487,18 @@
     <header><span>Terminal</span><button id="terminal-full" type="button" aria-pressed="false">Full screen</button><button id="terminal-end" type="button">End shell</button><button id="terminal-close" type="button">Hide</button></header>
     <div id="terminal-screen"></div>
   </section>
+  <div id="agent-dock">
+  <div id="agent-bar" class="glass hidden" role="status" aria-live="polite">
+    <details>
+      <summary><span class="dot" aria-hidden="true"></span><span id="agent-label">Agent working</span></summary>
+      <ol id="agent-recent" aria-label="Agent's recent steps"></ol>
+    </details>
+    <button id="agent-pause" type="button">Pause</button>
+    <button id="agent-stop" type="button">Stop</button>
+  </div>
+  <div id="agent-asks"></div>
+  </div>
+  <div id="agent-marker" class="hidden" aria-hidden="true"></div>
   <nav id="thumbs" class="glass hidden" aria-label="Display previews">
     <div id="thumbs-list"></div>
     <button id="thumbs-hide" type="button" title="Hide previews" aria-label="Hide previews"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></button>
@@ -448,7 +512,7 @@
     <form class="glass" novalidate>
       <svg class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
       <h1>Sign in to this computer</h1>
-      <p>This device isn't on the same Tailscale account, so it needs the access token. On the host, run <code>glass token</code>.</p>
+      <p>This device isn't on the same Tailscale account as this computer. Ask its owner to run <code>glass link</code> on it and send you the link, or to give you the token from <code>glass token</code>.</p>
       <p id="auth-error" class="error hidden" role="alert">That token didn't work. Check it and try again.</p>
       <input name="token" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Access token" aria-label="Access token" required>
       <button type="submit">Connect</button>

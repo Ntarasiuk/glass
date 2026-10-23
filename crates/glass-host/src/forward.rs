@@ -72,6 +72,10 @@ fn other_cookies(headers: &HeaderMap) -> Option<String> {
 /// or the signed cookie `/fwd/auth` (or `/admin/auth`) sets. Shared by other owner-only
 /// HTTP routes.
 pub(crate) async fn is_owner(peer: IpAddr, headers: &HeaderMap) -> bool {
+    // Tests stand a second local host in for another tailnet machine of the same owner.
+    if crate::testmode::enabled() && peer.is_loopback() && std::env::var_os("GLASS_TEST_TRUST_LOOPBACK").is_some() {
+        return true;
+    }
     if let (Some(auth), Some(token)) = (headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()), token())
         && let Some(given) = auth.strip_prefix("Bearer ")
         && crate::control::token_matches(given.trim(), &token)

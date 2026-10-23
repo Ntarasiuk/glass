@@ -98,9 +98,10 @@ pub trait VideoSource: Send + Sync {
     fn frame_generation(&self, _stream: u8) -> Option<u64> {
         None
     }
-    /// A small picture of display `id` (by `DisplayInfo::id`), shown or not, for the viewer's
-    /// display previews. May block. `None` when there's none (yet).
-    fn thumbnail(&self, _id: u32) -> Option<crate::lossless::RawFrame> {
+    /// A picture of display `id` (by `DisplayInfo::id`), shown or not, at most `max` pixels
+    /// (aspect kept): display previews and agents' screenshots. May block. `None` when
+    /// there's none (yet).
+    fn picture(&self, _id: u32, _max: [u32; 2]) -> Option<crate::lossless::RawFrame> {
         None
     }
     /// Capture in full colour (BGRA), so `raw_frame` has pictures to send losslessly.
@@ -135,6 +136,13 @@ pub trait InputSink: Send {
     /// Maps absolute coordinates on stream 0 to this rectangle of the desktop (global
     /// points) instead of a display: a streamed window. `None` goes back to displays.
     fn set_window_rect(&mut self, _rect: Option<[f64; 4]>) {}
+    /// Moves the pointer to `x`, `y` (0..1) of display `display`, streamed or not (agents).
+    fn move_on_display(&mut self, display: u32, x: f32, y: f32);
+    /// Types `text` as is, any characters; `false` when this sink can't (the caller then
+    /// presses keys for it).
+    fn type_text(&mut self, _text: &str) -> bool {
+        false
+    }
 }
 
 /// The host clipboard (text).

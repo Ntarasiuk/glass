@@ -79,6 +79,27 @@ impl Injector {
         self.layout = video::layout_rect();
     }
 
+    /// Moves the absolute pointer to `x`, `y` (0..1) of the rectangle `r` (logical coords).
+    fn move_in(&mut self, r: video::Rect, x: f32, y: f32) {
+        let gx = r.x + x.clamp(0.0, 1.0) as f64 * r.w;
+        let gy = r.y + y.clamp(0.0, 1.0) as f64 * r.h;
+        let l = self.layout;
+        let ax = (((gx - l.x) / l.w.max(1.0)) * ABS_MAX as f64).round() as i32;
+        let ay = (((gy - l.y) / l.h.max(1.0)) * ABS_MAX as f64).round() as i32;
+        self.pointer(&[
+            InputEvent::new(
+                EventType::ABSOLUTE.0,
+                AbsoluteAxisCode::ABS_X.0,
+                ax.clamp(0, ABS_MAX),
+            ),
+            InputEvent::new(
+                EventType::ABSOLUTE.0,
+                AbsoluteAxisCode::ABS_Y.0,
+                ay.clamp(0, ABS_MAX),
+            ),
+        ]);
+    }
+
     pub fn handle(&mut self, ev: Ev) {
         self.ensure_devices();
         match ev {
@@ -91,23 +112,7 @@ impl Injector {
                 else {
                     return;
                 };
-                let gx = r.x + x.clamp(0.0, 1.0) as f64 * r.w;
-                let gy = r.y + y.clamp(0.0, 1.0) as f64 * r.h;
-                let l = self.layout;
-                let ax = (((gx - l.x) / l.w.max(1.0)) * ABS_MAX as f64).round() as i32;
-                let ay = (((gy - l.y) / l.h.max(1.0)) * ABS_MAX as f64).round() as i32;
-                self.pointer(&[
-                    InputEvent::new(
-                        EventType::ABSOLUTE.0,
-                        AbsoluteAxisCode::ABS_X.0,
-                        ax.clamp(0, ABS_MAX),
-                    ),
-                    InputEvent::new(
-                        EventType::ABSOLUTE.0,
-                        AbsoluteAxisCode::ABS_Y.0,
-                        ay.clamp(0, ABS_MAX),
-                    ),
-                ]);
+                self.move_in(r, x, y);
             }
             // Routed to crate::gamepad by the server, never here.
             Ev::Gamepad { .. } => {}
@@ -267,5 +272,12 @@ impl crate::media::InputSink for Injector {
     }
     fn set_displays(&mut self, displays: &[u32]) {
         Injector::set_displays(self, displays)
+    }
+    fn move_on_display(&mut self, display: u32, x: f32, y: f32) {
+        self.ensure_devices();
+        self.layout = video::layout_rect();
+        if let Some(r) = video::rect_of(display) {
+            self.move_in(r, x, y);
+        }
     }
 }

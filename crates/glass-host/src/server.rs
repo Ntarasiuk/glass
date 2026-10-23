@@ -131,6 +131,7 @@ pub async fn run(
         .merge(crate::ldap::routes())
         .merge(crate::scim::routes())
         .merge(crate::acl::routes())
+        .merge(crate::computer::routes())
         .route("/config.json", get(client_config))
         .route(
             "/machines.json",
@@ -754,6 +755,9 @@ async fn control(
         let path = Some(r.path.display().to_string());
         control::write_json(&mut send, &ServerMsg::Recording { on: true, path }).await?;
     }
+    for msg in crate::computer::snapshot() {
+        control::write_json(&mut send, &msg).await?;
+    }
     if perms.owner
         && let Some(version) = crate::update::available()
     {
@@ -940,6 +944,9 @@ async fn control(
                 }
                 Err(e) => refuse(&format!("Couldn't wake {dns}: {e:#}")),
             },
+            ClientMsg::Agent { .. } | ClientMsg::AgentAnswer { .. } if guest => refuse(OWNER_ONLY),
+            ClientMsg::Agent { op } => crate::computer::control(&op),
+            ClientMsg::AgentAnswer { id, ok, note } => crate::computer::answer(id, crate::computer::Answer { ok, note }),
             ClientMsg::Privacy { .. } if guest => refuse(OWNER_ONLY),
             ClientMsg::Privacy { on } => {
                 if let Err(e) = crate::privacy::set_forced(on) {
@@ -959,7 +966,7 @@ async fn control(
                             displays
                                 .iter()
                                 .filter_map(|d| {
-                                    let frame = shared.video.thumbnail(d.id)?;
+                                    let frame = shared.video.picture(d.id, crate::thumbs::MAX)?;
                                     Some((d.id, crate::thumbs::png(&frame).ok()?))
                                 })
                                 .collect::<Vec<_>>()
@@ -1419,6 +1426,13 @@ const MACHINES_TTL: Duration = Duration::from_secs(15);
 
 /// Your tailnet devices and which of them run Glass, for the client's machine switcher.
 async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_json::Value> {
+    // Tests stand in other hosts for tailnet machines.
+    if crate::testmode::enabled()
+        && let Ok(list) = std::env::var("GLASS_TEST_MACHINES")
+        && let Ok(list) = serde_json::from_str::<serde_json::Value>(&list)
+    {
+        return Json(serde_json::json!({ "machines": list, "groups": [] }));
+    }
     let mut cache = cache.lock().await;
     if let Some((at, list)) = cache.as_ref()
         && at.elapsed() < MACHINES_TTL

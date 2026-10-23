@@ -14,6 +14,7 @@ import { answerPasskey } from './passkey.js';
 import { createTerminal } from './terminal.js';
 import { createAnnotator } from './annotate.js';
 import { createThumbs } from './thumbs.js';
+import { createAgent } from './agent.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -336,6 +337,24 @@ const ui = createUI({
   },
 });
 const terminal = createTerminal({ control, log });
+// Which display each stream shows, for placing the agent's marker.
+let streamIds = [];
+const agent = createAgent({
+  control,
+  locate(display, x, y) {
+    const i = streamIds.indexOf(display);
+    const el = (rtpVideo ? videos : canvases)[i];
+    if (i < 0 || !el) return null;
+    const [w, h] = (videoSizes[i] ?? '').split('×').map(Number);
+    const r = el.getBoundingClientRect();
+    if (!w || !h || !r.width) return null;
+    // object-fit: contain centres the picture in its box.
+    const scale = Math.min(r.width / w, r.height / h);
+    const left = r.left + (r.width - w * scale) / 2;
+    const top = r.top + (r.height - h * scale) / 2;
+    return { x: left + x * w * scale, y: top + y * h * scale };
+  },
+});
 const thumbs = createThumbs({
   control,
   onSelect: (id) => control(id === 'all' ? { t: 'showAll' } : { t: 'selectDisplay', id }),
@@ -588,6 +607,8 @@ function onControl(msg) {
   switch (msg.t) {
     case 'welcome':
       thumbs.setConnected(true);
+      agent.reset();
+      agent.setOwner(Boolean(msg.perms ? msg.perms.owner : !msg.guest));
       machineFailures = 0;
       clearTimeout(machineTimer);
       displays = msg.displays;
@@ -669,6 +690,12 @@ function onControl(msg) {
       break;
     case 'thumbs':
       thumbs.onMessage(msg);
+      break;
+    case 'agentStatus':
+    case 'agentAction':
+    case 'agentAsk':
+    case 'agentAnswered':
+      agent.onMessage(msg);
       break;
     case 'windows':
       for (const w of msg.windows) streamedWindows.add(w.id);
@@ -976,6 +1003,7 @@ function onLayout(streams) {
   videoSizes.length = streams.length;
   showStreams(streams.length);
   ui.renderDisplays(displays, streams.map((d) => d.id));
+  streamIds = streams.map((d) => d.id);
   thumbs.setDisplays(displays.filter((d) => !streamedWindows.has(d.id)), streams.map((d) => d.id));
 }
 

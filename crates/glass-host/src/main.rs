@@ -1,4 +1,5 @@
 mod access;
+mod computer;
 mod admin;
 mod acl;
 mod approval;
@@ -9,8 +10,10 @@ mod files;
 mod forward;
 mod gamepad;
 mod ipc;
+mod keys;
 mod ldap;
 mod lossless;
+mod mcp;
 mod media;
 mod mic;
 mod notify;
@@ -139,6 +142,22 @@ enum Command {
     },
     /// Send feedback to the Glass developers.
     Feedback { message: Vec<String> },
+    /// MCP server (stdio) letting an AI agent see and use this computer, or another one on
+    /// your tailnet; you watch and can pause, stop or answer it from the viewer.
+    /// Add it to Claude Code: claude mcp add glass -- glass mcp
+    Mcp {
+        /// Another computer running Glass, by tailnet name (mac-mini) or full name.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Glass's address, e.g. http://127.0.0.1:8080 (instead of --machine).
+        #[arg(long)]
+        url: Option<String>,
+        /// The token file to sign in with (default: this computer's).
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+    },
+    /// Restart the background service (viewers reconnect by themselves).
+    Restart,
     /// Stop the background service and remove it from login items.
     Uninstall,
     /// Install the latest release (and restart the service onto it).
@@ -458,6 +477,25 @@ fn decide_cli(id: Option<u64>, allow: bool) -> Result<()> {
     Ok(())
 }
 
+/// `glass restart`: restarts the service and waits until it's back.
+fn restart_service() -> Result<()> {
+    anyhow::ensure!(agent::is_installed(), "Glass isn't installed as a background service; run `glass setup`");
+    let before = status::read().map(|s| s.pid);
+    agent::restart()?;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(20) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if let Some(s) = status::read()
+            && Some(s.pid) != before
+            && s.is_fresh()
+        {
+            println!("Glass restarted (pid {}). Viewers reconnect by themselves.", s.pid);
+            return Ok(());
+        }
+    }
+    anyhow::bail!("Glass hasn't come back yet; check `glass status` and the logs")
+}
+
 /// `glass remote on|off|status`.
 fn remote_cli(action: &str) -> Result<()> {
     match action {
@@ -545,6 +583,7 @@ async fn async_main(args: Args) -> Result<()> {
             Ok(())
         }
         Some(Command::Feedback { message }) => send_feedback(&message.join(" ")),
+        Some(Command::Mcp { machine, url, token_file }) => mcp::run(url.clone(), machine.clone(), token_file.clone()),
         Some(Command::Update) => update::run_cli(),
         Some(Command::Link { list: true, json, .. }) => list_passes(*json),
         Some(Command::Link {
@@ -691,6 +730,7 @@ async fn async_main(args: Args) -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Restart) => restart_service(),
         Some(Command::Uninstall) => {
             agent::uninstall()?;
             println!(
