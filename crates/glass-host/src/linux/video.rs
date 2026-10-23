@@ -45,7 +45,14 @@ struct Monitor {
     keyframe: AtomicBool,
     /// Adaptive target bitrate; the encoder thread applies changes.
     bitrate: std::sync::atomic::AtomicU32,
+    /// The latest picture in BGRA, kept only while sharp text wants lossless refreshes.
+    latest: Mutex<Option<Arc<crate::lossless::RawFrame>>>,
+    /// Bumped with each new captured picture.
+    generation: std::sync::atomic::AtomicU64,
 }
+
+/// Lossless refreshes wanted (sharp text): keep a BGRA copy of each new picture.
+static FULL_COLOUR: AtomicBool = AtomicBool::new(false);
 
 /// Monitor rects for input mapping, by display id.
 static RECTS: Mutex<Vec<Rect>> = Mutex::new(Vec::new());
@@ -257,6 +264,8 @@ impl Video {
                     builtin: false,
                 }),
                 slot: AtomicI32::new(-1),
+                latest: Mutex::new(None),
+                generation: std::sync::atomic::AtomicU64::new(0),
                 keyframe: AtomicBool::new(true),
                 bitrate: std::sync::atomic::AtomicU32::new(self.config.bitrate as u32),
             });
@@ -351,6 +360,27 @@ fn encode_loop(
         if target != applied_bitrate {
             encoder.as_mut().unwrap().set_bitrate(target);
             applied_bitrate = target;
+        }
+        if has_fresh {
+            monitor.generation.fetch_add(1, Ordering::Relaxed);
+            // PipeWire hands over BGRx/RGBx memory as is: full colour, nothing to convert
+            // back from YUV. Copied only while someone wants it.
+            if FULL_COLOUR.load(Ordering::Relaxed)
+                && let Some(bgra) = crate::lossless::to_bgra(
+                    &frame.data,
+                    frame.width,
+                    frame.height,
+                    frame.stride,
+                    matches!(frame.format, PixelFormat::Rgbx),
+                )
+            {
+                *monitor.latest.lock().unwrap() = Some(Arc::new(crate::lossless::RawFrame {
+                    width: frame.width,
+                    height: frame.height,
+                    bgra,
+                    capture_us: *captured_us,
+                }));
+            }
         }
         let capture_us = if has_fresh { *captured_us } else { now_us() };
         match encoder.as_mut().unwrap().encode(frame, force) {
@@ -552,6 +582,27 @@ impl VideoSource for Video {
     }
     fn displays(&self) -> Result<Vec<DisplayInfo>> {
         Video::displays(self)
+    }
+    fn supports_lossless(&self) -> bool {
+        true
+    }
+    fn set_full_colour(&self, on: bool) {
+        FULL_COLOUR.store(on, Ordering::Relaxed);
+        if !on && let Some(monitors) = self.monitors.lock().unwrap().as_ref() {
+            for m in monitors {
+                *m.latest.lock().unwrap() = None;
+            }
+        }
+    }
+    fn frame_generation(&self, stream: u8) -> Option<u64> {
+        let monitors = self.monitors.lock().unwrap();
+        let m = monitors.as_ref()?.iter().find(|m| m.slot.load(Ordering::Relaxed) == stream as i32)?;
+        Some(m.generation.load(Ordering::Relaxed))
+    }
+    fn raw_frame(&self, stream: u8) -> Option<Arc<crate::lossless::RawFrame>> {
+        let monitors = self.monitors.lock().unwrap();
+        let m = monitors.as_ref()?.iter().find(|m| m.slot.load(Ordering::Relaxed) == stream as i32)?;
+        m.latest.lock().unwrap().clone()
     }
     fn set_bitrate(&self, bps: u32) {
         if let Some(monitors) = self.monitors.lock().unwrap().as_ref() {

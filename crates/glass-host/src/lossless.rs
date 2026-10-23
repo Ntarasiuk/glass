@@ -217,9 +217,37 @@ async fn send(conn: &wtransport::Connection, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// A tightly packed BGRA copy of a captured BGRx or RGBx picture (rows `stride` bytes
+/// apart), for lossless refresh from capture paths that hand over raw memory (Linux).
+pub fn to_bgra(data: &[u8], width: usize, height: usize, stride: usize, rgb: bool) -> Option<Vec<u8>> {
+    if stride < width * 4 || data.len() < stride * height.saturating_sub(1) + width * 4 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(width * height * 4);
+    for row in data.chunks(stride).take(height) {
+        for px in row[..width * 4].chunks_exact(4) {
+            let (b, r) = if rgb { (px[2], px[0]) } else { (px[0], px[2]) };
+            out.extend_from_slice(&[b, px[1], r, 255]);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packs_bgrx_and_rgbx_rows_into_bgra() {
+        // 2×2, stride 12 (4 bytes of padding per row).
+        let bgrx = [1, 2, 3, 0, 4, 5, 6, 0, 9, 9, 9, 9, 7, 8, 9, 0, 10, 11, 12, 0, 9, 9, 9, 9];
+        assert_eq!(
+            to_bgra(&bgrx, 2, 2, 12, false).unwrap(),
+            vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255]
+        );
+        assert_eq!(&to_bgra(&bgrx, 2, 2, 12, true).unwrap()[..4], &[3, 2, 1, 255]);
+        assert!(to_bgra(&bgrx[..10], 2, 2, 12, false).is_none());
+    }
 
     fn frame(w: usize, h: usize, f: impl Fn(usize, usize) -> [u8; 3]) -> RawFrame {
         let mut bgra = Vec::with_capacity(w * h * 4);
