@@ -297,6 +297,8 @@
       background: transparent; color: var(--text); font: 600 14px var(--font); cursor: pointer;
     }
     #shortcut-bar button:active { background: var(--surface-active); }
+    #auth .sso { display: block; padding: 11px; border-radius: var(--radius-sm); border: 1px solid var(--border); color: var(--text); text-align: center; text-decoration: none; font-weight: 600; }
+    #auth .sso:hover { background: var(--surface-hover); }
   </style>
 </head>
 <body>
@@ -380,6 +382,7 @@
       <p id="auth-error" class="error hidden" role="alert">That token didn't work. Check it and try again.</p>
       <input name="token" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Access token" aria-label="Access token" required>
       <button type="submit">Connect</button>
+      <a id="sso" class="sso hidden" href="sso/start">Sign in with your organization</a>
     </form>
   </div>
 

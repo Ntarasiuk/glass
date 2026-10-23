@@ -114,6 +114,8 @@ pub async fn run(
                 "version": version,
                 // For Wake-on-LAN from another host on this LAN.
                 "macs": crate::wol::own_macs(),
+                // The sign-in screen offers single sign-on.
+                "sso": crate::oidc::enabled(),
             }))
         }
     };
@@ -123,6 +125,7 @@ pub async fn run(
     let app = axum::Router::new()
         .merge(extra_routes.unwrap_or_default())
         .merge(crate::forward::routes())
+        .merge(crate::oidc::routes())
         .route("/config.json", get(client_config))
         .route(
             "/machines.json",

@@ -10,6 +10,7 @@ mod ipc;
 mod media;
 mod mic;
 mod notify;
+mod oidc;
 mod passkey;
 mod power;
 mod privacy;
