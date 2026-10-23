@@ -126,6 +126,30 @@ pub fn b64url(bytes: &[u8]) -> String {
     out
 }
 
+/// Decodes base64url (padding optional; standard `+/` accepted too).
+pub fn b64url_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in s.trim_end_matches('=').bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        } as u32;
+        acc = acc << 6 | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
 // ---- On/off ----
 
 /// Remote access is opt-in: `glass link --anywhere` turns it on, `glass remote off` off.
@@ -917,6 +941,11 @@ mod tests {
         assert_eq!(b64url(b"fo"), "Zm8");
         assert_eq!(b64url(b"foo"), "Zm9v");
         assert_eq!(b64url(&[0xfb, 0xff]), "-_8");
+        for bytes in [&b""[..], b"f", b"fo", b"foo", b"foob", &[0xfb, 0xff, 0x00, 0x10]] {
+            assert_eq!(b64url_decode(&b64url(bytes)).as_deref(), Some(bytes));
+        }
+        assert_eq!(b64url_decode("Zm8=").as_deref(), Some(&b"fo"[..]));
+        assert_eq!(b64url_decode("Zm 8"), None);
     }
 
     #[test]
