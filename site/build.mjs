@@ -158,16 +158,27 @@ ${pages.map(([path, src]) => `  <url><loc>${SITE}${path}</loc><lastmod>${lastMod
 rmSync('public/app', { recursive: true, force: true });
 cpSync('../web', 'public/app', { recursive: true });
 
-// Latest release from the Rust build (../dist, made by scripts/package.sh).
+// Releases: ../dist (scripts/package.sh, or the signed CI build fetched from GitHub when dist
+// lacks this version). "latest" is always this Cargo.toml version, so the installer can't
+// serve an older build than version.json announces (hosts would offer the update forever).
 mkdirSync('public/releases', { recursive: true });
 const dist = '../dist';
-if (existsSync(dist)) {
-  for (const f of readdirSync(dist)) copyFileSync(`${dist}/${f}`, `public/releases/${f}`);
+const PLATFORMS = ['darwin-universal', 'linux-x86_64'];
+const missing = () => PLATFORMS.some((p) => !existsSync(`${dist}/glass-${version}-${p}.tar.gz`));
+if (missing()) {
+  try {
+    execFileSync('gh', ['release', 'download', `v${version}`, '-R', 'Ntarasiuk/glass', '-D', dist, '-p', `glass-${version}-*`, '--clobber'], { stdio: 'inherit' });
+  } catch {}
+}
+if (missing()) throw new Error(`no ${version} release in ${dist}: run scripts/package.sh, or wait for the v${version} release workflow`);
+for (const f of readdirSync(dist).filter((f) => !f.startsWith('glass-latest-'))) {
+  copyFileSync(`${dist}/${f}`, `public/releases/${f}`);
+}
+for (const p of PLATFORMS) {
+  copyFileSync(`${dist}/glass-${version}-${p}.tar.gz`, `public/releases/glass-latest-${p}.tar.gz`);
 }
 // The installer verifies each platform's "latest" tarball against this checksum.
-const releases = readdirSync('public/releases');
-const latest = releases.filter((f) => /^glass-latest-.*\.tar\.gz$/.test(f));
-if (!latest.length) console.warn('warning: no release found; run scripts/package.sh first');
+const latest = PLATFORMS.map((p) => `glass-latest-${p}.tar.gz`);
 for (const f of latest) {
   // Hash the file itself: with several versions around, any lookup by name can pick a stale one.
   const sum = createHash('sha256').update(readFileSync(`public/releases/${f}`)).digest('hex');
