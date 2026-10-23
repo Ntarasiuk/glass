@@ -93,6 +93,18 @@ header.site nav a:hover, footer.site a:hover { color: var(--text); }
 }
 .copy:hover { background: #fff; }
 
+/* Works-with badges: small glass pills under the install hint. */
+.works { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin: 22px 0 0; padding: 0; list-style: none; }
+.works li {
+  --lg-panel-radius: 999px;
+  display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 16px 0 14px;
+  color: var(--text); font-size: 13px;
+}
+.works span { color: var(--text-faint); }
+.works b { font-weight: 600; letter-spacing: -0.01em; }
+.works .apple { width: 15px; height: 15px; margin-top: -2px; }
+.works .omarchy { height: 12px; width: auto; }
+
 /* Single-column hero */
 .hero-solo { grid-template-columns: 1fr; justify-items: center; text-align: center; padding-bottom: clamp(40px, 6vw, 72px); }
 .hero-solo .hero-copy { display: grid; justify-items: center; }
