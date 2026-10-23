@@ -152,20 +152,20 @@ pub async fn run(
                     let app = app.clone();
                     info!("web client at https://<host>/ (port {port})");
                     tokio::spawn(async move {
-                        if let Err(e) = server.serve(app.into_make_service()).await {
+                        if let Err(e) = server.serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
                             warn!("port {port}: {e}");
                         }
                     });
                 }
                 info!("web client at https://<host>:{web_port}");
                 axum_server::from_tcp_rustls(http_listener, rustls)?
-                    .serve(app.into_make_service())
+                    .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                     .await
             }
             None => {
                 info!("web client at http://localhost:{web_port}");
                 axum_server::from_tcp(http_listener)?
-                    .serve(app.into_make_service())
+                    .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                     .await
             }
         };

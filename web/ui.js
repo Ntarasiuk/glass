@@ -21,7 +21,7 @@ const TOOLBAR_IDLE_MS = 3000;
 // Matches the slide-in transition in index.html (420 ms), plus a beat.
 const TOOLBAR_WAKE_MS = 450;
 
-export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -29,6 +29,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     displays: { button: $('btn-displays'), panel: $('displays-panel') },
     shortcuts: { button: $('btn-shortcuts'), panel: $('shortcuts-panel') },
     more: { button: $('btn-more'), panel: $('more-panel') },
+    ports: { button: $('btn-ports'), panel: $('ports-panel') },
   };
   const fileInput = $('file-input');
   const toasts = $('toasts');
@@ -92,6 +93,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   on('btn-mic', () => onMic?.());
   on('btn-fullscreen', onFullscreen);
   on('btn-stats', onToggleStats);
+  on('btn-terminal', onTerminal);
+  on('btn-ports', () => toggleMenu('ports'));
 
   fileInput.addEventListener('change', () => {
     if (fileInput.files.length) onUploadFiles([...fileInput.files]);
@@ -541,6 +544,21 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     /** The ⌘ menu (Mac shortcuts and key remaps) only applies to Mac hosts. */
     setHostOs(os) {
       $('btn-shortcuts').classList.toggle('hidden', os !== 'macos');
+    },
+    /** Ports the host forwards (owner, tailnet): each opens in a new tab at `urlFor(port)`. */
+    setPorts(ports, urlFor) {
+      $('btn-ports').classList.toggle('hidden', !ports.length);
+      if (!ports.length) setMenuOpen('ports', false);
+      menus.ports.panel.replaceChildren(
+        ...ports.map((port) =>
+          menuItem(`localhost:${port}`, 'Open', {
+            onSelect: () => {
+              setMenuOpen('ports', false);
+              window.open(urlFor(port), '_blank', 'noopener');
+            },
+          }),
+        ),
+      );
     },
     setAudioAvailable(available) {
       $('btn-audio').classList.toggle('hidden', !available);

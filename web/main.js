@@ -10,6 +10,7 @@ import { MAC_KEYCODES as K } from './keymap.js';
 import { hostIdFor, serveRtc } from './rtc.js';
 import { createChat } from './chat.js';
 import { answerPasskey } from './passkey.js';
+import { createTerminal } from './terminal.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -239,13 +240,24 @@ const ui = createUI({
     log('info', `restart ${restarting}`);
     onConnectionStatus('restarting');
   },
+  onTerminal: () => terminal.toggle(),
   onToken: (t) => {
+    signedInToken = t;
     tokenTried = true;
     showStatus('connecting', 'Connecting', machineName(currentHost));
     storage((s) => s.setItem(tokenKey, t));
     worker.postMessage({ type: 'token', token: t });
   },
 });
+const terminal = createTerminal({ control, log });
+// The token this page signed in with (if any), for opening forwarded ports.
+let signedInToken = token;
+
+/** A forwarded port on this host: with a token, via /fwd/auth so the tab gets its cookie. */
+function portUrl(port) {
+  const path = `/fwd/${port}/`;
+  return signedInToken ? `${location.origin}/fwd/auth?t=${encodeURIComponent(signedInToken)}&to=${encodeURIComponent(path)}` : `${location.origin}${path}`;
+}
 
 const chat = createChat({ onSend: (text) => control({ t: 'chat', text }), toast: (o) => ui.toast(o) });
 chat.setAvailable(false);
@@ -488,6 +500,10 @@ function onControl(msg) {
         ui.setMicAvailable(Boolean(msg.features?.mic) && canInput);
         if (!canInput && micStream) stopMic();
       }
+      terminal.reset();
+      terminal.setAvailable(Boolean(msg.perms?.owner && msg.features?.terminal));
+      // Forwarded ports are this page's host's, over plain HTTPS on the tailnet.
+      ui.setPorts(msg.perms?.owner && !remoteKey && currentHost === homeHost ? msg.features?.forward_ports ?? [] : [], portUrl);
       if (guest && resolutionMode.startsWith('fit:')) setResolution('auto');
       onLayout(msg.streams);
       queueViewport(true);
@@ -539,6 +555,9 @@ function onControl(msg) {
       lastMacClipboard = msg.text;
       for (const w of clipboardWaiters) w.resolve(msg.text);
       clipboardWaiters = [];
+      break;
+    case 'term':
+      terminal.onMessage(msg);
       break;
     case 'fileSaved':
       ui.toast({ text: `Saved on ${machineName(currentHost)}: ${msg.path.replace(/^\/(Users|home)\/[^/]+/, '~')}`, icon: 'file' });

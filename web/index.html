@@ -234,6 +234,23 @@
       #toolbar button { width: 34px; height: 36px; flex: none; }
       #toolbar svg { width: 18px; height: 18px; }
     }
+    /* The host's shell, over the lower part of the screen. */
+    #terminal {
+      position: fixed; left: max(10px, env(safe-area-inset-left)); right: var(--right); bottom: max(10px, env(safe-area-inset-bottom));
+      height: min(420px, 55vh); display: grid; grid-template-rows: auto 1fr; border-radius: var(--radius); overflow: hidden;
+      animation: rise 300ms var(--ease-out);
+    }
+    #terminal header {
+      display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 14px;
+      color: var(--text-dim); font-size: 12.5px; border-bottom: 1px solid var(--border);
+    }
+    #terminal header span { flex: 1; }
+    #terminal header button {
+      padding: 5px 10px; border: 0; border-radius: var(--radius-sm); background: transparent;
+      color: var(--text); font: inherit; cursor: pointer;
+    }
+    #terminal header button:hover { background: var(--surface-hover); }
+    #terminal-screen { min-height: 0; padding: 6px 4px 4px 10px; background: #0b0c0e; -webkit-user-select: text; user-select: text; }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
     }
@@ -292,6 +309,12 @@
     <button id="btn-mic" title="Microphone" class="hidden" aria-pressed="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
     </button>
+    <button id="btn-terminal" title="Terminal" aria-pressed="false" class="hidden">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg>
+    </button>
+    <button id="btn-ports" title="Forwarded ports" aria-haspopup="true" aria-expanded="false" class="hidden">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/></svg>
+    </button>
     <button id="btn-fullscreen" title="Fullscreen (Ctrl+Shift+F)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
     </button>
@@ -304,6 +327,11 @@
   <div id="displays-panel" class="panel glass hidden" role="menu" aria-label="Displays"></div>
   <div id="shortcuts-panel" class="panel glass hidden" role="menu" aria-label="Mac shortcuts"></div>
   <div id="more-panel" class="panel glass hidden" role="menu" aria-label="Computer"></div>
+  <div id="ports-panel" class="panel glass hidden" role="menu" aria-label="Forwarded ports"></div>
+  <section id="terminal" class="glass hidden" aria-label="Terminal">
+    <header><span>Terminal</span><button id="terminal-end" type="button">End shell</button><button id="terminal-close" type="button">Hide</button></header>
+    <div id="terminal-screen"></div>
+  </section>
   <div id="zoom-pill" class="glass hidden"><span id="zoom-level">1×</span><button id="zoom-reset" type="button">Reset</button></div>
   <div id="toasts" aria-live="polite"></div>
   <input id="file-input" type="file" multiple class="hidden">
