@@ -42,6 +42,13 @@ if (form) {
   });
 }
 
+// The hero logo turns into the wordmark once. With reduced motion it shows only the end: the wordmark.
+const mark = document.querySelector('video.mark');
+if (mark) {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) mark.poster = '/mark.webp';
+  else mark.play().catch(() => { mark.poster = '/mark.webp'; });
+}
+
 // Glass surfaces: Glassy UI's grain, and its edge lens where the browser can run it.
 for (const surface of document.querySelectorAll('.lg-glass-surface')) {
   const noise = document.createElement('span');
