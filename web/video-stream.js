@@ -1,7 +1,7 @@
 // One display's video: fragment reassembly, loss detection, WebCodecs decode and drawing.
 // The worker owns one per streamed display.
 
-import { fletcher16, FLAG_KEYFRAME, VIDEO_HEADER_LEN } from './proto.js';
+import { fletcher16, FLAG_HEVC, FLAG_KEYFRAME, VIDEO_HEADER_LEN } from './proto.js';
 
 const KEYFRAME_RETRY_MS = 250;
 
@@ -31,6 +31,18 @@ export async function probeDecoders(log, codec = 'avc1.640033') {
   const first = DECODER_LADDER.findIndex((c) => supported.includes(c.name));
   if (first > ladder.step) ladder.step = first;
   log(first < 0 ? 'error' : 'info', 'decoder support', { supported, using: DECODER_LADDER[ladder.step]?.name });
+}
+
+// HEVC Main, level 4.1: if this decodes in hardware, the host may send HEVC.
+const HEVC_PROBE = 'hvc1.1.6.L123.B0';
+
+/** The codecs to offer the host in hello: always H.264, HEVC where it's hardware-decoded. */
+export async function probeCodecs() {
+  const codecs = ['h264'];
+  if (typeof VideoDecoder === 'undefined') return codecs;
+  const { supported } = await VideoDecoder.isConfigSupported({ codec: HEVC_PROBE, hardwareAcceleration: 'prefer-hardware' }).catch(() => ({}));
+  if (supported) codecs.push('hevc');
+  return codecs;
 }
 
 /** Restores a fallback found in an earlier session (remembered per device by main.js). */
@@ -84,6 +96,7 @@ export class VideoStream {
         parts: new Array(h.fragCount),
         received: 0,
         keyframe: (h.flags & FLAG_KEYFRAME) !== 0,
+        hevc: (h.flags & FLAG_HEVC) !== 0,
         captureUs: h.captureUs,
         checksum: h.checksum,
       };
@@ -100,7 +113,9 @@ export class VideoStream {
     for (const key of this.pending.keys()) if (key <= id) this.pending.delete(key);
 
     const contiguous = this.lastDecodedId !== undefined && id === ((this.lastDecodedId + 1) >>> 0);
-    if (!frame.keyframe && (this.waitingForKeyframe || !contiguous)) {
+    // A delta in the other codec (the host just switched) can't follow this decoder.
+    const sameCodec = this.hevc === frame.hevc;
+    if (!frame.keyframe && (this.waitingForKeyframe || !contiguous || !sameCodec)) {
       this.env.stats.dropped++;
       this.requestKeyframe();
       return;
@@ -116,11 +131,11 @@ export class VideoStream {
       this.requestKeyframe();
       return;
     }
-    if (frame.keyframe && !this.ensureDecoder(data)) return;
+    if (frame.keyframe && !this.ensureDecoder(data, frame.hevc)) return;
     if (!this.decoder) return;
     this.waitingForKeyframe = false;
     this.lastDecodedId = id;
-    this.lastChunk = { type: frame.keyframe ? 'key' : 'delta', size: data.byteLength, id, nals: nalTypes(data) };
+    this.lastChunk = { type: frame.keyframe ? 'key' : 'delta', size: data.byteLength, id, nals: nalTypes(data, frame.hevc) };
     this.sinceKeyframe = frame.keyframe ? 0 : this.sinceKeyframe + 1;
     this.decoder.decode(new EncodedVideoChunk({ type: frame.keyframe ? 'key' : 'delta', timestamp: frame.captureUs, data }));
   }
@@ -133,17 +148,19 @@ export class VideoStream {
     this.env.requestKeyframe(this.index);
   }
 
-  ensureDecoder(annexB) {
-    const sps = findNal(annexB, 7);
+  ensureDecoder(annexB, hevc = false) {
+    const sps = findNal(annexB, hevc ? HEVC_SPS : 7, hevc);
     if (!sps) return false;
     const hex = (b) => b.toString(16).padStart(2, '0');
-    // A new SPS (e.g. after a display switch changes resolution) gets a fresh decoder.
-    const spsKey = Array.from(sps, hex).join('');
+    // A new SPS (e.g. after a display switch changes resolution, or a codec switch) gets
+    // a fresh decoder.
+    const spsKey = (hevc ? 'h' : 'a') + Array.from(sps, hex).join('');
     if (this.decoder && this.decoder.state === 'configured' && spsKey === this.currentSps) return true;
     this.currentSps = spsKey;
 
     try { this.decoder?.close(); } catch {}
-    this.codec = `avc1.${hex(sps[1])}${hex(sps[2])}${hex(sps[3])}`;
+    this.hevc = hevc;
+    this.codec = hevc ? hevcCodec(sps) : `avc1.${hex(sps[1])}${hex(sps[2])}${hex(sps[3])}`;
     this.decoder = new VideoDecoder({ output: (f) => this.draw(f), error: (e) => this.onDecodeError(e) });
     this.decoder.configure({ codec: this.codec, ...DECODER_LADDER[ladder.step] });
     this.env.post({ type: 'codec', stream: this.index, codec: `${this.codec} ${DECODER_LADDER[ladder.step].name}` });
@@ -220,23 +237,26 @@ function join(parts) {
   return out;
 }
 
+const HEVC_SPS = 33;
+const nalType = (header, hevc) => (hevc ? (header >> 1) & 0x3f : header & 0x1f);
+
 /** NAL unit types in an Annex B buffer, e.g. "7,8,5" or "1,1,1" (multi-slice). */
-function nalTypes(buf) {
+export function nalTypes(buf, hevc = false) {
   const types = [];
   for (let i = 0; i + 4 < buf.length; i++) {
     if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 0 && buf[i + 3] === 1) {
-      types.push(buf[i + 4] & 0x1f);
+      types.push(nalType(buf[i + 4], hevc));
       i += 4;
     }
   }
   return types.join(',');
 }
 
-/** Returns the first NAL unit of `type` (header byte included) in an Annex B buffer. */
-function findNal(buf, type) {
+/** Returns the first NAL unit of `type` (header included) in an Annex B buffer. */
+export function findNal(buf, type, hevc = false) {
   for (let i = 0; i + 4 < buf.length; i++) {
     if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 0 && buf[i + 3] === 1) {
-      if ((buf[i + 4] & 0x1f) === type) {
+      if (nalType(buf[i + 4], hevc) === type) {
         let end = i + 4;
         while (end + 3 < buf.length && !(buf[end] === 0 && buf[end + 1] === 0 && buf[end + 2] === 0 && buf[end + 3] === 1)) end++;
         return buf.subarray(i + 4, end + 3 < buf.length ? end : buf.length);
@@ -244,4 +264,44 @@ function findNal(buf, type) {
     }
   }
   return undefined;
+}
+
+/** Drops emulation-prevention bytes (00 00 03 → 00 00) to read a NAL unit's fields. */
+function unescape(nal) {
+  const out = [];
+  let zeros = 0;
+  for (const b of nal) {
+    if (zeros >= 2 && b === 3) {
+      zeros = 0;
+      continue;
+    }
+    zeros = b === 0 ? zeros + 1 : 0;
+    out.push(b);
+  }
+  return out;
+}
+
+/**
+ * The WebCodecs codec string for an HEVC SPS (2-byte NAL header first), from its
+ * profile_tier_level, e.g. "hvc1.1.6.L123.B0" (ISO/IEC 14496-15 Annex E).
+ */
+export function hevcCodec(sps) {
+  const b = unescape(sps);
+  // b[2]: vps id, max sub-layers, temporal nesting. profile_tier_level starts at b[3].
+  const space = b[3] >> 6;
+  const tier = (b[3] >> 5) & 1;
+  const profile = b[3] & 0x1f;
+  const compat = ((b[4] << 24) | (b[5] << 16) | (b[6] << 8) | b[7]) >>> 0;
+  let reversed = 0;
+  for (let i = 0; i < 32; i++) reversed = ((reversed << 1) | ((compat >>> i) & 1)) >>> 0;
+  const constraints = b.slice(8, 14);
+  while (constraints.length && constraints[constraints.length - 1] === 0) constraints.pop();
+  const level = b[14];
+  const prefix = ['', 'A', 'B', 'C'][space];
+  return [
+    `hvc1.${prefix}${profile}`,
+    reversed.toString(16).toUpperCase(),
+    `${tier ? 'H' : 'L'}${level}`,
+    ...constraints.map((c) => c.toString(16).toUpperCase()),
+  ].join('.');
 }

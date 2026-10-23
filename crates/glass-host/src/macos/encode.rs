@@ -1,7 +1,8 @@
-//! Hardware H.264 encoding with VideoToolbox in low-latency rate-control mode.
+//! Hardware H.264 or HEVC encoding with VideoToolbox in low-latency rate-control mode.
 //!
-//! Output is Annex B (start-code delimited) with SPS/PPS prepended to every
-//! keyframe, which WebCodecs decodes without an out-of-band `description`.
+//! Output is Annex B (start-code delimited) with the parameter sets (SPS/PPS, plus VPS
+//! for HEVC) prepended to every keyframe, which WebCodecs decodes without an
+//! out-of-band `description`.
 
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
@@ -14,7 +15,9 @@ use objc2_core_foundation::{
 };
 use objc2_core_media::{
     CMFormatDescription, CMSampleBuffer, CMTime,
-    CMVideoFormatDescriptionGetH264ParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_H264,
+    CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+    CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_H264,
+    kCMVideoCodecType_HEVC,
 };
 use objc2_core_video::CVImageBuffer;
 use objc2_video_toolbox::{
@@ -24,6 +27,7 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_MaxAllowedFrameQP, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
     kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
+    kVTProfileLevel_HEVC_Main_AutoLevel,
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
@@ -84,6 +88,7 @@ pub use crate::media::EncodedFrame;
 
 pub struct Encoder {
     session: CFRetained<VTCompressionSession>,
+    hevc: bool,
     force_keyframe: Arc<AtomicBool>,
     on_frame: Arc<dyn Fn(EncodedFrame) + Send + Sync>,
     /// The sharpness cap in force (MaxAllowedFrameQP; 0 = none), from `apply_policy`.
@@ -106,6 +111,7 @@ impl Encoder {
         height: i32,
         fps: i32,
         bitrate: i32,
+        hevc: bool,
         force_keyframe: Arc<AtomicBool>,
         on_frame: Arc<dyn Fn(EncodedFrame) + Send + Sync>,
     ) -> Result<Self> {
@@ -124,7 +130,11 @@ impl Encoder {
                 None,
                 width,
                 height,
-                kCMVideoCodecType_H264,
+                if hevc {
+                    kCMVideoCodecType_HEVC
+                } else {
+                    kCMVideoCodecType_H264
+                },
                 Some(spec.as_opaque()),
                 None,
                 None,
@@ -152,7 +162,11 @@ impl Encoder {
             );
             set(
                 kVTCompressionPropertyKey_ProfileLevel,
-                kVTProfileLevel_H264_High_AutoLevel,
+                if hevc {
+                    kVTProfileLevel_HEVC_Main_AutoLevel
+                } else {
+                    kVTProfileLevel_H264_High_AutoLevel
+                },
             );
 
             set(
@@ -171,6 +185,7 @@ impl Encoder {
 
         Ok(Self {
             session,
+            hevc,
             force_keyframe,
             on_frame,
             qp_cap: AtomicU32::new(0),
@@ -247,6 +262,7 @@ impl Encoder {
             CFDictionary::<CFString, CFType>::from_slices(&keys, &[CFBoolean::new(true)])
         });
         let on_frame = self.on_frame.clone();
+        let hevc = self.hevc;
         let (bytes, last_size) = (self.bytes.clone(), self.last_size.clone());
         let handler = RcBlock::new(
             move |status: i32, _flags: VTEncodeInfoFlags, sample: *mut CMSampleBuffer| {
@@ -259,7 +275,7 @@ impl Encoder {
                     note_skipped_frame();
                     return;
                 }
-                if let Some(frame) = unsafe { annex_b(&*sample) } {
+                if let Some(frame) = unsafe { annex_b(&*sample, hevc) } {
                     bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
                     last_size.store(frame.data.len() as u64, Ordering::Relaxed);
                     on_frame(EncodedFrame {
@@ -296,8 +312,40 @@ impl Drop for Encoder {
     }
 }
 
-/// Converts VideoToolbox's AVCC (4-byte length-prefixed) output to Annex B.
-unsafe fn annex_b(sample: &CMSampleBuffer) -> Option<EncodedFrame> {
+/// True when HEVC hardware encoding works here (probed once, with a tiny session).
+pub fn supports_hevc() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        let ok = Encoder::new(
+            640,
+            360,
+            30,
+            1_000_000,
+            true,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(|_| {}),
+        )
+        .is_ok();
+        tracing::info!(
+            "HEVC hardware encoding: {}",
+            if ok { "available" } else { "unavailable" }
+        );
+        ok
+    })
+}
+
+/// Whether a NAL unit (header first) starts a keyframe: an IDR slice in H.264, any
+/// random-access (IRAP, types 16–23) picture in HEVC.
+fn is_keyframe_nal(nal: &[u8], hevc: bool) -> bool {
+    match nal.first() {
+        Some(h) if hevc => (16..=23).contains(&((h >> 1) & 0x3f)),
+        Some(h) => h & 0x1f == 5,
+        None => false,
+    }
+}
+
+/// Converts VideoToolbox's AVCC/HVCC (4-byte length-prefixed) output to Annex B.
+unsafe fn annex_b(sample: &CMSampleBuffer, hevc: bool) -> Option<EncodedFrame> {
     let block = unsafe { sample.data_buffer() }?;
     let len = unsafe { block.data_length() };
     let mut avcc = vec![0u8; len];
@@ -313,7 +361,7 @@ unsafe fn annex_b(sample: &CMSampleBuffer) -> Option<EncodedFrame> {
     while i + 4 <= avcc.len() {
         let n = u32::from_be_bytes(avcc[i..i + 4].try_into().unwrap()) as usize;
         let nal = avcc.get(i + 4..i + 4 + n)?;
-        if nal.first().is_some_and(|h| h & 0x1f == 5) {
+        if is_keyframe_nal(nal, hevc) {
             keyframe = true;
         }
         out.extend_from_slice(&START_CODE);
@@ -324,9 +372,10 @@ unsafe fn annex_b(sample: &CMSampleBuffer) -> Option<EncodedFrame> {
     if keyframe {
         let format = unsafe { sample.format_description() }?;
         let mut params = Vec::new();
-        for idx in 0..2 {
+        // H.264: SPS, PPS. HEVC: VPS, SPS, PPS.
+        for idx in 0..if hevc { 3 } else { 2 } {
             params.extend_from_slice(&START_CODE);
-            params.extend_from_slice(unsafe { parameter_set(&format, idx) }?);
+            params.extend_from_slice(unsafe { parameter_set(&format, idx, hevc) }?);
         }
         out.splice(0..0, params);
     }
@@ -336,16 +385,21 @@ unsafe fn annex_b(sample: &CMSampleBuffer) -> Option<EncodedFrame> {
         data: out,
         keyframe,
         capture_us: 0,
-        hevc: false,
+        hevc,
     })
 }
 
-/// Index 0 is the SPS, 1 the PPS.
-unsafe fn parameter_set(format: &CMFormatDescription, idx: usize) -> Option<&[u8]> {
+/// H.264: index 0 is the SPS, 1 the PPS. HEVC: 0 VPS, 1 SPS, 2 PPS.
+unsafe fn parameter_set(format: &CMFormatDescription, idx: usize, hevc: bool) -> Option<&[u8]> {
     let mut ptr: *const u8 = ptr::null();
     let mut size = 0usize;
+    let get = if hevc {
+        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex
+    } else {
+        CMVideoFormatDescriptionGetH264ParameterSetAtIndex
+    };
     let status = unsafe {
-        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+        get(
             format,
             idx,
             &mut ptr,
@@ -355,4 +409,19 @@ unsafe fn parameter_set(format: &CMFormatDescription, idx: usize) -> Option<&[u8
         )
     };
     (status == 0 && !ptr.is_null()).then(|| unsafe { std::slice::from_raw_parts(ptr, size) })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn keyframe_nals() {
+        // H.264: IDR (5) yes, non-IDR slice (1) no.
+        assert!(super::is_keyframe_nal(&[0x65], false));
+        assert!(!super::is_keyframe_nal(&[0x41], false));
+        // HEVC: IDR_W_RADL (19) and CRA (21) yes, TRAIL_R (1) and SPS (33) no.
+        assert!(super::is_keyframe_nal(&[19 << 1, 1], true));
+        assert!(super::is_keyframe_nal(&[21 << 1, 1], true));
+        assert!(!super::is_keyframe_nal(&[1 << 1, 1], true));
+        assert!(!super::is_keyframe_nal(&[33 << 1, 1], true));
+    }
 }
