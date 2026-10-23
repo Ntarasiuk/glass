@@ -286,6 +286,9 @@
     <button id="btn-audio" title="Audio" class="hidden">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5z"/><path id="audio-waves" d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>
     </button>
+    <button id="btn-more" title="Computer" class="hidden" aria-haspopup="true" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg>
+    </button>
     <button id="btn-fullscreen" title="Fullscreen (Ctrl+Shift+F)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
     </button>
@@ -297,6 +300,7 @@
   <div id="machines-panel" class="panel glass hidden" role="menu" aria-label="Machines"></div>
   <div id="displays-panel" class="panel glass hidden" role="menu" aria-label="Displays"></div>
   <div id="shortcuts-panel" class="panel glass hidden" role="menu" aria-label="Mac shortcuts"></div>
+  <div id="more-panel" class="panel glass hidden" role="menu" aria-label="Computer"></div>
   <div id="zoom-pill" class="glass hidden"><span id="zoom-level">1×</span><button id="zoom-reset" type="button">Reset</button></div>
   <div id="toasts" aria-live="polite"></div>
   <input id="file-input" type="file" multiple class="hidden">

@@ -182,6 +182,12 @@ impl Injector {
     fn post(&self, ev: Option<CFRetained<CGEvent>>) {
         if let Some(ev) = ev {
             CGEvent::set_flags(Some(&ev), self.flags);
+            // Lets privacy mode's event tap tell these from the local keyboard and mouse.
+            CGEvent::set_integer_value_field(
+                Some(&ev),
+                CGEventField(super::privacy::USER_DATA_FIELD),
+                super::privacy::INJECTED_MARK,
+            );
             CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&ev));
         }
     }

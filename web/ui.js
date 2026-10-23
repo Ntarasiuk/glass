@@ -6,13 +6,14 @@ const TOOLBAR_IDLE_MS = 3000;
 // Matches the slide-in transition in index.html (420 ms), plus a beat.
 const TOOLBAR_WAKE_MS = 450;
 
-export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
     machines: { button: $('btn-machines'), panel: $('machines-panel') },
     displays: { button: $('btn-displays'), panel: $('displays-panel') },
     shortcuts: { button: $('btn-shortcuts'), panel: $('shortcuts-panel') },
+    more: { button: $('btn-more'), panel: $('more-panel') },
   };
   const fileInput = $('file-input');
   const toasts = $('toasts');
@@ -64,6 +65,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   });
   on('btn-displays', () => toggleMenu('displays'));
   on('btn-shortcuts', () => toggleMenu('shortcuts'));
+  on('btn-more', () => toggleMenu('more'));
   on('btn-keyboard', onKeyboard);
   on('btn-upload', () => fileInput.click());
   on('btn-download', onRequestFiles);
@@ -253,6 +255,38 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   }
   let resolutionMode = resolution;
   let lastDisplays;
+
+  // The computer menu (owner only): privacy screen and restarts.
+  let privacyAvailable = false;
+  let privacyOn = false;
+  function renderMore() {
+    const items = [];
+    if (privacyAvailable) {
+      const note = document.createElement('p');
+      note.className = 'note';
+      note.textContent = "Blanks the computer's own screen and ignores its keyboard and mouse while you're connected.";
+      items.push(
+        menuItem('Privacy screen', privacyOn ? 'on' : 'off', {
+          checked: privacyOn,
+          onSelect: () => { setMenuOpen('more', false); onPrivacy?.(!privacyOn); },
+        }),
+        note,
+        document.createElement('hr'),
+      );
+    }
+    const restart = (label, meta, glass, question) =>
+      menuItem(label, meta, {
+        onSelect: () => {
+          setMenuOpen('more', false);
+          if (confirm(question)) onRestart?.(glass);
+        },
+      });
+    items.push(
+      restart('Restart Glass', 'reconnects in seconds', true, "Restart Glass on this computer? You'll reconnect in a few seconds."),
+      restart('Restart computer', 'reconnects after login', false, "Restart this computer? Open apps are asked to quit. Glass reconnects once it's back and someone is logged in."),
+    );
+    menus.more.panel.replaceChildren(...items);
+  }
   let canFit = true;
 
   /** Names displays by where they sit in the macOS arrangement: Left / Right, Top / Bottom. */
@@ -378,6 +412,17 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     setResolution(mode) {
       resolutionMode = mode;
       if (lastDisplays) renderDisplays(...lastDisplays);
+    },
+    /** The computer menu: owners only; the privacy item only where the host supports it. */
+    setComputerControls({ isOwner, privacy }) {
+      privacyAvailable = privacy;
+      $('btn-more').classList.toggle('hidden', !isOwner);
+      if (!isOwner) setMenuOpen('more', false);
+      renderMore();
+    },
+    setPrivacyOn(on) {
+      privacyOn = on;
+      renderMore();
     },
     setStatsPressed(on) {
       $('btn-stats').setAttribute('aria-pressed', String(on));

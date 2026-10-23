@@ -157,6 +157,7 @@ const STATS_KEY = 'glass.stats';
 let statsVisible = storage((s) => s.getItem(STATS_KEY)) === '1';
 hud.classList.toggle('hidden', !statsVisible);
 let tokenTried = Boolean(token);
+let restarting; // 'Glass' or 'computer' after a restart request, until it's back
 const input = attachInput({
   screens,
   keySink,
@@ -214,6 +215,13 @@ const ui = createUI({
   onAudio: toggleAudio,
   onFullscreen: toggleFullscreen,
   onToggleStats: toggleStats,
+  onPrivacy: (on) => control({ t: 'privacy', on }),
+  onRestart: (glass) => {
+    restarting = glass ? 'Glass' : 'computer';
+    control({ t: 'restart', glass });
+    log('info', `restart ${restarting}`);
+    onConnectionStatus('restarting');
+  },
   onToken: (t) => {
     tokenTried = true;
     showStatus('connecting', 'Connecting', machineName(currentHost));
@@ -447,6 +455,9 @@ function onControl(msg) {
       inputAllowed = perms.input;
       ui.setPerms(perms);
       chat.setAvailable(true);
+      restarting = undefined;
+      ui.setComputerControls({ isOwner: msg.perms ? msg.perms.owner : !guest, privacy: Boolean(msg.features?.privacy) });
+      ui.setPrivacyOn(false);
       if (guest && resolutionMode.startsWith('fit:')) setResolution('auto');
       onLayout(msg.streams);
       queueViewport(true);
@@ -477,6 +488,10 @@ function onControl(msg) {
       storage((s) => s.setItem(passKey, JSON.stringify({ pass: msg.pass, expires: msg.expires })));
       ui.toast({ text: `You're in. This device has access until ${formatExpiry(msg.expires)}.`, icon: 'link', timeout: 6000 });
       log('info', 'signed in with a magic link', { expires: msg.expires });
+      break;
+    case 'privacy':
+      ui.setPrivacyOn(msg.on);
+      log('info', `privacy screen ${msg.on ? 'on' : 'off'}`);
       break;
     case 'bitrate':
       targetMbps = msg.bps / 1e6;
@@ -535,6 +550,11 @@ function hideStatus() {
 /** Maps the worker's status text to what the person should see. */
 function onConnectionStatus(text) {
   const name = machineName(currentHost);
+  // Restarting: the connection drops and retries for a while; that's expected.
+  if (restarting && text !== 'connected' && !text.startsWith('waiting for access token')) {
+    showStatus('reconnecting', 'Restarting…', restarting === 'Glass' ? `Glass is restarting on ${name}. Reconnecting…` : `${name} is restarting. This reconnects once it's back and someone is logged in.`);
+    return;
+  }
   if (text === 'connected') showStatus('connecting', `Connected to ${name}`, 'Waiting for the screen…');
   else if (text.startsWith('disconnected')) showStatus('reconnecting', 'Reconnecting', `Lost the connection to ${name}. Trying again…`);
   else if (text.startsWith('connection failed') && remoteKey) {
