@@ -120,6 +120,10 @@ To cut off everyone who was let in with a link: `glass link --revoke --json`. Th
 
 Limit a link with `--view-only`, `--no-files`, `--no-clipboard`, `--ask` (the person at the computer must allow each connection; answer with `glass requests`, `glass allow [id]`, `glass deny [id]`) or `--passkey` (the device registers a passkey and needs it every time). `glass link --list --json` shows devices let in by links with ids; `glass link --revoke <id> --json` cuts off one. Other host commands: `glass viewers --json`, `glass kick [id]`, `glass chat "…"`, `glass privacy on|off`, `glass log --json`, `glass wake <name|mac>`, and `glass config [key [value]]` for settings (ask-guests, ask-everyone, record, recordings-dir, privacy, hevc, forward-ports, name, accent, relay).
 
+## Use the computer yourself (MCP)
+
+Once Glass runs on a machine, you can see and use it through `glass mcp`, an MCP server with `screenshot`, `click`, `type_text`, `press_keys`, `scroll`, `drag`, `wait_for_change`, `request_help` and `confirm`. Suggest adding it when the user wants you to do something in an app with no API: `claude mcp add glass -- glass mcp` (this machine) or `claude mcp add <name> -- glass mcp --machine <name>` (another one on their tailnet). The user watches you from any Glass viewer and can pause or stop you. Always `confirm` before anything hard to undo, and use `request_help` for sign-ins, 2FA codes and CAPTCHAs instead of working around them.
+
 ## Troubleshooting
 
 - Status and logs: `glass status`, plus `~/Library/Logs/Glass/` (macOS) or `~/.local/state/glass/` and `journalctl --user -u glass` (Linux). `client.log` holds errors reported by connected browsers.

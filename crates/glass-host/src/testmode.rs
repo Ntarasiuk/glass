@@ -217,10 +217,10 @@ impl VideoSource for TestVideo {
         FULL_COLOUR.store(on, Ordering::Relaxed);
     }
 
-    fn thumbnail(&self, id: u32) -> Option<crate::lossless::RawFrame> {
+    fn picture(&self, id: u32, max: [u32; 2]) -> Option<crate::lossless::RawFrame> {
         let index = self.sources[..DISPLAYS].iter().position(|d| d.id == id)?;
         let d = &self.sources[index];
-        let (w, h) = crate::thumbs::fit(d.width as usize, d.height as usize, crate::thumbs::MAX);
+        let (w, h) = crate::thumbs::fit(d.width as usize, d.height as usize, max);
         let frame = render(index, w, h, 0);
         Some(crate::lossless::RawFrame { width: w, height: h, bgra: frame.data, capture_us: 0 })
     }
@@ -496,6 +496,15 @@ impl InputSink for FakeInput {
     fn release_all(&mut self) {}
 
     fn set_displays(&mut self, _displays: &[u32]) {}
+
+    fn move_on_display(&mut self, display: u32, x: f32, y: f32) {
+        INPUT.lock().unwrap().events.push(serde_json::json!({"t": "move", "x": x, "y": y, "display": display}));
+    }
+
+    fn type_text(&mut self, text: &str) -> bool {
+        INPUT.lock().unwrap().events.push(serde_json::json!({"t": "text", "text": text}));
+        true
+    }
 }
 
 // ---- Clipboard: in memory ----

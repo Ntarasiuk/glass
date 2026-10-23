@@ -58,6 +58,15 @@ pub enum ClientMsg {
     ListWindows,
     /// Previews of every display (answered with `thumbs`, only the ones that changed).
     Thumbs,
+    /// The owner steering an agent: `pause`, `resume`, `stop`, `allow`.
+    Agent { op: String },
+    /// The owner's answer to an agent's question (`agentAsk`).
+    AgentAnswer {
+        id: u64,
+        ok: bool,
+        #[serde(default)]
+        note: Option<String>,
+    },
     /// Stream just this window (from `windows`).
     SelectWindow { id: u32 },
     /// A drawing on the screen everyone sees (opaque to the host, rebroadcast as is).
@@ -141,6 +150,20 @@ pub enum ServerMsg {
     Windows { windows: Vec<crate::media::WindowInfo> },
     /// Display previews that changed since this viewer's last `thumbs` request.
     Thumbs { thumbs: Vec<crate::thumbs::Thumb> },
+    /// An agent is paused or stopped (both false: running normally).
+    AgentStatus { status: crate::computer::Status },
+    /// Something an agent just did; `display`, `x`, `y` (0..1) where it pointed.
+    AgentAction {
+        kind: String,
+        detail: String,
+        display: Option<u32>,
+        x: Option<f32>,
+        y: Option<f32>,
+    },
+    /// An agent asks the person: `help` (do something, then say done) or `confirm` (yes/no).
+    AgentAsk { id: u64, kind: &'static str, text: String },
+    /// That question was answered (here or elsewhere), or withdrawn.
+    AgentAnswered { id: u64 },
     Annotate { sender: u64, stroke: serde_json::Value },
     AnnotateClear { sender: u64 },
     Term(crate::terminal::ServerTerm),

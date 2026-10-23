@@ -68,6 +68,27 @@ The setup guide walks through four steps and checks each one live:
 
 It finishes by showing the connect URL and a QR code to scan with the iPad.
 
+## Let an AI agent use your computer
+
+`glass mcp` is an [MCP](https://modelcontextprotocol.io) server that gives an AI agent a computer running Glass: its screens, pointer and keyboard. It works on this computer, or on any other one on your tailnet. You watch what it does live from any viewer, and stay in charge:
+
+- A banner shows the agent at work and its recent steps, and a ring marks every click. **Pause** holds its next step until you resume; **Stop** refuses everything until you **Allow again**.
+- Before anything hard to undo (sending, buying, deleting, posting) the agent asks you, and a card in the viewer lets you **Allow** or say **Don't**, with an optional note.
+- When it's stuck (a sign-in, a 2FA code, a CAPTCHA, a choice only you can make), it asks for help: you do that part from the viewer, tap **Done, hand back**, and it carries on. You also get a notification on the computer.
+
+Add it to Claude Code:
+
+```sh
+claude mcp add glass -- glass mcp                      # this computer
+claude mcp add mac-mini -- glass mcp --machine mac-mini   # another computer on your tailnet
+```
+
+Then ask, for example: "on my Mac, export the frames from the open Figma file to the Desktop". Any MCP client works the same way (command `glass`, argument `mcp`).
+
+Tools: `screenshot`, `list_displays`, `click` (left, right, middle; double and triple), `move_pointer`, `drag`, `scroll`, `type_text` (any text), `press_keys` (`cmd+s`, `return`, `ctrl+c`…), `wait_for_change`, `request_help` and `confirm`. Coordinates are in the pixels of the latest screenshot (1280×800 at most unless the agent asks for more), so they work with computer-use models as is.
+
+Only the computer's owner can drive it: your own tailnet devices, or this computer's token (which `glass mcp` reads by itself on this computer). Guests and links can't. Under the hood it's an HTTP API at `https://<computer>/agent/v1/` (`POST /agent/v1/act` with `{"action": "click", "x": 640, "y": 400}` and so on), if you'd rather call it directly.
+
 ## Set up with an AI agent
 
 Glass ships an agent skill: https://glassdesk.dev/skill.md. With it, an agent like Claude Code can set Glass up on any Mac or Linux machine in your Tailscale tailnet over SSH. It finds the machine, installs Glass, runs the unattended setup, tells you exactly which permission switches to click on that machine's screen, waits until everything works, and verifies the connection.
@@ -233,6 +254,7 @@ glass remote on|off      Remote access from outside your tailnet (status without
 glass token         Show the access token for devices outside your tailnet
 glass token --reset Replace it with a new random token
 glass token --set   Choose your own token (prompted; or piped: echo … | glass token --set)
+glass mcp [--machine NAME]   MCP server letting an AI agent use this computer (or NAME on your tailnet)
 glass feedback "…"  Send feedback to the developers
 glass uninstall     Stop the background service and remove it from login items
 glass --version

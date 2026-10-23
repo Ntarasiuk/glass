@@ -53,9 +53,11 @@ struct Monitor {
     thumb: Mutex<Option<(std::time::Instant, Arc<crate::lossless::RawFrame>)>>,
 }
 
-/// Display previews are wanted until then (each request extends it).
+/// Pictures (display previews, agents' screenshots) are wanted until then; each request
+/// extends it. Kept at up to PICTURE_MAX and scaled down further on request.
 static THUMBS_UNTIL: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-const THUMB_EVERY: Duration = Duration::from_secs(1);
+const THUMB_EVERY: Duration = Duration::from_millis(300);
+const PICTURE_MAX: [u32; 2] = [1600, 1600];
 
 /// Lossless refreshes wanted (sharp text): keep a BGRA copy of each new picture.
 static FULL_COLOUR: AtomicBool = AtomicBool::new(false);
@@ -340,7 +342,7 @@ fn encode_loop(
                 frame.height,
                 frame.stride,
                 matches!(frame.format, PixelFormat::Rgbx),
-                crate::thumbs::MAX,
+                PICTURE_MAX,
             )
         {
             *monitor.thumb.lock().unwrap() = Some((std::time::Instant::now(), Arc::new(small)));
@@ -617,18 +619,15 @@ impl VideoSource for Video {
             }
         }
     }
-    fn thumbnail(&self, id: u32) -> Option<crate::lossless::RawFrame> {
+    fn picture(&self, id: u32, max: [u32; 2]) -> Option<crate::lossless::RawFrame> {
         *THUMBS_UNTIL.lock().unwrap() = Some(std::time::Instant::now() + Duration::from_secs(10));
-        let monitors = self.monitors.lock().unwrap();
-        let m = monitors.as_ref()?.get(id as usize)?;
-        let thumb = m.thumb.lock().unwrap();
-        let (_, frame) = thumb.as_ref()?;
-        Some(crate::lossless::RawFrame {
-            width: frame.width,
-            height: frame.height,
-            bgra: frame.bgra.clone(),
-            capture_us: 0,
-        })
+        let frame = {
+            let monitors = self.monitors.lock().unwrap();
+            let m = monitors.as_ref()?.get(id as usize)?;
+            let thumb = m.thumb.lock().unwrap();
+            thumb.as_ref()?.1.clone()
+        };
+        crate::thumbs::downscale(&frame.bgra, frame.width, frame.height, frame.width * 4, false, max)
     }
     fn frame_generation(&self, stream: u8) -> Option<u64> {
         let monitors = self.monitors.lock().unwrap();

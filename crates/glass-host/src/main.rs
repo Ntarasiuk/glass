@@ -1,4 +1,5 @@
 mod access;
+mod computer;
 mod admin;
 mod acl;
 mod approval;
@@ -9,8 +10,10 @@ mod files;
 mod forward;
 mod gamepad;
 mod ipc;
+mod keys;
 mod ldap;
 mod lossless;
+mod mcp;
 mod media;
 mod mic;
 mod notify;
@@ -139,6 +142,20 @@ enum Command {
     },
     /// Send feedback to the Glass developers.
     Feedback { message: Vec<String> },
+    /// MCP server (stdio) letting an AI agent see and use this computer, or another one on
+    /// your tailnet; you watch and can pause, stop or answer it from the viewer.
+    /// Add it to Claude Code: claude mcp add glass -- glass mcp
+    Mcp {
+        /// Another computer running Glass, by tailnet name (mac-mini) or full name.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Glass's address, e.g. http://127.0.0.1:8080 (instead of --machine).
+        #[arg(long)]
+        url: Option<String>,
+        /// The token file to sign in with (default: this computer's).
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+    },
     /// Stop the background service and remove it from login items.
     Uninstall,
     /// Install the latest release (and restart the service onto it).
@@ -545,6 +562,7 @@ async fn async_main(args: Args) -> Result<()> {
             Ok(())
         }
         Some(Command::Feedback { message }) => send_feedback(&message.join(" ")),
+        Some(Command::Mcp { machine, url, token_file }) => mcp::run(url.clone(), machine.clone(), token_file.clone()),
         Some(Command::Update) => update::run_cli(),
         Some(Command::Link { list: true, json, .. }) => list_passes(*json),
         Some(Command::Link {

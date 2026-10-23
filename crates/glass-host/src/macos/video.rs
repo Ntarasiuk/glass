@@ -344,8 +344,8 @@ impl VideoSource for Video {
             info!("capture colour: {}", if on { "BGRA (lossless refresh)" } else { "4:2:0" });
         }
     }
-    fn thumbnail(&self, id: u32) -> Option<crate::lossless::RawFrame> {
-        capture::screenshot(id, crate::thumbs::MAX)
+    fn picture(&self, id: u32, max: [u32; 2]) -> Option<crate::lossless::RawFrame> {
+        capture::screenshot(id, max)
             .inspect_err(|e| tracing::debug!("preview of display {id}: {e:#}"))
             .ok()
     }

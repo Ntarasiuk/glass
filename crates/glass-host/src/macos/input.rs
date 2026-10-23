@@ -71,14 +71,7 @@ impl Injector {
                 let Some(b) = self.bounds.get(stream as usize).or(self.bounds.first()) else {
                     return;
                 };
-                self.pos = to_global(*b, x, y);
-                let (ty, button) = match self.buttons {
-                    [true, _, _] => (CGEventType::LeftMouseDragged, CGMouseButton::Left),
-                    [_, _, true] => (CGEventType::RightMouseDragged, CGMouseButton::Right),
-                    [_, true, _] => (CGEventType::OtherMouseDragged, CGMouseButton::Center),
-                    _ => (CGEventType::MouseMoved, CGMouseButton::Left),
-                };
-                self.mouse(ty, button);
+                self.move_to(to_global(*b, x, y));
             }
             InputEvent::MouseDown { button } | InputEvent::MouseUp { button } => {
                 let down = matches!(ev, InputEvent::MouseDown { .. });
@@ -116,6 +109,32 @@ impl Injector {
                 let ev = CGEvent::new_keyboard_event(self.source.as_deref(), keycode, down);
                 self.post(ev);
             }
+        }
+    }
+
+    fn move_to(&mut self, pos: CGPoint) {
+        self.pos = pos;
+        let (ty, button) = match self.buttons {
+            [true, _, _] => (CGEventType::LeftMouseDragged, CGMouseButton::Left),
+            [_, _, true] => (CGEventType::RightMouseDragged, CGMouseButton::Right),
+            [_, true, _] => (CGEventType::OtherMouseDragged, CGMouseButton::Center),
+            _ => (CGEventType::MouseMoved, CGMouseButton::Left),
+        };
+        self.mouse(ty, button);
+    }
+
+    /// Types `text` whatever the keyboard layout: key events carrying the characters
+    /// themselves, a few at a time (apps drop longer strings per event).
+    pub fn type_text(&mut self, text: &str) {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        for chunk in units.chunks(16) {
+            for down in [true, false] {
+                let ev = CGEvent::new_keyboard_event(self.source.as_deref(), 0, down);
+                // SAFETY: `chunk` outlives the call, and its length is passed with it.
+                unsafe { CGEvent::keyboard_set_unicode_string(ev.as_deref(), chunk.len() as _, chunk.as_ptr()) };
+                self.post(ev);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(4));
         }
     }
 
@@ -247,6 +266,13 @@ impl crate::media::InputSink for Injector {
     }
     fn set_displays(&mut self, displays: &[u32]) {
         Injector::set_displays(self, displays)
+    }
+    fn move_on_display(&mut self, display: u32, x: f32, y: f32) {
+        self.move_to(to_global(CGDisplayBounds(display), x, y));
+    }
+    fn type_text(&mut self, text: &str) -> bool {
+        Injector::type_text(self, text);
+        true
     }
 }
 

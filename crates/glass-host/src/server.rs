@@ -131,6 +131,7 @@ pub async fn run(
         .merge(crate::ldap::routes())
         .merge(crate::scim::routes())
         .merge(crate::acl::routes())
+        .merge(crate::computer::routes())
         .route("/config.json", get(client_config))
         .route(
             "/machines.json",
@@ -754,6 +755,9 @@ async fn control(
         let path = Some(r.path.display().to_string());
         control::write_json(&mut send, &ServerMsg::Recording { on: true, path }).await?;
     }
+    for msg in crate::computer::snapshot() {
+        control::write_json(&mut send, &msg).await?;
+    }
     if perms.owner
         && let Some(version) = crate::update::available()
     {
@@ -940,6 +944,9 @@ async fn control(
                 }
                 Err(e) => refuse(&format!("Couldn't wake {dns}: {e:#}")),
             },
+            ClientMsg::Agent { .. } | ClientMsg::AgentAnswer { .. } if guest => refuse(OWNER_ONLY),
+            ClientMsg::Agent { op } => crate::computer::control(&op),
+            ClientMsg::AgentAnswer { id, ok, note } => crate::computer::answer(id, crate::computer::Answer { ok, note }),
             ClientMsg::Privacy { .. } if guest => refuse(OWNER_ONLY),
             ClientMsg::Privacy { on } => {
                 if let Err(e) = crate::privacy::set_forced(on) {
@@ -959,7 +966,7 @@ async fn control(
                             displays
                                 .iter()
                                 .filter_map(|d| {
-                                    let frame = shared.video.thumbnail(d.id)?;
+                                    let frame = shared.video.picture(d.id, crate::thumbs::MAX)?;
                                     Some((d.id, crate::thumbs::png(&frame).ok()?))
                                 })
                                 .collect::<Vec<_>>()
