@@ -3,9 +3,9 @@
 
 import {
   AUDIO_HEADER_LEN, KIND_AUDIO, KIND_KEYFRAME_REQUEST, KIND_PONG, KIND_VIDEO,
-  ping, readPong, readVideoHeader,
+  micPacket, ping, readPong, readVideoHeader,
 } from './proto.js';
-import { VideoStream, probeDecoders, setDecoderStep } from './video-stream.js';
+import { VideoStream, probeCodecs, probeDecoders, setDecoderStep } from './video-stream.js';
 import { RtcTransport } from './rtc-transport.js';
 
 const PING_INTERVAL_MS = 500;
@@ -22,6 +22,7 @@ self.addEventListener('unhandledrejection', (e) =>
 
 const STREAM_INPUT = 0x49; // 'I'
 const STREAM_FILE = 0x46; // 'F'
+const STREAM_LOSSLESS = 0x50; // 'P': a lossless picture (sharp text)
 const encoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -32,6 +33,7 @@ let device; // e.g. "Safari on iPad", shown on the host
 let rtcPort; // remote access: WebRTC over the main thread instead of WebTransport
 let link; // magic link code; traded for a guest pass on first sign-in
 let pass; // guest pass
+let codecs = ['h264']; // what this browser decodes, offered in hello (HEVC if hardware)
 let rejected = false;
 let controlWriter;
 let audioPort; // MessagePort of the main thread's AudioWorkletNode
@@ -41,10 +43,13 @@ let audioPackets = 0;
 let audioLost = 0;
 let lastAudioSeq;
 let audioUnderruns = 0;
+let micOn = false;
+let micSeq = 0;
 let transport;
 let lastRxMs = 0;
 let kill; // ends the current session's read loop even if the transport never reports closing
 let wake; // resolves the reconnect backoff early
+let denied = false; // the host's owner said no; don't knock again on our own
 let datagramWriter;
 let inputWriter;
 
@@ -55,7 +60,7 @@ let clockOffsetUs = 0;
 let clockSynced = false;
 let rttMs = 0;
 
-const stats = { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0 };
+const stats = { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0, lossless: 0 };
 
 const streamEnv = {
   log,
@@ -74,6 +79,7 @@ self.onmessage = async ({ data }) => {
     ({ url, certHash, token, link, pass, rtcPort, device } = data);
     setDecoderStep(data.decoderStep ?? 0);
     await probeDecoders(log);
+    codecs = await probeCodecs();
     setInterval(() => datagramWriter?.write(ping(performance.now())).catch(() => {}), PING_INTERVAL_MS);
     setInterval(tick, 1000);
     run();
@@ -105,10 +111,24 @@ self.onmessage = async ({ data }) => {
     audioPort = data.port;
     // Underruns are normal when a sound ends; count them for the stats instead of logging.
     audioPort.onmessage = ({ data: m }) => { audioUnderruns = m.underruns; };
+  } else if (data.type === 'micPort') {
+    // 5 ms mono packets from the main thread's mic worklet, sent as datagrams.
+    data.port.onmessage = ({ data: pcm }) => {
+      if (!micOn || !datagramWriter) return;
+      const captureUs = clockSynced ? performance.now() * 1000 + clockOffsetUs : 0;
+      micSeq = (micSeq + 1) >>> 0;
+      datagramWriter.write(micPacket(micSeq, captureUs, 1, new Int16Array(pcm))).catch(() => {});
+    };
+  } else if (data.type === 'mic') {
+    micOn = data.on;
+    sendControl({ t: 'mic', on: micOn });
   } else if (data.type === 'audioToggle') {
     audioOn = !audioOn;
     sendControl({ t: 'audio', on: audioOn });
     self.postMessage({ type: 'audio', on: audioOn });
+  } else if (data.type === 'askAgain') {
+    denied = false;
+    wake?.();
   } else if (data.type === 'wake') {
     // Tab became visible or network came back: skip the remaining backoff, and drop a
     // session that went quiet while suspended instead of waiting for the watchdog.
@@ -123,6 +143,11 @@ async function run() {
     // After a rejection, retrying would only be rejected again; wait for a new token.
     while (rejected) {
       self.postMessage({ type: 'status', text: 'waiting for access token' });
+      await new Promise((resolve) => { wake = resolve; });
+    }
+    // Turned away by the person at the computer: asking again is the user's call.
+    while (denied) {
+      self.postMessage({ type: 'status', text: 'not let in' });
       await new Promise((resolve) => { wake = resolve; });
     }
     try {
@@ -178,8 +203,9 @@ async function connect() {
   // Control stream first: the host ignores everything else until hello is accepted.
   const control = await transport.createBidirectionalStream();
   controlWriter = control.writable.getWriter();
-  sendControl({ t: 'hello', token, link, pass, device });
+  sendControl({ t: 'hello', token, link, pass, device, codecs, ua: navigator.userAgent });
   if (audioOn) sendControl({ t: 'audio', on: true });
+  if (micOn) sendControl({ t: 'mic', on: true });
   if (!visible) sendControl({ t: 'video', on: false });
   readControl(control.readable).catch((e) => log('warn', `control read ended: ${e.message ?? e}`));
 
@@ -282,6 +308,7 @@ async function readControl(readable) {
       pass = msg.pass;
       link = undefined;
     }
+    if (msg.t === 'denied') denied = true;
     if (msg.t === 'error' && msg.msg === 'unauthorized') {
       rejected = true;
       link = undefined;
@@ -327,14 +354,40 @@ async function acceptIncoming(t) {
   for (;;) {
     const { value: stream, done } = await reader.read();
     if (done) return;
-    receiveFile(stream).catch((e) => log('error', `receive file failed: ${e.message ?? e}`));
+    receiveStream(stream).catch((e) => log('error', `receive stream failed: ${e.message ?? e}`));
   }
 }
 
-async function receiveFile(readable) {
+async function receiveStream(readable) {
   const r = byteReader(readable);
   const tag = await r.read(1);
-  if (!tag || tag[0] !== STREAM_FILE) return;
+  if (tag?.[0] === STREAM_FILE) return receiveFile(r);
+  if (tag?.[0] === STREAM_LOSSLESS) return receiveLossless(r);
+}
+
+/** A lossless picture of part of a stream: header (x, y, w, h of fw × fh), then a PNG. */
+async function receiveLossless(r) {
+  const len = await r.read(4);
+  const h = JSON.parse(textDecoder.decode(await r.read(new DataView(len.buffer).getUint32(0, true))));
+  const chunks = [];
+  for await (const chunk of r.rest()) chunks.push(chunk);
+  const stream = streams[h.stream];
+  if (!stream) return;
+  const bitmap = await createImageBitmap(new Blob(chunks, { type: 'image/png' }));
+  if (!stream.onLossless(h, bitmap)) {
+    sendControl({ t: 'losslessReset' });
+    return;
+  }
+  stats.lossless++;
+  // One pixel of what's now on screen, so tests can check it's exact.
+  const cx = h.x + (h.w >> 1);
+  const cy = h.y + (h.h >> 1);
+  const scale = stream.ctx.canvas.width / h.fw;
+  const [red, green, blue] = stream.ctx.getImageData(Math.floor(cx * scale), Math.floor(cy * scale), 1, 1).data;
+  log('info', 'lossless refresh', { stream: h.stream, x: h.x, y: h.y, w: h.w, h: h.h, fw: h.fw, fh: h.fh, pixel: [cx, cy, red, green, blue] });
+}
+
+async function receiveFile(r) {
   const len = await r.read(4);
   const header = JSON.parse(textDecoder.decode(await r.read(new DataView(len.buffer).getUint32(0, true))));
   const id = `${Date.now()}-${header.name}`;
@@ -409,8 +462,11 @@ function reportStats() {
     audioPackets,
     audioLost,
     audioUnderruns,
+    lossless: stats.lossless,
+    // Showing a lossless picture now (until the screen changes).
+    holding: streams.some((v) => v?.holding),
   });
   audioPackets = 0;
   audioLost = 0;
-  Object.assign(stats, { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0 });
+  Object.assign(stats, { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0, lossless: 0 });
 }

@@ -1,0 +1,10 @@
+# Paths relative to the build context (the repository root). Only what the image copies.
+*
+!Cargo.toml
+!skills
+!web
+!site
+site/node_modules
+site/public/app
+site/public/releases
+site/.wrangler

@@ -71,10 +71,7 @@ impl Injector {
                 let Some(b) = self.bounds.get(stream as usize).or(self.bounds.first()) else {
                     return;
                 };
-                self.pos = CGPoint {
-                    x: b.origin.x + x.clamp(0.0, 1.0) as f64 * b.size.width,
-                    y: b.origin.y + y.clamp(0.0, 1.0) as f64 * b.size.height,
-                };
+                self.pos = to_global(*b, x, y);
                 let (ty, button) = match self.buttons {
                     [true, _, _] => (CGEventType::LeftMouseDragged, CGMouseButton::Left),
                     [_, _, true] => (CGEventType::RightMouseDragged, CGMouseButton::Right),
@@ -105,6 +102,8 @@ impl Injector {
                 );
                 self.post(ev);
             }
+            // Routed to crate::gamepad by the server, never here.
+            InputEvent::Gamepad { .. } => {}
             InputEvent::KeyDown { keycode } | InputEvent::KeyUp { keycode } => {
                 let down = matches!(ev, InputEvent::KeyDown { .. });
                 if let Some(flag) = modifier_flag(keycode) {
@@ -180,8 +179,23 @@ impl Injector {
     fn post(&self, ev: Option<CFRetained<CGEvent>>) {
         if let Some(ev) = ev {
             CGEvent::set_flags(Some(&ev), self.flags);
+            // Lets privacy mode's event tap tell these from the local keyboard and mouse.
+            CGEvent::set_integer_value_field(
+                Some(&ev),
+                CGEventField(super::privacy::USER_DATA_FIELD),
+                super::privacy::INJECTED_MARK,
+            );
             CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&ev));
         }
+    }
+}
+
+/// A point given as 0..1 of a stream, in global desktop points within `b` (a display,
+/// or a streamed window).
+fn to_global(b: CGRect, x: f32, y: f32) -> CGPoint {
+    CGPoint {
+        x: b.origin.x + x.clamp(0.0, 1.0) as f64 * b.size.width,
+        y: b.origin.y + y.clamp(0.0, 1.0) as f64 * b.size.height,
     }
 }
 
@@ -218,7 +232,40 @@ impl crate::media::InputSink for Injector {
     fn release_all(&mut self) {
         Injector::release_all(self)
     }
+    fn set_window_rect(&mut self, rect: Option<[f64; 4]>) {
+        // `None`: set_displays already put the display bounds back.
+        // No release here: the window may be moving because it's being dragged.
+        if let Some([x, y, w, h]) = rect {
+            self.bounds = vec![CGRect {
+                origin: CGPoint { x, y },
+                size: objc2_core_foundation::CGSize {
+                    width: w,
+                    height: h,
+                },
+            }];
+        }
+    }
     fn set_displays(&mut self, displays: &[u32]) {
         Injector::set_displays(self, displays)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_coordinates_land_inside_the_window() {
+        let window = CGRect {
+            origin: CGPoint { x: 100.0, y: 50.0 },
+            size: objc2_core_foundation::CGSize {
+                width: 800.0,
+                height: 600.0,
+            },
+        };
+        let p = to_global(window, 0.5, 0.25);
+        assert_eq!((p.x, p.y), (500.0, 200.0));
+        let edge = to_global(window, 1.5, -1.0);
+        assert_eq!((edge.x, edge.y), (900.0, 50.0), "clamped to the window");
     }
 }

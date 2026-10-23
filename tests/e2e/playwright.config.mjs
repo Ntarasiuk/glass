@@ -5,7 +5,9 @@ export default defineConfig({
   testMatch: '*.spec.mjs',
   timeout: 60_000,
   fullyParallel: true,
-  workers: process.env.CI ? 2 : 4,
+  // Every test runs a host encoding video plus a Chrome decoding it: more than two at once
+  // starves a busy laptop into timeouts. PW_WORKERS overrides.
+  workers: Number(process.env.PW_WORKERS ?? 2),
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [['list'], ['github']] : 'list',
   use: {

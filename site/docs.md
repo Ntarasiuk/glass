@@ -27,6 +27,18 @@ Features:
 - **Secure by default.** Devices on your own Tailscale tailnet are let in automatically; anything else needs an access token.
 - **From anywhere.** `glass link --anywhere` makes a one-time link that connects any browser directly to the computer over WebRTC, end-to-end encrypted, with no ports opened. Off until you use it.
 - **One-time links.** Let another device in without sharing the token: each link works once and gives that device its own pass, revocable with `glass link --revoke`.
+- **Links with limits.** View-only, no files, no clipboard, a time limit, ask the person at the computer first, or require a passkey (Face ID, Touch ID or a security key) every time.
+- **Helping someone.** Chat, drawing on the screen (shown on the computer too), a privacy screen that blanks the computer and blocks its own keyboard and mouse, and a connection history.
+- **Sharp text.** A per-viewer mode for code and documents: native size, finer frames, HEVC 4:2:2 colour while things move and a lossless full-colour (4:4:4) picture once the screen is still.
+- **One window.** Stream a single app's window instead of the whole display (macOS).
+- **Terminal and ports.** A shell on the computer inside the viewer, and its local web servers (`/fwd/3000/`) opened from your tailnet.
+- **Recording.** Record sessions to MP4 on the computer, per session or always.
+- **Controllers and microphone.** Game controllers and your microphone reach the computer (Linux hosts).
+- **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps are remembered for each computer; an optional shortcut bar puts Mac shortcuts one tap away.
+- **Power.** Wake a sleeping machine (Wake-on-LAN), restart Glass or the whole computer and reconnect.
+- **A console.** `https://<computer>/admin/`: who's connected, requests to allow, links with QR codes, devices, history, settings, access rules and an address book of your machines.
+- **For teams.** Single sign-on (any OpenID Connect provider), LDAP, SCIM provisioning, access rules per email, domain or group, and device posture checks.
+- **Self-hostable relay.** Run the remote-access introducer and TURN relay yourself.
 
 ## Install
 
@@ -85,6 +97,18 @@ Devices that aren't on your tailnet, or belong to another tailnet user, are aske
 
 **From anywhere (no Tailscale on the device).** `glass link --anywhere` makes a link like `https://glassdesk.dev/app/#r=…&l=…` that works from any network. The browser and your computer connect directly over WebRTC: UDP, end-to-end encrypted, about as fast as on the tailnet. When a direct path is impossible (some cellular and corporate networks), traffic goes through Cloudflare's TURN relay, still end-to-end encrypted. glassdesk.dev only introduces the two sides; your computer keeps one outgoing connection to it and opens no ports. The link carries your computer's public key and the computer signs every connection answer, so the browser refuses anyone else, glassdesk.dev included. Remote access is off until you make such a link (or run `glass remote on`); `glass remote off` turns it off. One thing to know: in this mode the viewer page itself comes from glassdesk.dev, whereas on your tailnet it comes from your own computer.
 
+## Links with limits
+
+`glass link` takes options that limit what the device may do:
+
+- `--view-only`: watch only; no mouse, keyboard or controllers.
+- `--no-files`, `--no-clipboard`: no file transfer, no copy and paste.
+- `--for 1h`: how long the device's pass lasts (default 24 hours).
+- `--ask`: the person at the computer allows each connection, from a notification or with `glass allow` / `glass deny`. `glass config ask-guests on` asks for every guest; `ask-everyone on` asks for everyone.
+- `--passkey`: the device registers a passkey on first use and must use it every time, so a copied link is useless on another device.
+
+`glass link --list` shows the devices let in by links, each with an id; `glass link --revoke <id>` cuts off one. `glass viewers` shows who's connected now and `glass kick [id]` ends a session. `glass log` is the connection history: who, when, how, and for how long.
+
 ## Using Glass
 
 The toolbar (top right, fades when idle) has:
@@ -99,6 +123,21 @@ The toolbar (top right, fades when idle) has:
 
 Touch gestures: tap = click, drag = drag, long-press = right-click, two fingers = scroll.
 
+More in the toolbar:
+
+- **Displays › Sharp text:** for code and documents. See *Sharp text* below.
+- **Displays › Apps:** show one app's window on its own (macOS).
+- **Draw on the screen:** annotate; the drawing also shows on the computer's screen.
+- **Chat:** messages with the person at the computer (`glass chat "…"` from there).
+- **Terminal:** a shell on the computer, in the viewer.
+- **Forwarded ports:** open the computer's local web servers (only ports allowed with `glass config forward-ports 3000,8888`, and only for your own devices).
+- **Record on the host:** records this session to `~/Movies/Glass` (`~/Videos/Glass` on Linux). `glass config record on` records every session.
+- **Microphone:** sends your microphone to the computer (Linux hosts).
+- **Computer:** **Privacy screen** (blanks the computer's screen and ignores its keyboard and mouse while you're connected; `glass privacy on|off` from there), **Restart Glass**, **Restart computer** (Glass reconnects once someone is logged in) and **Console**.
+- **Machines:** sleeping machines Glass has seen before can be woken with Wake-on-LAN (also `glass wake <name|mac>`).
+
+Game controllers connected to the viewing device work on Linux hosts as a virtual Xbox 360 controller.
+
 Local shortcuts (not sent to the Mac): Ctrl+Shift+F toggles fullscreen, Ctrl+Shift+H toggles the stats overlay.
 
 ### Keyboard and ⌘ shortcuts on iPad
@@ -109,6 +148,8 @@ iPadOS reserves a few shortcuts before any app or web page sees them: ⌘Tab, �
 - **Swap ⌘ and ⌥:** pair with iPad Settings → General → Keyboard → Hardware Keyboard → Modifier Keys (Command → Option, Option → Command). The physical ⌘ key then reaches the Mac as ⌘ even for reserved shortcuts.
 - **⌘ menu:** one-tap buttons for the reserved shortcuts.
 
+These choices are remembered for each computer. **Shortcut bar** (⌘ menu) adds a row of Mac shortcuts above the screen on touch devices.
+
 Everything else, including ⌘C, ⌘V, ⌘Q, ⌘W, and arrows, works directly from a hardware keyboard.
 
 ### Clipboard
@@ -116,6 +157,53 @@ Everything else, including ⌘C, ⌘V, ⌘Q, ⌘W, and arrows, works directly fr
 - ⌘C or ⌘X on the Mac (from the iPad keyboard) puts the Mac's copied text on the iPad's clipboard.
 - ⌘V pastes the iPad's clipboard into the Mac.
 - Any Mac clipboard change is sent to connected devices.
+
+### Sharp text
+
+Turn on **Displays › Sharp text** when reading code or documents. The display streams at its native size with fewer but finer frames, in HEVC 4:2:2 colour where the Mac's encoder and the browser allow it, so coloured text keeps its edges. Once the screen stops changing, Glass sends a lossless full-colour (4:4:4) picture of it, so still text is pixel-exact; the next change resumes video. It's per viewer and remembered per computer. Elsewhere, `glass config hevc on` uses HEVC for everyone when every connected viewer can decode it.
+
+## Console
+
+`https://<computer>.<tailnet>.ts.net/admin/` (or **Computer › Console** in the viewer) is the owner's console, open to your own tailnet devices and the access token. It shows who's connected (and ends sessions), connection requests to allow or deny, one-time links with QR codes and limits, devices let in by links, connection history, settings, access rules, and an address book: your machines in groups you name, each opening in the viewer.
+
+## Teams: sign-in, access rules, posture
+
+**Single sign-on.** Register Glass with any OpenID Connect provider (Google, Microsoft Entra ID, Okta, Auth0, Keycloak…) with redirect URL `https://<computer>/sso/callback`, then:
+
+```sh
+glass config oidc-issuer https://accounts.google.com
+glass config oidc-client-id <id>
+glass config oidc-client-secret <secret>
+```
+
+The viewer then offers **Sign in with your organization** instead of asking for a token.
+
+**LDAP.** `glass config ldap-url ldaps://dir.example.com` (or `ldap://` with StartTLS), then either `ldap-user-dn uid={user},ou=people,dc=example,dc=com` to bind directly, or `ldap-base-dn` plus optional `ldap-bind-dn` / `ldap-bind-password` to search for the user. Groups come from `memberOf` (`ldap-group-attr` to change). The viewer asks for a directory username and password.
+
+**Access rules.** Who may sign in, and what they may do, first match wins:
+
+```sh
+glass acl add group:eng --view-only --for 8h
+glass acl add @example.com
+glass acl add ana@example.com --ask
+glass acl                 # list
+glass acl remove 0        # by position
+```
+
+A rule matches an email, `@domain`, `group:name` or `*`, and takes the same limits as `glass link`. With no rules, nobody signs in with a directory account. Rules live in `~/.config/glass/acl.json`.
+
+**SCIM.** `glass config scim-token new` prints a token for SCIM 2.0 provisioning at `https://<computer>/scim/v2` (Okta, Entra ID). Users and groups stay in sync; deactivated users can't sign in and lose their sessions at once.
+
+**Device posture.** Checked on every connection:
+
+- `posture-tailnet-tags tag:trusted`: tailnet devices must carry one of these Tailscale tags.
+- `posture-os macos,ios`: only these operating systems.
+- `posture-min-browser 120`: oldest browser major version let in.
+- `posture-require-passkey-uv on`: passkey links need Face ID, Touch ID or a PIN, not just a tap.
+
+## Branding and self-hosting
+
+`glass config name "Studio"` and `glass config accent "#ff8800"` change the name and colour shown in the viewer. To run remote access without glassdesk.dev, deploy the introducer and TURN relay from [site/selfhost](https://github.com/Ntarasiuk/glass/tree/main/site/selfhost) and point Glass at it with `glass config relay https://glass.example.com`.
 
 ## CLI reference
 
@@ -126,7 +214,18 @@ glass setup --yes [--json]   Unattended setup for scripts and agents; reports wh
 glass status [--json]        Is the service running? Capturing? Permissions? Connect URL
 glass link [--for 24h]   One-time magic link (and QR code) for a device outside your tailnet
 glass link --anywhere    The same, working from any network (WebRTC via glassdesk.dev)
-glass link --revoke      Cut off every device let in with a magic link
+glass link --view-only --no-files --no-clipboard --ask --passkey   Links with limits
+glass link --list        Devices let in with links, with ids
+glass link --revoke [id] Cut off one device, or every device let in with a magic link
+glass viewers [--json]   Who's connected now
+glass kick [id]          End one session, or every one
+glass requests / allow [id] / deny [id]   Connection requests waiting for an answer
+glass chat "…"           Message everyone viewing
+glass privacy on|off     Blank this screen and block local input while viewed
+glass log [-n 20] [--json]   Connection history
+glass wake <name|mac>    Wake a machine with Wake-on-LAN
+glass acl [add|remove]   Access rules for SSO and LDAP accounts
+glass config [key [value]]   Settings (no arguments: list them all with descriptions)
 glass remote on|off      Remote access from outside your tailnet (status without an argument)
 glass token         Show the access token for devices outside your tailnet
 glass token --reset Replace it with a new random token
@@ -143,6 +242,11 @@ Files:
 - `~/.glass`: installed binary and web client
 - `~/.config/glass/token`: access token (created on first run)
 - `~/.config/glass/access.json`: magic links and guest passes (fingerprints only)
+- `~/.config/glass/settings.json`: settings from `glass config`
+- `~/.config/glass/acl.json`: access rules
+- `~/.config/glass/connections.jsonl`: connection history
+- `~/.config/glass/oidc-secret`, `ldap-bind-password`, `scim-token`: secrets, owner-only
+- `~/Movies/Glass/` (`~/Videos/Glass/` on Linux): recordings
 - `~/.config/glass/certs/`: Tailscale HTTPS certificate
 - `~/.config/glass/status.json`: live service status
 - `~/Library/Logs/Glass/`: host, client, and agent logs
@@ -151,11 +255,12 @@ Files:
 ## How it works
 
 - **Capture:** ScreenCaptureKit, zero-copy IOSurface frames, only when the screen changes. A static screen costs nothing.
-- **Encode:** VideoToolbox hardware H.264 in low-latency rate-control mode, with no B-frames. Keyframes are sent on demand (new viewer or detected loss) and at least every 900 frames.
+- **Encode:** VideoToolbox hardware H.264 (HEVC when enabled and every viewer can decode it; 4:2:2 for Sharp text) in low-latency rate-control mode, with no B-frames. Keyframes are sent on demand (new viewer or detected loss) and at least every 900 frames.
 - **Transport:** WebTransport (HTTP/3 over QUIC). Video and audio travel as unreliable datagrams, so a lost packet never blocks newer ones. Input, control, clipboard, and files use reliable streams.
 - **Decode and render:** WebCodecs hardware decoding in a Web Worker, drawn to an OffscreenCanvas. The page's main thread only handles input.
 - **Audio:** 48 kHz PCM in 5 ms packets, played through an AudioWorklet with a ~40 ms jitter buffer.
 - **Integrity and recovery:** each frame carries a checksum; corrupted or incomplete frames are never decoded. The client requests a keyframe and recovers within a fraction of a second. If the browser's hardware decoder misbehaves, Glass falls back to more conservative decoder settings and remembers the choice.
+- **Lossless refresh:** in Sharp text, once the screen is still, a PNG of the full frame (full 4:4:4 colour) is drawn over the video until the next change.
 - **Clock sync:** NTP-style ping/pong over datagrams, used for the live latency display.
 
 ## Linux host (beta)
@@ -167,7 +272,9 @@ The same one-liner installs Glass on Linux x86_64. The Linux host uses:
 - **Input:** a virtual keyboard and absolute pointer through `/dev/uinput`. `glass setup` installs a one-line udev rule (`/etc/udev/rules.d/60-glass-uinput.rules`) giving the logged-in user access; this needs `sudo` once.
 - **Address:** Linux only lets root listen on port 443, so `glass setup` runs `tailscale serve` to forward `https://<machine>.<tailnet>.ts.net/` to Glass. If that isn't possible, use the `:8080` address.
 - **Clipboard:** `wl-copy` / `wl-paste` (wl-clipboard).
-- **Audio:** the default output's monitor, through PipeWire.
+- **Audio:** the default output's monitor, through PipeWire. The viewer's microphone appears as a "Glass microphone" input while it's on.
+- **Controllers:** game controllers on the viewing device appear as a virtual Xbox 360 controller through `/dev/uinput`.
+- **Sharp text:** the lossless full-colour refresh works on Linux; HEVC 4:2:2 is macOS only.
 - **Background service:** a systemd user unit (`~/.config/systemd/user/glass.service`) tied to the graphical session. Logs: `journalctl --user -u glass` and `~/.local/state/glass/`.
 - **Tailscale:** non-root users need to be Tailscale operators to fetch HTTPS certificates; setup offers to run `sudo tailscale set --operator=$USER`.
 
@@ -189,7 +296,7 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 
 - All traffic is encrypted (TLS 1.3 via QUIC/HTTPS).
 - With Tailscale, traffic stays on your private tailnet and goes directly between devices when possible.
-- Access control: a device is let in if Tailscale reports it belongs to the same user as the Mac, or if it presents the access token. Glass sends nothing to a session (video, audio, clipboard, input) until it is authenticated.
+- Access control: a device is let in if Tailscale reports it belongs to the same user as the Mac, or if it presents the access token. Glass sends nothing to a session (video, audio, clipboard, input) until it is authenticated. Links, single sign-on, LDAP, access rules, posture checks and passkeys can narrow that further; see above.
 - Glass runs as your user (a LaunchAgent on macOS, a systemd user service on Linux), never as root.
 - The glassdesk.dev website counts downloads using a salted hash of the IP address (no raw IPs stored) and stores feedback you choose to send. The Glass app itself sends nothing to glassdesk.dev except feedback you submit.
 

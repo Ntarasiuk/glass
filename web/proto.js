@@ -5,12 +5,27 @@ export const KIND_PING = 2;
 export const KIND_PONG = 3;
 export const KIND_KEYFRAME_REQUEST = 4;
 export const KIND_AUDIO = 5;
+export const KIND_MIC = 6;
 export const AUDIO_HEADER_LEN = 16;
 export const FLAG_KEYFRAME = 1;
+export const FLAG_HEVC = 2;
+export const FLAG_REFRESH = 4;
 export const VIDEO_HEADER_LEN = 20;
 export const INPUT_EVENT_LEN = 12;
 
-export const Input = { MOVE: 1, DOWN: 2, UP: 3, SCROLL: 4, KEY_DOWN: 5, KEY_UP: 6 };
+export const Input = { MOVE: 1, DOWN: 2, UP: 3, SCROLL: 4, KEY_DOWN: 5, KEY_UP: 6, PAD_BUTTON: 7, PAD_AXIS: 8, PAD_CONNECTED: 9 };
+
+/** One mic packet: same layout as host audio (kind, channels, seq, capture time, s16 PCM). */
+export function micPacket(seq, captureUs, channels, pcm) {
+  const buf = new ArrayBuffer(AUDIO_HEADER_LEN + pcm.length * 2);
+  const view = new DataView(buf);
+  view.setUint8(0, KIND_MIC);
+  view.setUint8(1, channels);
+  view.setUint32(4, seq, true);
+  view.setBigUint64(8, BigInt(Math.max(0, Math.floor(captureUs))), true);
+  for (let i = 0; i < pcm.length; i++) view.setInt16(AUDIO_HEADER_LEN + i * 2, pcm[i], true);
+  return new Uint8Array(buf);
+}
 
 export const STREAM_SHIFT = 4;
 

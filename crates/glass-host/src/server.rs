@@ -9,7 +9,9 @@ use anyhow::Result;
 use axum::Json;
 use axum::http::{HeaderValue, header};
 use axum::routing::{get, post};
-use glass_proto::{INPUT_EVENT_LEN, InputEvent, KIND_KEYFRAME_REQUEST, KIND_PING, MAX_STREAMS};
+use glass_proto::{
+    INPUT_EVENT_LEN, InputEvent, KIND_KEYFRAME_REQUEST, KIND_MIC, KIND_PING, MAX_STREAMS,
+};
 use tokio::sync::{broadcast, mpsc};
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -110,6 +112,11 @@ pub async fn run(
                 "wtHost": wt_host,
                 "certHash": cert_hash,
                 "version": version,
+                // For Wake-on-LAN from another host on this LAN.
+                "macs": crate::wol::own_macs(),
+                // The sign-in screen offers single sign-on.
+                "sso": crate::oidc::enabled(),
+                "ldap": crate::ldap::enabled(),
             }))
         }
     };
@@ -118,6 +125,12 @@ pub async fn run(
     let machines_cache = Arc::new(tokio::sync::Mutex::new(None));
     let app = axum::Router::new()
         .merge(extra_routes.unwrap_or_default())
+        .merge(crate::forward::routes())
+        .merge(crate::oidc::routes())
+        .merge(crate::admin::routes())
+        .merge(crate::ldap::routes())
+        .merge(crate::scim::routes())
+        .merge(crate::acl::routes())
         .route("/config.json", get(client_config))
         .route(
             "/machines.json",
@@ -147,20 +160,20 @@ pub async fn run(
                     let app = app.clone();
                     info!("web client at https://<host>/ (port {port})");
                     tokio::spawn(async move {
-                        if let Err(e) = server.serve(app.into_make_service()).await {
+                        if let Err(e) = server.serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
                             warn!("port {port}: {e}");
                         }
                     });
                 }
                 info!("web client at https://<host>:{web_port}");
                 axum_server::from_tcp_rustls(http_listener, rustls)?
-                    .serve(app.into_make_service())
+                    .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                     .await
             }
             None => {
                 info!("web client at http://localhost:{web_port}");
                 axum_server::from_tcp(http_listener)?
-                    .serve(app.into_make_service())
+                    .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                     .await
             }
         };
@@ -201,6 +214,8 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
     let authed = Arc::new(AtomicBool::new(false));
     let audio_on = Arc::new(AtomicBool::new(false));
     let video_on = Arc::new(AtomicBool::new(true));
+    let perms = Arc::new(std::sync::OnceLock::new());
+    let mic_on = Arc::new(AtomicBool::new(false));
     let mut audio = shared.audio.subscribe();
     let (ctl_tx, ctl_rx) = mpsc::unbounded_channel::<ServerMsg>();
     let mut ctl_rx = Some(ctl_rx);
@@ -267,6 +282,7 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                                 shared.video.request_keyframe(stream);
                             }
                         }
+                        Some(&KIND_MIC) if mic_on.load(Ordering::Relaxed) => crate::mic::packet(&dgram),
                         _ => {}
                     }
                 }
@@ -282,6 +298,8 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                         video_on: video_on.clone(),
                         ctl_tx: ctl_tx.clone(),
                         relayed: relayed.clone(),
+                        perms: perms.clone(),
+                        mic_on: mic_on.clone(),
                     };
                     tokio::spawn(async move {
                         if let Err(e) = control(ctx, send, recv, rx).await {
@@ -299,6 +317,8 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                         video_on: video_on.clone(),
                         ctl_tx: ctl_tx.clone(),
                         relayed: relayed.clone(),
+                        perms: perms.clone(),
+                        mic_on: mic_on.clone(),
                     };
                     tokio::spawn(async move {
                         if let Err(e) = uni_stream(ctx, stream).await {
@@ -313,6 +333,7 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
 
     if authed.load(Ordering::Relaxed) {
         shared.injector.lock().unwrap().release_all();
+        crate::gamepad::release_all();
     }
     info!("client disconnected: {peer}");
     result
@@ -328,6 +349,9 @@ struct SessionCtx {
     ctl_tx: mpsc::UnboundedSender<ServerMsg>,
     /// The real address of a WebRTC viewer (the connection itself is loopback).
     relayed: Option<crate::remote::Relay>,
+    /// What it may do, set once signed in.
+    perms: Arc<std::sync::OnceLock<control::Perms>>,
+    mic_on: Arc<AtomicBool>,
 }
 
 async fn control(
@@ -358,18 +382,29 @@ async fn control(
         return Ok(());
     }
     let hello_ok = matches!(hello, Ok(Some(ClientMsg::Hello { .. })));
-    let mut hello_device = None;
-    let (token, link, pass) = match hello {
+    let (token, link, pass, hello_device, codecs, ua) = match hello {
         Ok(Some(ClientMsg::Hello {
             token,
             link,
             pass,
             device,
-        })) => {
-            hello_device = device;
-            (token, link, pass)
-        }
-        _ => (None, None, None),
+            codecs,
+            ua,
+        })) => (token, link, pass, device, codecs, ua),
+        _ => (None, None, None, None, Vec::new(), None),
+    };
+    let mut device = crate::viewers::clean_device(hello_device.as_deref());
+    let remote = ctx.relayed.is_some();
+    let refused = |device: &str, detail: &str| {
+        crate::connlog::append(&crate::connlog::Entry {
+            start: crate::access::now(),
+            secs: 0,
+            device: device.to_string(),
+            how: "refused".into(),
+            remote,
+            peer: peer.to_string(),
+            detail: detail.into(),
+        });
     };
     let expected = control::load_or_create_token(&shared.token_file).unwrap_or_default();
     let access_file = crate::access::file_for(&shared.token_file);
@@ -393,24 +428,28 @@ async fn control(
     }
     if auth.is_none()
         && let Some(p) = &pass
-        && let Some(expires) = crate::access::pass_expiry(&access_file, p)
+        && let Some(valid) = crate::access::check_pass(&access_file, p)
     {
         auth = Some(Auth::Guest {
             pass: p.clone(),
-            expires,
+            expires: valid.expires,
             new: false,
+            scope: valid.scope,
+            passkey: valid.passkey,
         });
     }
     let mut link_failed = false;
     if auth.is_none()
         && let Some(code) = &link
     {
-        match crate::access::redeem_link(&access_file, code) {
+        match crate::access::redeem_link(&access_file, code, &device) {
             Ok(Some(g)) => {
                 auth = Some(Auth::Guest {
                     pass: g.pass,
                     expires: g.expires,
                     new: true,
+                    scope: g.scope,
+                    passkey: None,
                 })
             }
             Ok(None) => link_failed = true,
@@ -420,6 +459,7 @@ async fn control(
     let Some(auth) = auth else {
         record_auth_failure(shared, peer);
         warn!("{peer}: rejected (bad or missing token)");
+        refused(&device, if link_failed { "used or expired link" } else { "no valid token" });
         if link_failed {
             let msg = "This link has expired or was already used. Ask for a new one.".into();
             control::write_json(&mut send, &ServerMsg::Error { msg }).await?;
@@ -435,62 +475,14 @@ async fn control(
         ctx.conn.close(1u32.into(), b"unauthorized");
         return Ok(());
     };
-    ctx.authed.store(true, Ordering::Relaxed);
-    if let Some(r) = &ctx.relayed {
-        crate::remote::bridge_authed(r.bridge);
-    }
-    shared.video.request_keyframe(None);
-    let guest = matches!(auth, Auth::Guest { .. });
-    match &auth {
-        Auth::Token => info!("{peer}: authenticated via token"),
-        Auth::Tailnet => info!("{peer}: authenticated via tailnet identity"),
-        Auth::Guest { expires, new, .. } => {
-            let left = crate::access::describe(Duration::from_secs(
-                expires.saturating_sub(crate::access::now()),
-            ));
-            let how = if *new { "magic link" } else { "guest pass" };
-            info!("{peer}: authenticated via {how} ({left} left)");
-        }
-    }
-    // This viewer's resolution request lasts as long as the session.
-    let viewport_id = crate::viewers::next_id();
-    struct ViewportGuard(u64, Arc<Shared>);
-    impl Drop for ViewportGuard {
-        fn drop(&mut self) {
-            crate::resolution::set(self.0, None);
-            end_fit(self.0, self.1.clone());
-        }
-    }
-    let _viewport = ViewportGuard(viewport_id, ctx.shared.clone());
-    // Shown on the host (menu bar / notification) for as long as this session lasts.
-    let how = match &auth {
-        Auth::Token => crate::viewers::How::Token,
-        Auth::Tailnet => crate::viewers::How::Tailnet,
-        Auth::Guest { .. } => crate::viewers::How::Guest,
-    };
-    let mut device = crate::viewers::clean_device(hello_device.as_deref());
-    if matches!(auth, Auth::Tailnet)
-        && let Some(name) = tailscale::device_name(peer).await
-    {
-        device = format!("{name} ({device})");
-    }
-    let _viewing = crate::viewers::joined(
-        crate::viewers::Viewer {
-            id: crate::viewers::next_id(),
-            device,
-            how,
-            remote: ctx.relayed.is_some(),
-            peer,
-            since: std::time::SystemTime::now(),
-        },
-        ctx.conn.clone(),
-    );
     if let Auth::Guest {
         pass,
         expires,
         new: true,
+        ..
     } = &auth
     {
+        // Sent first, so the device keeps its pass even if a later step needs a retry.
         control::write_json(
             &mut send,
             &ServerMsg::Pass {
@@ -500,6 +492,179 @@ async fn control(
         )
         .await?;
     }
+    // A link made with --passkey: the pass only works together with its passkey.
+    if let Auth::Guest {
+        pass,
+        scope,
+        passkey,
+        ..
+    } = &auth
+        && scope.passkey
+    {
+        let ok = match passkey {
+            Some(key) => {
+                crate::passkey::verify(&mut send, &mut recv, &access_file, pass, key).await
+            }
+            None => {
+                crate::passkey::register(&mut send, &mut recv, &access_file, pass, &device).await
+            }
+        };
+        if !matches!(ok, Ok(true)) {
+            if let Err(e) = &ok {
+                warn!("{peer}: passkey: {e:#}");
+            }
+            record_auth_failure(shared, peer);
+            refused(&device, "passkey check failed");
+            // Denied, not an error: retrying on its own would only prompt again (and again).
+            let msg = "This link needs a passkey, and it didn't check out. Try again, or ask for a new link.".into();
+            control::write_json(&mut send, &ServerMsg::Denied { msg }).await?;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            ctx.conn.close(1u32.into(), b"passkey required");
+            return Ok(());
+        }
+    }
+    let perms = match &auth {
+        Auth::Guest { scope, .. } => control::Perms::guest(scope),
+        _ => control::Perms::owner(),
+    };
+    let guest = !perms.owner;
+    if matches!(auth, Auth::Tailnet)
+        && let Some(name) = tailscale::device_name(peer).await
+    {
+        device = format!("{name} ({device})");
+    }
+    let how = match &auth {
+        Auth::Token => crate::viewers::How::Token,
+        Auth::Tailnet => crate::viewers::How::Tailnet,
+        Auth::Guest { .. } => crate::viewers::How::Guest,
+    };
+    let session_id = crate::viewers::next_id();
+    let viewer = crate::viewers::Viewer {
+        id: session_id,
+        device: device.clone(),
+        how,
+        remote,
+        peer,
+        since: std::time::SystemTime::now(),
+    };
+    let scope_detail = match &auth {
+        Auth::Guest { scope, .. } => scope.describe(),
+        _ => String::new(),
+    };
+
+    // Device posture: what this computer requires of devices, checked before asking anyone.
+    if let Err(why) = crate::posture::check(peer, ctx.relayed.is_some(), ua.as_deref()).await {
+        warn!("{peer}: refused by device posture: {why}");
+        refused(&device, &format!("posture: {why}"));
+        let msg = format!("Not allowed: {why}.");
+        control::write_json(&mut send, &ServerMsg::Denied { msg }).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        ctx.conn.close(1u32.into(), b"device posture");
+        return Ok(());
+    }
+
+    // Ask before connecting: the person at the computer allows (or denies) this viewer.
+    let settings = crate::settings::load();
+    let scope_asks = matches!(&auth, Auth::Guest { scope, .. } if scope.ask);
+    if settings.ask_everyone || (guest && (settings.ask_guests || scope_asks)) {
+        let msg = "Waiting for the person at this computer to let you in…".into();
+        control::write_json(&mut send, &ServerMsg::Waiting { msg }).await?;
+        let mut who = viewer.describe();
+        if let Some(cut) = who.rfind(" · ") {
+            who.truncate(cut); // drop "· just now"
+        }
+        if !crate::approval::ask(who).await {
+            refused(&device, "not allowed");
+            let msg = "The person at this computer didn't let you in.".into();
+            control::write_json(&mut send, &ServerMsg::Denied { msg }).await?;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            ctx.conn.close(1u32.into(), b"not allowed");
+            return Ok(());
+        }
+    }
+
+    let _ = ctx.perms.set(perms);
+    ctx.authed.store(true, Ordering::Relaxed);
+    if let Some(r) = &ctx.relayed {
+        crate::remote::bridge_authed(r.bridge);
+    }
+    shared.video.request_keyframe(None);
+    match &auth {
+        Auth::Token => info!("{peer}: authenticated via token"),
+        Auth::Tailnet => info!("{peer}: authenticated via tailnet identity"),
+        Auth::Guest {
+            expires,
+            new,
+            scope,
+            ..
+        } => {
+            let left = crate::access::describe(Duration::from_secs(
+                expires.saturating_sub(crate::access::now()),
+            ));
+            let how = if *new { "magic link" } else { "guest pass" };
+            info!("{peer}: authenticated via {how} ({left} left, {})", scope.describe());
+        }
+    }
+    let _log = crate::connlog::Session {
+        entry: crate::connlog::Entry {
+            start: crate::access::now(),
+            secs: 0,
+            device: device.clone(),
+            how: match how {
+                crate::viewers::How::Token => "token",
+                crate::viewers::How::Tailnet => "tailnet",
+                crate::viewers::How::Guest => "guest",
+            }
+            .into(),
+            remote,
+            peer: peer.to_string(),
+            detail: scope_detail,
+        },
+        started: std::time::Instant::now(),
+    };
+    // This viewer's resolution request lasts as long as the session.
+    let viewport_id = session_id;
+    struct ViewportGuard(u64, Arc<Shared>);
+    impl Drop for ViewportGuard {
+        fn drop(&mut self) {
+            crate::resolution::set(self.0, None);
+            end_fit(self.0, self.1.clone());
+        }
+    }
+    let _viewport = ViewportGuard(viewport_id, ctx.shared.clone());
+    let _codec = crate::codec::joined(
+        session_id,
+        codecs.iter().any(|c| c == "hevc"),
+        ctx.relayed.as_ref().is_some_and(|r| r.rtp_video),
+    );
+    let _sharp = crate::sharp::joined(session_id, codecs.iter().any(|c| c == "hevc-rext"));
+    let mut sharp_on = false;
+    // Sharp text's lossless pictures of a still screen; <video> (RTP) viewers can't show them.
+    let rtp_viewer = ctx.relayed.as_ref().is_some_and(|r| r.rtp_video);
+    let lossless_reset = Arc::new(AtomicBool::new(false));
+    if shared.video.supports_lossless() && !rtp_viewer {
+        let (conn, shared, reset) = (ctx.conn.clone(), shared.clone(), lossless_reset.clone());
+        tokio::spawn(crate::lossless::run(
+            conn,
+            shared,
+            move || crate::sharp::session_on(session_id),
+            reset,
+        ));
+    }
+    // Shown on the host (menu bar / notification) for as long as this session lasts.
+    let _viewing = crate::viewers::joined(viewer, ctx.conn.clone());
+    // Recording every session (glass config record on), or when an owner asks.
+    let mut recording = if settings.record {
+        match crate::recording::start(&device) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                warn!("{peer}: recording: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     if let Auth::Guest { pass, .. } = &auth {
         // A guest is cut off when its pass expires or is revoked (`glass link --revoke`).
         let (conn, pass, file) = (ctx.conn.clone(), pass.clone(), access_file.clone());
@@ -524,6 +689,24 @@ async fn control(
             .await?
             .unwrap_or_default()
     };
+    let features = control::Features {
+        privacy: crate::privacy::supported(),
+        gamepad: crate::gamepad::supported(),
+        mic: crate::mic::supported(),
+        windows: shared.video.supports_windows(),
+        terminal: crate::terminal::SUPPORTED,
+        restart: true,
+        record: crate::recording::supported(),
+        hevc: shared.video.supports_hevc(),
+        // Forwarded ports are plain HTTP on the tailnet; there's no way to them over WebRTC.
+        forward_ports: if perms.owner && ctx.relayed.is_none() {
+            settings.forward_ports.clone()
+        } else {
+            Vec::new()
+        },
+        lossless: shared.video.supports_lossless()
+            && !ctx.relayed.as_ref().is_some_and(|r| r.rtp_video),
+    };
     let welcome = ServerMsg::Welcome {
         displays,
         streams: shared.video.streams(),
@@ -534,11 +717,26 @@ async fn control(
             crate::platform::OS
         },
         guest,
+        session: session_id,
+        perms,
+        features,
+        name: settings.name.clone(),
+        accent: settings.accent.clone(),
+        codec: crate::codec::current(),
     };
     control::write_json(&mut send, &welcome).await?;
     let bps = shared.rate.lock().unwrap().target();
     control::write_json(&mut send, &ServerMsg::Bitrate { bps }).await?;
-    if let Some(version) = crate::update::available() {
+    if crate::privacy::active() {
+        control::write_json(&mut send, &ServerMsg::Privacy { on: true }).await?;
+    }
+    if let Some(r) = &recording {
+        let path = Some(r.path.display().to_string());
+        control::write_json(&mut send, &ServerMsg::Recording { on: true, path }).await?;
+    }
+    if perms.owner
+        && let Some(version) = crate::update::available()
+    {
         control::write_json(
             &mut send,
             &ServerMsg::UpdateAvailable {
@@ -560,12 +758,21 @@ async fn control(
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
             };
+            // A link without clipboard access never sees the host's clipboard.
+            if matches!(msg, ServerMsg::Clipboard { .. }) && !perms.clipboard {
+                continue;
+            }
             if control::write_json(&mut send, &msg).await.is_err() {
                 break;
             }
         }
     });
 
+    let mut term = crate::terminal::Session::default();
+    let refuse = |msg: &str| {
+        let _ = ctx.ctl_tx.send(ServerMsg::Error { msg: msg.into() });
+    };
+    const OWNER_ONLY: &str = "Only this computer's owner can do that.";
     while let Some(buf) = control::read_frame(&mut recv).await? {
         // Skip what we don't understand (say, a newer client) rather than dropping the
         // whole control stream, which would silently break display switching and more.
@@ -577,12 +784,15 @@ async fn control(
             }
         };
         match msg {
-            ClientMsg::Hello { .. } => {}
+            ClientMsg::Hello { .. } | ClientMsg::Passkey(_) => {}
             ClientMsg::SelectDisplay { id } => set_layout(&ctx, Layout::Single(Some(id))).await?,
             ClientMsg::ShowAll => set_layout(&ctx, Layout::All).await?,
+            ClientMsg::Clipboard { .. } if !perms.clipboard => {
+                warn!("{peer}: clipboard is off for this link; ignored")
+            }
             ClientMsg::Clipboard { text, paste } => {
                 shared.clipboard.set_text(&text);
-                if paste {
+                if paste && perms.input {
                     shared.injector.lock().unwrap().paste();
                 }
             }
@@ -607,10 +817,23 @@ async fn control(
                 }
             }
             ClientMsg::Fit { .. } if guest => {
-                let msg = "Only this computer's owner can change its display shape.".into();
-                let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
+                refuse("Only this computer's owner can change its display shape.")
             }
             ClientMsg::Fit { size } => fit(&ctx, viewport_id, size).await?,
+            // Sharp text keeps this viewer at native size, whatever its screen.
+            ClientMsg::Viewport { .. } if sharp_on => {}
+            ClientMsg::LosslessReset => lossless_reset.store(true, Ordering::Relaxed),
+            ClientMsg::Sharp { .. } if !perms.input => refuse("This link is view only."),
+            ClientMsg::Sharp { on } => {
+                sharp_on = on;
+                if on {
+                    // An empty request: every stream at full resolution.
+                    crate::resolution::set(viewport_id, Some(Vec::new()));
+                }
+                // Turning it off: the viewer sends its viewport again.
+                crate::sharp::set(session_id, on);
+                info!("{peer}: sharp text {}", if on { "on" } else { "off" });
+            }
             ClientMsg::Viewport { streams } => {
                 let streams = streams
                     .into_iter()
@@ -642,6 +865,7 @@ async fn control(
                 ctx.audio_on.store(on, Ordering::Relaxed);
                 info!("{peer}: audio {}", if on { "on" } else { "off" });
             }
+            ClientMsg::PickFiles if !perms.files => refuse("Files are turned off for this link."),
             ClientMsg::PickFiles => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
@@ -663,9 +887,129 @@ async fn control(
                     }
                 });
             }
+            ClientMsg::Chat { text } => {
+                let text: String = text.trim().chars().take(CHAT_MAX).collect();
+                if text.is_empty() {
+                    continue;
+                }
+                info!("{peer}: chat ({} chars)", text.chars().count());
+                crate::notify::notify(&format!("Message from {device}"), &text);
+                let _ = shared.events.send(ServerMsg::Chat {
+                    from: device.clone(),
+                    sender: session_id,
+                    text,
+                });
+            }
+            ClientMsg::Restart { .. } if guest => refuse(OWNER_ONLY),
+            ClientMsg::Restart { glass } => {
+                let result = if glass {
+                    crate::power::restart_glass()
+                } else {
+                    crate::power::restart_computer()
+                };
+                if let Err(e) = result {
+                    refuse(&format!("Couldn't restart: {e:#}"));
+                }
+            }
+            ClientMsg::Wake { .. } if guest => refuse(OWNER_ONLY),
+            ClientMsg::Wake { dns } => match crate::wol::wake_target(&dns) {
+                Ok(_) => {
+                    let _ = ctx.ctl_tx.send(ServerMsg::Notice {
+                        msg: format!("Sent a wake-up to {dns}. It can take a minute to come online."),
+                    });
+                }
+                Err(e) => refuse(&format!("Couldn't wake {dns}: {e:#}")),
+            },
+            ClientMsg::Privacy { .. } if guest => refuse(OWNER_ONLY),
+            ClientMsg::Privacy { on } => {
+                if let Err(e) = crate::privacy::set_forced(on) {
+                    refuse(&format!("{e:#}"));
+                }
+            }
+            ClientMsg::ListWindows => {
+                let shared = shared.clone();
+                let tx = ctx.ctl_tx.clone();
+                tokio::spawn(async move {
+                    let windows = tokio::task::spawn_blocking(move || shared.video.windows())
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .unwrap_or_default();
+                    let _ = tx.send(ServerMsg::Windows { windows });
+                });
+            }
+            ClientMsg::SelectWindow { id } => set_layout(&ctx, Layout::Window(id)).await?,
+            ClientMsg::Annotate { stroke } => {
+                if stroke.to_string().len() <= ANNOTATION_MAX {
+                    let _ = shared.events.send(ServerMsg::Annotate {
+                        sender: session_id,
+                        stroke,
+                    });
+                }
+            }
+            ClientMsg::AnnotateClear => {
+                let _ = shared
+                    .events
+                    .send(ServerMsg::AnnotateClear { sender: session_id });
+            }
+            ClientMsg::Mic { .. } if !perms.input => refuse("This link is view only."),
+            ClientMsg::Mic { on } => {
+                ctx.mic_on.store(on, Ordering::Relaxed);
+                crate::mic::active(on);
+                info!("{peer}: microphone {}", if on { "on" } else { "off" });
+            }
+            ClientMsg::Term(_) if guest => refuse(OWNER_ONLY),
+            ClientMsg::Term(msg) => {
+                if let Err(e) = term.handle(msg, ctx.ctl_tx.clone()) {
+                    refuse(&format!("{e:#}"));
+                }
+            }
+            ClientMsg::Record { .. } if guest => refuse(OWNER_ONLY),
+            ClientMsg::Record { on } => {
+                if on && recording.is_none() {
+                    match crate::recording::start(&device) {
+                        Ok(r) => {
+                            let path = Some(r.path.display().to_string());
+                            recording = Some(r);
+                            let _ = ctx.ctl_tx.send(ServerMsg::Recording { on: true, path });
+                        }
+                        Err(e) => refuse(&format!("Couldn't record: {e:#}")),
+                    }
+                } else if !on && let Some(r) = recording.take() {
+                    let path = Some(r.path.display().to_string());
+                    drop(r);
+                    let _ = ctx.ctl_tx.send(ServerMsg::Recording { on: false, path });
+                }
+            }
         }
     }
+    if ctx.mic_on.load(Ordering::Relaxed) {
+        crate::mic::active(false);
+    }
     Ok(())
+}
+
+/// Chat messages and drawings are capped (characters / serialized bytes).
+const CHAT_MAX: usize = 2000;
+const ANNOTATION_MAX: usize = 64 << 10;
+
+/// A message from the person at the computer (`glass chat`, the menu bar) to every viewer;
+/// returns how many sessions are listening.
+pub fn host_chat(text: &str) -> Result<usize> {
+    let shared = shared().ok_or_else(|| anyhow::anyhow!("the host isn't ready yet"))?;
+    let text: String = text.trim().chars().take(CHAT_MAX).collect();
+    anyhow::ensure!(!text.is_empty(), "nothing to send");
+    let from = crate::settings::load()
+        .name
+        .unwrap_or_else(|| "This computer".into());
+    let n = crate::viewers::subscribe().borrow().len();
+    anyhow::ensure!(n > 0, "nobody is connected");
+    let _ = shared.events.send(ServerMsg::Chat {
+        from,
+        sender: 0,
+        text,
+    });
+    Ok(n)
 }
 
 /// "Fit this device" (macOS): a virtual display in one viewer's shape, which the main
@@ -756,6 +1100,7 @@ fn end_fit(session: u64, shared: Arc<Shared>) {
         let mut fit = FIT.lock().unwrap();
         if fit.as_ref().is_some_and(|f| f.owner == session) {
             let old = fit.take();
+            WINDOW_WATCH.fetch_add(1, Ordering::Relaxed);
             tokio::task::spawn_blocking(move || {
                 drop(old);
                 if let Ok(streams) = shared.video.set_layout(Layout::Single(None)) {
@@ -771,6 +1116,59 @@ fn end_fit(session: u64, shared: Arc<Shared>) {
     let _ = (session, shared);
 }
 
+/// Bumped on every layout change, so a streamed window's watcher knows it's done.
+static WINDOW_WATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// While a window is streamed: follow it when it moves (input mapping), and go back to the
+/// main display when it closes.
+async fn watch_window(shared: Arc<Shared>, id: u32, generation: u64) {
+    let mut last = None;
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if WINDOW_WATCH.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        let video = shared.clone();
+        let Ok(Ok(windows)) = tokio::task::spawn_blocking(move || video.video.windows()).await
+        else {
+            continue;
+        };
+        if WINDOW_WATCH.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        match windows.iter().find(|w| w.id == id) {
+            Some(w) => {
+                let rect = [w.x, w.y, w.points_width, w.points_height];
+                if last.is_some_and(|l| l != rect) {
+                    shared.injector.lock().unwrap().set_window_rect(Some(rect));
+                }
+                last = Some(rect);
+            }
+            None => {
+                info!("window {id} closed; back to the main display");
+                WINDOW_WATCH.fetch_add(1, Ordering::Relaxed);
+                let video = shared.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    video.video.set_layout(Layout::Single(None))
+                })
+                .await;
+                if let Ok(Ok(streams)) = result {
+                    let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
+                    {
+                        let mut injector = shared.injector.lock().unwrap();
+                        injector.set_displays(&ids);
+                        injector.set_window_rect(None);
+                    }
+                    let _ = shared.events.send(ServerMsg::Layout { streams });
+                }
+                let msg = "The window you were viewing closed, so here's the main display.".into();
+                let _ = shared.events.send(ServerMsg::Error { msg });
+                return;
+            }
+        }
+    }
+}
+
 async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
     let worker = ctx.shared.clone();
     let peer = ctx.conn.remote_address();
@@ -779,7 +1177,20 @@ async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
         Ok(streams) => {
             let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
             info!("{peer}: now streaming displays {ids:?}");
-            ctx.shared.injector.lock().unwrap().set_displays(&ids);
+            {
+                let mut injector = ctx.shared.injector.lock().unwrap();
+                injector.set_displays(&ids);
+                // A window: absolute coordinates on stream 0 land inside it.
+                let rect = match (layout, streams.first()) {
+                    (Layout::Window(_), Some(d)) => Some([d.x, d.y, d.points_width, d.points_height]),
+                    _ => None,
+                };
+                injector.set_window_rect(rect);
+            }
+            let generation = WINDOW_WATCH.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Layout::Window(id) = layout {
+                tokio::spawn(watch_window(ctx.shared.clone(), id, generation));
+            }
             let _ = ctx.shared.events.send(ServerMsg::Layout { streams });
         }
         Err(e) => {
@@ -802,6 +1213,8 @@ enum Auth {
         pass: String,
         expires: u64,
         new: bool,
+        scope: crate::access::Scope,
+        passkey: Option<crate::access::Passkey>,
     },
 }
 
@@ -844,21 +1257,40 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    let perms = ctx.perms.get().copied().unwrap_or(control::Perms {
+        input: false,
+        clipboard: false,
+        files: false,
+        owner: false,
+    });
     match tag[0] {
         STREAM_INPUT => {
             info!("{}: input stream open", ctx.conn.remote_address());
             let mut buf = [0u8; INPUT_EVENT_LEN];
             let mut events = 0u64;
             while stream.read_exact(&mut buf).await.is_ok() {
-                if let Some(ev) = InputEvent::read(&buf) {
-                    ctx.shared.injector.lock().unwrap().handle(ev);
-                    events += 1;
+                // A view-only link's input is read and dropped.
+                if !perms.input {
+                    continue;
                 }
+                match InputEvent::read(&buf) {
+                    Some(ev @ InputEvent::Gamepad { .. }) if !crate::testmode::enabled() => {
+                        crate::gamepad::handle(ev)
+                    }
+                    Some(ev) => ctx.shared.injector.lock().unwrap().handle(ev),
+                    None => continue,
+                }
+                events += 1;
             }
             info!(
                 "{}: input stream closed after {events} events",
                 ctx.conn.remote_address()
             );
+        }
+        STREAM_FILE if !perms.files => {
+            let _ = ctx.ctl_tx.send(ServerMsg::Error {
+                msg: "Files are turned off for this link.".into(),
+            });
         }
         STREAM_FILE => {
             let (name, path) = files::receive(&mut stream).await?;
@@ -885,11 +1317,21 @@ fn send_frame(
     if crate::testmode::take_drop() {
         return Ok(());
     }
-    let mut dgrams = glass_proto::fragment(
+    let flags = if frame.keyframe {
+        glass_proto::FLAG_KEYFRAME
+    } else {
+        0
+    } | if frame.hevc { glass_proto::FLAG_HEVC } else { 0 }
+        | if frame.refresh {
+            glass_proto::FLAG_REFRESH
+        } else {
+            0
+        };
+    let mut dgrams = glass_proto::fragment_with_flags(
         &frame.data,
         frame.stream,
         id,
-        frame.keyframe,
+        flags,
         frame.capture_us,
         max,
     );
@@ -913,6 +1355,8 @@ struct MachineEntry {
     glass: bool,
     /// Its WebTransport port, from its /config.json.
     wt_port: Option<u16>,
+    /// Its MAC addresses, from /config.json now or remembered from before (Wake-on-LAN).
+    macs: Vec<String>,
 }
 
 type MachinesCache = Arc<tokio::sync::Mutex<Option<(std::time::Instant, Vec<MachineEntry>)>>>;
@@ -924,7 +1368,7 @@ async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_j
     if let Some((at, list)) = cache.as_ref()
         && at.elapsed() < MACHINES_TTL
     {
-        return Json(serde_json::json!({ "machines": list }));
+        return Json(serde_json::json!({ "machines": list, "groups": crate::admin::load_groups().groups }));
     }
     let list = match tailscale::machines().await {
         Ok(found) => {
@@ -933,17 +1377,26 @@ async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_j
                 .into_iter()
                 .map(|m| {
                     tokio::spawn(async move {
-                        let wt_port = if m.is_self {
-                            Some(wt_port)
+                        let (wt_port, macs) = if m.is_self {
+                            (Some(wt_port), Vec::new())
                         } else if m.online {
-                            probe_glass(&m.dns, port).await
+                            probe_glass(&m.dns, port).await.map_or((None, Vec::new()), |(p, macs)| (Some(p), macs))
                         } else {
-                            None
+                            (None, Vec::new())
+                        };
+                        if !macs.is_empty() {
+                            crate::wol::remember(&m.dns, &macs);
+                        }
+                        let macs = if macs.is_empty() && !m.is_self {
+                            crate::wol::known().remove(&m.dns).unwrap_or_default()
+                        } else {
+                            macs
                         };
                         MachineEntry {
                             glass: wt_port.is_some(),
                             machine: m,
                             wt_port,
+                            macs,
                         }
                     })
                 })
@@ -962,13 +1415,13 @@ async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_j
         }
     };
     *cache = Some((std::time::Instant::now(), list.clone()));
-    Json(serde_json::json!({ "machines": list }))
+    Json(serde_json::json!({ "machines": list, "groups": crate::admin::load_groups().groups }))
 }
 
 /// If a Glass host answers at `https://<dns>:<port>/config.json`, its WebTransport port.
 /// Tries the port-less address first (it's there even when a host's web port had to move),
 /// then the usual port.
-async fn probe_glass(dns: &str, port: u16) -> Option<u16> {
+async fn probe_glass(dns: &str, port: u16) -> Option<(u16, Vec<String>)> {
     for url in [
         format!("https://{dns}/config.json"),
         format!("https://{dns}:{port}/config.json"),
@@ -981,8 +1434,16 @@ async fn probe_glass(dns: &str, port: u16) -> Option<u16> {
             continue;
         };
         let config: Option<serde_json::Value> = serde_json::from_slice(&out.stdout).ok();
-        if let Some(port) = config.and_then(|c| c["wtPort"].as_u64()) {
-            return Some(port as u16);
+        if let Some(c) = config
+            && let Some(port) = c["wtPort"].as_u64()
+        {
+            let macs = c["macs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| m.as_str().map(String::from))
+                .collect();
+            return Some((port as u16, macs));
         }
     }
     None
@@ -1092,6 +1553,17 @@ fn apply_bitrate(shared: &Shared) {
     }
     shared.video.set_bitrate(bps);
     let _ = shared.events.send(ServerMsg::Bitrate { bps });
+}
+
+/// Re-applies the current bitrate, so encoders pick up a changed policy (sharp text).
+pub fn reapply_policy() {
+    if let Some(shared) = SHARED.get() {
+        let bps = match APPLIED_BPS.load(Ordering::Relaxed) {
+            0 => shared.rate.lock().unwrap().target(),
+            b => b,
+        };
+        shared.video.set_bitrate(bps);
+    }
 }
 
 pub fn shared() -> Option<Arc<Shared>> {

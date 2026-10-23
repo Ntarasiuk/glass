@@ -7,7 +7,21 @@ import { createSocket } from 'node:dgram';
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { expect } from '@playwright/test';
+import { test as base, expect } from '@playwright/test';
+
+// Every spec's `test`: closes the browser contexts a test opened, even when it fails, so
+// pages left behind don't keep reconnecting to stopped hosts and slow the run.
+export const test = base.extend({
+  _closeContexts: [
+    async ({ browser }, use) => {
+      const before = new Set(browser.contexts());
+      await use();
+      await Promise.all(browser.contexts().filter((c) => !before.has(c)).map((c) => c.close().catch(() => {})));
+    },
+    { auto: true },
+  ],
+});
+export { expect };
 
 const ROOT = resolve(import.meta.dirname, '../..');
 export const BINARY = process.env.GLASS_BIN ?? join(ROOT, 'target/release/glass-host');
@@ -15,21 +29,31 @@ export const BINARY = process.env.GLASS_BIN ?? join(ROOT, 'target/release/glass-
 // Each parallel worker gets its own block of ports, below the OS's ephemeral range (so the
 // browser's own sockets can't take one between our check and the host binding it).
 const PORTS_PER_WORKER = 400;
-const firstPort = 21000 + Number(process.env.TEST_PARALLEL_INDEX ?? 0) * PORTS_PER_WORKER;
-let nextOffset = 0;
+// GLASS_E2E_PORT_BASE moves the whole range, so two test runs on one machine don't collide.
+const firstPort =
+  Number(process.env.GLASS_E2E_PORT_BASE ?? 21000) + Number(process.env.TEST_PARALLEL_INDEX ?? 0) * PORTS_PER_WORKER;
+// A worker restarted after a failure keeps its index: start somewhere else in the block so
+// it doesn't reuse ports its predecessor's hosts (and Chrome's QUIC sessions) just had.
+let nextOffset = (process.pid * 37) % PORTS_PER_WORKER;
 
-function isFree(port, kind) {
+// Free on both IPv4 and IPv6: the host binds 0.0.0.0, which an IPv6-only check misses.
+function isFreeOn(port, kind, family) {
   return new Promise((resolve) => {
+    const address = family === 6 ? '::' : '0.0.0.0';
     if (kind === 'udp') {
-      const sock = createSocket({ type: 'udp6' });
+      const sock = createSocket({ type: family === 6 ? 'udp6' : 'udp4', ipv6Only: family === 6 });
       sock.once('error', () => resolve(false));
-      sock.bind(port, '::', () => sock.close(() => resolve(true)));
+      sock.bind(port, address, () => sock.close(() => resolve(true)));
     } else {
       const server = createServer();
       server.once('error', () => resolve(false));
-      server.listen(port, '::', () => server.close(() => resolve(true)));
+      server.listen({ port, host: address, ipv6Only: family === 6 }, () => server.close(() => resolve(true)));
     }
   });
+}
+
+async function isFree(port, kind) {
+  return (await isFreeOn(port, kind, 4)) && (await isFreeOn(port, kind, 6));
 }
 
 /** The next port in this worker's block that's free for `kind` (tcp or udp). */
@@ -78,7 +102,8 @@ export class Host {
     for (let i = 0; i < 100; i++) {
       try {
         const r = await fetch(`${this.base}/config.json`);
-        if (r.ok) return this;
+        // Ready once it has also written its status, which `glass link` and friends read.
+        if (r.ok && existsSync(join(this.configDir, 'status.json'))) return this;
       } catch {}
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -163,9 +188,16 @@ export async function stats(page) {
   };
 }
 
+/** Clicks a toolbar button, waking the tucked toolbar first (a real pointer would). */
+export async function toolbarClick(page, id) {
+  await page.locator('#toolbar').hover();
+  await expect(page.locator('#toolbar')).not.toHaveClass(/idle|waking/);
+  await page.locator(`#${id}`).click();
+}
+
 /** Opens a toolbar menu and clicks the item whose label starts with `label`. */
 export async function pickMenuItem(page, button, label) {
-  await page.locator(`#${button}`).click();
+  await toolbarClick(page, button);
   await page.locator('.panel:not(.hidden) button', { hasText: label }).first().click();
 }
 

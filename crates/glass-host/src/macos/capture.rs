@@ -19,20 +19,23 @@ use objc2_core_video::CVImageBuffer;
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
-    SCStreamOutput, SCStreamOutputType,
+    SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 
 use super::audio::Packetizer;
 use super::clock::{cmtime_us, now_us};
 use super::encode::Encoder;
-pub use crate::media::DisplayInfo;
+pub use crate::media::{DisplayInfo, WindowInfo};
 
 /// kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ('420v'), the encoder's native input.
 const PIXEL_FORMAT_420V: u32 = u32::from_be_bytes(*b"420v");
+/// kCVPixelFormatType_32BGRA: full colour, for the HEVC 4:2:2 sharp-text encoder.
+const PIXEL_FORMAT_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
 
 /// The most recent captured frame, kept so a keyframe can be produced on demand: a static
 /// screen yields no new frames, and a client that just connected would otherwise wait.
-struct LastFrame(Option<CFRetained<CVImageBuffer>>);
+/// With its capture time, for lossless refresh.
+struct LastFrame(Option<CFRetained<CVImageBuffer>>, u64);
 // CVPixelBuffers are thread-safe, reference-counted CF objects.
 unsafe impl Send for LastFrame {}
 
@@ -62,7 +65,8 @@ const MAX_REFRESHES: u32 = 36;
 const TINY_FRAME: u64 = 1024;
 
 impl FrameState {
-    fn encode_last(&self) {
+    /// `refresh`: the image was encoded before (only refining it), not a new one.
+    fn encode_last(&self, refresh: bool) {
         let Some(image) = self.last.lock().unwrap().0.clone() else {
             return;
         };
@@ -70,7 +74,7 @@ impl FrameState {
         self.last_encoded_us
             .store(now, std::sync::atomic::Ordering::Relaxed);
         self.encoder
-            .encode(&image, unsafe { CMTime::new(now as i64, 1_000_000) }, now);
+            .encode(&image, unsafe { CMTime::new(now as i64, 1_000_000) }, now, refresh);
     }
 
     /// After a frame (sent or skipped): if nothing newer arrives, send what was skipped,
@@ -89,7 +93,7 @@ impl FrameState {
                 return; // newer frames took over
             }
             if state.unsent.swap(false, Relaxed) {
-                state.encode_last();
+                state.encode_last(false);
             } else {
                 if state.encoder.last_frame_size() < TINY_FRAME {
                     state.tiny.fetch_add(1, Relaxed);
@@ -99,7 +103,7 @@ impl FrameState {
                 {
                     return;
                 }
-                state.encode_last();
+                state.encode_last(true);
             }
             state.schedule_idle_check();
         });
@@ -174,9 +178,9 @@ define_class!(
             } else {
                 state.unsent.store(false, Relaxed);
                 state.last_encoded_us.store(capture_us, Relaxed);
-                state.encoder.encode(&image, pts, capture_us);
+                state.encoder.encode(&image, pts, capture_us, false);
             }
-            state.last.lock().unwrap().0 = Some(image);
+            *state.last.lock().unwrap() = LastFrame(Some(image), capture_us);
             state.schedule_idle_check();
         }
     }
@@ -217,7 +221,53 @@ impl Capture {
     /// new frames). With a keyframe pending, this delivers it even if the screen is static.
     pub fn refresh(&self) {
         let state = self.state.clone();
-        self.queue.exec_async(move || state.encode_last());
+        // A skipped (newer) image is news; otherwise it's the picture already sent.
+        self.queue.exec_async(move || {
+            let fresh = state.unsent.swap(false, std::sync::atomic::Ordering::Relaxed);
+            state.encode_last(!fresh)
+        });
+    }
+
+    /// Bumped on every new image.
+    pub fn generation(&self) -> u64 {
+        self.state.generation.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The last image as packed BGRA, if it was captured in full colour (BGRA).
+    pub fn read_bgra(&self) -> Option<crate::lossless::RawFrame> {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
+            CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+        let (image, capture_us) = {
+            let last = self.state.last.lock().unwrap();
+            (last.0.clone()?, last.1)
+        };
+        if CVPixelBufferGetPixelFormatType(&image) != PIXEL_FORMAT_BGRA {
+            return None;
+        }
+        let (w, h) = (CVPixelBufferGetWidth(&image), CVPixelBufferGetHeight(&image));
+        if unsafe { CVPixelBufferLockBaseAddress(&image, CVPixelBufferLockFlags::ReadOnly) } != 0 {
+            return None;
+        }
+        let base = CVPixelBufferGetBaseAddress(&image) as *const u8;
+        let stride = CVPixelBufferGetBytesPerRow(&image);
+        let mut bgra = Vec::with_capacity(w * h * 4);
+        if !base.is_null() && stride >= w * 4 {
+            for y in 0..h {
+                // SAFETY: locked, and each row holds at least w * 4 bytes.
+                let row = unsafe { std::slice::from_raw_parts(base.add(y * stride), w * 4) };
+                bgra.extend_from_slice(row);
+            }
+        }
+        unsafe { CVPixelBufferUnlockBaseAddress(&image, CVPixelBufferLockFlags::ReadOnly) };
+        (bgra.len() == w * h * 4).then_some(crate::lossless::RawFrame {
+            width: w,
+            height: h,
+            bgra,
+            capture_us,
+        })
     }
 }
 
@@ -239,8 +289,109 @@ pub struct Display {
 
 unsafe impl Send for Display {}
 
-/// All capturable displays, main display first. Sleeping displays are not listed.
-pub fn list_displays() -> Result<Vec<Display>> {
+/// A window to stream on its own (single-app streaming).
+pub struct Window {
+    pub sc: Retained<SCWindow>,
+    pub info: WindowInfo,
+}
+
+unsafe impl Send for Window {}
+
+impl Window {
+    /// The window as a stream: its pixel size, and its frame on the desktop.
+    pub fn stream_info(&self) -> DisplayInfo {
+        DisplayInfo {
+            id: self.info.id,
+            width: self.info.width,
+            height: self.info.height,
+            x: self.info.x,
+            y: self.info.y,
+            points_width: self.info.points_width,
+            points_height: self.info.points_height,
+            main: false,
+            builtin: false,
+        }
+    }
+}
+
+/// What a capture shows: a whole display, or one window.
+pub enum Source<'a> {
+    Display(&'a SCDisplay),
+    Window(&'a SCWindow),
+}
+
+/// Windows smaller than this (points) aren't worth listing: palettes, badges, menus.
+const MIN_WINDOW: f64 = 100.0;
+
+/// Windows that can be streamed on their own: on screen, titled, normal level, belonging to
+/// another app. Front to back.
+pub fn list_windows() -> Result<Vec<Window>> {
+    let content = shareable_content()?;
+    let own = std::process::id() as i32;
+    let displays: Vec<(objc2_core_foundation::CGRect, f64)> = unsafe { content.displays() }
+        .iter()
+        .map(|d| {
+            let id = unsafe { d.displayID() };
+            let b = CGDisplayBounds(id);
+            (b, CGDisplayPixelsWide(id) as f64 / b.size.width.max(1.0))
+        })
+        .collect();
+    let mut windows = Vec::new();
+    for sc in unsafe { content.windows() }.iter() {
+        let (frame, layer, on_screen) =
+            unsafe { (sc.frame(), sc.windowLayer(), sc.isOnScreen()) };
+        if layer != 0
+            || !on_screen
+            || frame.size.width < MIN_WINDOW
+            || frame.size.height < MIN_WINDOW
+        {
+            continue;
+        }
+        let Some(app) = (unsafe { sc.owningApplication() }) else {
+            continue;
+        };
+        if unsafe { app.processID() } == own {
+            continue;
+        }
+        let title = unsafe { sc.title() }
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let app_name = unsafe { app.applicationName() }.to_string();
+        if title.is_empty() || app_name.is_empty() {
+            continue;
+        }
+        // Pixels per point of the display the window is mostly on (Retina: 2).
+        let (cx, cy) = (
+            frame.origin.x + frame.size.width / 2.0,
+            frame.origin.y + frame.size.height / 2.0,
+        );
+        let scale = displays
+            .iter()
+            .find(|(b, _)| {
+                cx >= b.origin.x
+                    && cx < b.origin.x + b.size.width
+                    && cy >= b.origin.y
+                    && cy < b.origin.y + b.size.height
+            })
+            .or(displays.first())
+            .map_or(1.0, |(_, s)| *s);
+        let info = WindowInfo {
+            id: unsafe { sc.windowID() },
+            app: app_name,
+            title,
+            width: ((frame.size.width * scale) as usize) & !1,
+            height: ((frame.size.height * scale) as usize) & !1,
+            x: frame.origin.x,
+            y: frame.origin.y,
+            points_width: frame.size.width,
+            points_height: frame.size.height,
+        };
+        windows.push(Window { sc, info });
+    }
+    Ok(windows)
+}
+
+fn shareable_content() -> Result<Retained<SCShareableContent>> {
     let (tx, rx) = mpsc::channel();
     let handler = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
         let result = if content.is_null() {
@@ -254,10 +405,14 @@ pub fn list_displays() -> Result<Vec<Display>> {
         let _ = tx.send(result);
     });
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
-    let content = rx.recv()?.context(
+    rx.recv()?.context(
         "Screen Recording permission is required (System Settings → Privacy & Security)",
-    )?;
+    )
+}
 
+/// All capturable displays, main display first. Sleeping displays are not listed.
+pub fn list_displays() -> Result<Vec<Display>> {
+    let content = shareable_content()?;
     let mut displays: Vec<Display> = unsafe { content.displays() }
         .iter()
         .map(|sc| {
@@ -285,28 +440,45 @@ pub fn list_displays() -> Result<Vec<Display>> {
 }
 
 pub fn start(
-    display: &SCDisplay,
+    source: Source<'_>,
     width: usize,
     height: usize,
     fps: i32,
     encoder: Arc<Encoder>,
     fps_cap: Arc<std::sync::atomic::AtomicU32>,
     audio: Option<Arc<std::sync::Mutex<Packetizer>>>,
+    // Full colour: for the 4:2:2 encoder, or for lossless refreshes (sharp text).
+    bgra: bool,
 ) -> Result<Capture> {
     let captures_audio = audio.is_some();
-    let filter = unsafe {
-        SCContentFilter::initWithDisplay_excludingWindows(
-            SCContentFilter::alloc(),
-            display,
-            &NSArray::new(),
-        )
+    let (filter, source_id) = match source {
+        Source::Display(display) => (
+            unsafe {
+                SCContentFilter::initWithDisplay_excludingWindows(
+                    SCContentFilter::alloc(),
+                    display,
+                    &NSArray::new(),
+                )
+            },
+            unsafe { display.displayID() },
+        ),
+        Source::Window(window) => (
+            unsafe {
+                SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), window)
+            },
+            unsafe { window.windowID() },
+        ),
     };
     let config = unsafe { SCStreamConfiguration::new() };
     unsafe {
         config.setWidth(width);
         config.setHeight(height);
         config.setMinimumFrameInterval(CMTime::new(1, fps));
-        config.setPixelFormat(PIXEL_FORMAT_420V);
+        config.setPixelFormat(if bgra || encoder.wants_bgra() {
+            PIXEL_FORMAT_BGRA
+        } else {
+            PIXEL_FORMAT_420V
+        });
         config.setShowsCursor(true);
         // One buffer is held as the last frame, so leave the pool room for new ones.
         config.setQueueDepth(4);
@@ -322,7 +494,7 @@ pub fn start(
     let queue = DispatchQueue::new("glass.capture", DispatchQueueAttr::SERIAL);
     let state = Arc::new(FrameState {
         encoder,
-        last: std::sync::Mutex::new(LastFrame(None)),
+        last: std::sync::Mutex::new(LastFrame(None, 0)),
         fps_cap,
         last_encoded_us: Default::default(),
         generation: Default::default(),
@@ -331,7 +503,7 @@ pub fn start(
         tiny: Default::default(),
         queue: queue.clone(),
     });
-    let output = StreamOutput::new(state.clone(), audio, unsafe { display.displayID() });
+    let output = StreamOutput::new(state.clone(), audio, source_id);
     // Separate queue so audio never waits behind a frame being encoded.
     let audio_queue = DispatchQueue::new("glass.audio", DispatchQueueAttr::SERIAL);
     unsafe {

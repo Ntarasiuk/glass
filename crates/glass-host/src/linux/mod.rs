@@ -9,6 +9,7 @@ pub mod input;
 pub mod keymap;
 pub mod permissions;
 pub mod portal;
+pub mod privacy;
 pub mod setup;
 pub mod video;
 

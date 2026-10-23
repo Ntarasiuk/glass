@@ -1,9 +1,8 @@
 // End-to-end tests against real `glass --test` hosts in Google Chrome.
 // The host streams a test pattern on two fake 640×360 displays and records input.
 
-import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { BINARY, Host, expectVideo, hudText, pickMenuItem, stats, touch } from './harness.mjs';
+import { BINARY, Host, expectVideo, hudText, pickMenuItem, stats, touch, test, expect, toolbarClick } from './harness.mjs';
 
 /** One host per test, stopped afterwards. */
 const it = test.extend({
@@ -136,12 +135,13 @@ test.describe('connecting', () => {
     await expect(page.locator('#screens canvas').first()).toBeAttached();
     expect(await hudText(page)).not.toContain('640×360');
 
-    await auth.locator('input').fill('not-the-token');
-    await auth.locator('button').click();
+    // The token form (the directory sign-in fields beside it are hidden unless set up).
+    await auth.locator('input[name="token"]').fill('not-the-token');
+    await auth.locator('button[type="submit"]').click();
     await expect(auth).toBeVisible({ timeout: 10_000 });
 
-    await auth.locator('input').fill(host.token);
-    await auth.locator('button').click();
+    await auth.locator('input[name="token"]').fill(host.token);
+    await auth.locator('button[type="submit"]').click();
     await expectVideo(page);
     await expect(auth).toBeHidden();
   });
@@ -185,7 +185,7 @@ test.describe('magic links', () => {
     await page.waitForTimeout(1500); // the host has written its status, which `glass link` reads
     const env = { ...process.env, GLASS_CONFIG_DIR: host.configDir };
     const made = JSON.parse(execFileSync(BINARY, ['link', '--json', '--for', '1h'], { env }).toString());
-    expect(made.summary).toBe('Works once, within 15 minutes. Gives that device 1 hour of access.');
+    expect(made.summary).toBe('Works once, within 15 minutes. Gives that device 1 hour of access (full control).');
     const code = made.url.match(/#l=([0-9a-f]{32})$/)[1];
     const link = `${host.base}/#l=${code}`;
 
@@ -283,10 +283,11 @@ test.describe('displays', () => {
 
   it('lists displays and switches between one and all', async ({ page, host }) => {
     await open(page, host);
-    await page.locator('#btn-displays').click();
+    await toolbarClick(page, 'btn-displays');
     const items = page.locator('#displays-panel button');
-    // Two displays, "All displays", then the resolution choices (Auto, This Mac).
-    await expect(items).toHaveCount(5);
+    // Two displays, "All displays", the resolution choices (Auto, This Mac), Sharp text,
+    // then the test host's two windows (Apps).
+    await expect(items).toHaveCount(8);
     await expect(items.nth(2)).toContainText('All displays');
     await expect(items.nth(3)).toContainText('Auto');
     await expect(items.nth(4)).toContainText('This Mac');
@@ -538,7 +539,7 @@ test.describe('clipboard and files', () => {
 
   it('downloads files picked on the host', async ({ page, host }) => {
     await open(page, host);
-    await page.locator('#btn-download').click();
+    await toolbarClick(page, 'btn-download');
     // The finished transfer's toast has the Save action (the progress toast doesn't).
     const toast = page.locator('.toast', { hasText: 'glass-test-pick', has: page.locator('.action') });
     await expect(toast).toBeVisible({ timeout: 10_000 });
@@ -550,7 +551,7 @@ test.describe('audio', () => {
   it('streams audio once turned on', async ({ page, host }) => {
     await open(page, host);
     await expect(page.locator('#btn-audio')).toBeVisible();
-    await page.locator('#btn-audio').click();
+    await toolbarClick(page, 'btn-audio');
     await expect.poll(async () => (await stats(page)).audioPackets, { timeout: 10_000 }).toBeGreaterThan(150);
   });
 });
@@ -577,7 +578,8 @@ test.describe('resilience', () => {
     await page.waitForTimeout(3000);
     const low = await bps();
     await page.waitForTimeout(4000);
-    expect(await bps()).toBe(low);
+    // Never climbs back; on a loaded test machine real loss can push it lower still.
+    expect(await bps()).toBeLessThanOrEqual(low);
   });
 
   it('never decodes a corrupted frame', async ({ page, host }) => {

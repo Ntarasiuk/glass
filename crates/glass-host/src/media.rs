@@ -27,6 +27,26 @@ pub struct EncodedFrame {
     pub data: Vec<u8>,
     pub keyframe: bool,
     pub capture_us: u64,
+    /// HEVC (Annex B, VPS/SPS/PPS before keyframes) instead of H.264.
+    pub hevc: bool,
+    /// Re-encodes a picture that hasn't changed (see `glass_proto::FLAG_REFRESH`).
+    pub refresh: bool,
+}
+
+/// A window that can be streamed on its own (single-app streaming).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WindowInfo {
+    pub id: u32,
+    pub app: String,
+    pub title: String,
+    /// Pixel size.
+    pub width: usize,
+    pub height: usize,
+    /// Position and size on the desktop (global points), for input mapping.
+    pub x: f64,
+    pub y: f64,
+    pub points_width: f64,
+    pub points_height: f64,
 }
 
 /// Fixed-size PCM packets (see `glass_proto::audio_packet`), fanned out to sessions.
@@ -37,6 +57,8 @@ pub type AudioPackets = broadcast::Sender<Arc<Vec<u8>>>;
 pub enum Layout {
     Single(Option<u32>),
     All,
+    /// One window, by `WindowInfo::id`.
+    Window(u32),
 }
 
 /// A source of encoded display streams (the platform capturer, or the test pattern).
@@ -55,6 +77,45 @@ pub trait VideoSource: Send + Sync {
     fn rebalance(&self) {}
     /// Encodes each stream at this width (`None` = native), from what viewers show.
     fn set_target_widths(&self, _widths: &[Option<u32>]) {}
+    /// Can this source stream single windows?
+    fn supports_windows(&self) -> bool {
+        false
+    }
+    /// Windows that can be streamed on their own. May block.
+    fn windows(&self) -> anyhow::Result<Vec<WindowInfo>> {
+        Ok(Vec::new())
+    }
+    /// Encode in HEVC (`true`) or H.264; returns the codec now in use.
+    fn set_hevc(&self, _hevc: bool) -> bool {
+        false
+    }
+    /// The latest captured picture of stream `stream`, in full colour, for lossless refresh
+    /// (`None` when it isn't captured in full colour). May block briefly.
+    fn raw_frame(&self, _stream: u8) -> Option<std::sync::Arc<crate::lossless::RawFrame>> {
+        None
+    }
+    /// Bumped each time stream `stream` captures a new picture.
+    fn frame_generation(&self, _stream: u8) -> Option<u64> {
+        None
+    }
+    /// Capture in full colour (BGRA), so `raw_frame` has pictures to send losslessly.
+    fn set_full_colour(&self, _on: bool) {}
+    /// Can this source provide raw frames at all?
+    fn supports_lossless(&self) -> bool {
+        false
+    }
+    /// Sharp text: HEVC 4:2:2 instead of 4:2:0 while HEVC is on; returns whether it's in use.
+    fn set_rext(&self, _on: bool) -> bool {
+        false
+    }
+    /// Can this source encode HEVC 4:2:2 (Range Extensions)?
+    fn supports_rext(&self) -> bool {
+        false
+    }
+    /// Can this source encode HEVC at all?
+    fn supports_hevc(&self) -> bool {
+        false
+    }
 }
 
 /// Where client input goes (the platform injector, or a recorder in tests).
@@ -66,6 +127,9 @@ pub trait InputSink: Send {
     fn release_all(&mut self);
     /// Retargets absolute mouse coordinates to the streamed displays.
     fn set_displays(&mut self, displays: &[u32]);
+    /// Maps absolute coordinates on stream 0 to this rectangle of the desktop (global
+    /// points) instead of a display: a streamed window. `None` goes back to displays.
+    fn set_window_rect(&mut self, _rect: Option<[f64; 4]>) {}
 }
 
 /// The host clipboard (text).

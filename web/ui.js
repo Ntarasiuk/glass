@@ -1,18 +1,35 @@
 // Toolbar, panels, toasts and the token prompt. DOM writes only; no layout reads.
 
+import { CUSTOM_KEY, comboFromEvent, parseCustom, serializeCustom } from './shortcuts.js';
+
 const $ = (id) => document.getElementById(id);
+// localStorage can throw (private browsing, storage blocked).
+const storageGet = (key) => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+const storageSet = (key, value) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+};
 
 const TOOLBAR_IDLE_MS = 3000;
 // Matches the slide-in transition in index.html (420 ms), plus a beat.
 const TOOLBAR_WAKE_MS = 450;
 
-export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
     machines: { button: $('btn-machines'), panel: $('machines-panel') },
     displays: { button: $('btn-displays'), panel: $('displays-panel') },
     shortcuts: { button: $('btn-shortcuts'), panel: $('shortcuts-panel') },
+    more: { button: $('btn-more'), panel: $('more-panel') },
+    ports: { button: $('btn-ports'), panel: $('ports-panel') },
   };
   const fileInput = $('file-input');
   const toasts = $('toasts');
@@ -62,14 +79,22 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     toggleMenu('machines');
     if (!menus.machines.panel.classList.contains('hidden')) onOpenMachines();
   });
-  on('btn-displays', () => toggleMenu('displays'));
+  on('btn-displays', () => {
+    toggleMenu('displays');
+    // Windows come and go, so ask for a fresh list each time the menu opens.
+    if (windowsAvailable && !menus.displays.panel.classList.contains('hidden')) onListWindows?.();
+  });
   on('btn-shortcuts', () => toggleMenu('shortcuts'));
+  on('btn-more', () => toggleMenu('more'));
   on('btn-keyboard', onKeyboard);
   on('btn-upload', () => fileInput.click());
   on('btn-download', onRequestFiles);
   on('btn-audio', onAudio);
+  on('btn-mic', () => onMic?.());
   on('btn-fullscreen', onFullscreen);
   on('btn-stats', onToggleStats);
+  on('btn-terminal', onTerminal);
+  on('btn-ports', () => toggleMenu('ports'));
 
   fileInput.addEventListener('change', () => {
     if (fileInput.files.length) onUploadFiles([...fileInput.files]);
@@ -85,7 +110,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
   });
 
   addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
+    // While recording a shortcut, Escape cancels the recording instead.
+    if (e.key !== 'Escape' || recording) return;
     const open = Object.keys(menus).find((name) => !menus[name].panel.classList.contains('hidden'));
     if (!open) return;
     e.preventDefault();
@@ -134,6 +160,11 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
         onChange(on);
       },
     });
+    // Set from outside (a machine's keyboard profile) without calling back.
+    item.set = (v) => {
+      on = v;
+      item.setAttribute('aria-checked', String(on));
+    };
     return item;
   }
   const pcItem = toggleItem('PC keyboard', 'Ctrl → ⌘, Super → ⌃', pcKeyboard, onPcKeyboard);
@@ -148,47 +179,158 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
       onSwapCmdOption(swapOn);
     },
   });
+  swapItem.set = (v) => {
+    swapOn = v;
+    swapItem.setAttribute('aria-checked', String(swapOn));
+  };
   swapItem.title = 'Pair with iPad Settings › General › Keyboard › Hardware Keyboard › Modifier Keys: Command → Option, Option → Command. Lets ⌘Tab, ⌘Space and ⌘H reach the Mac.';
   const note = document.createElement('p');
   note.className = 'note';
   note.textContent = 'iPadOS keeps ⌘Tab, ⌘Space, ⌘H and ⌘⇧3–5. “Ctrl as ⌘” sends those combos when you press Ctrl instead. Alternatively swap Command and Option in iPad Settings › Keyboard › Hardware Keyboard › Modifier Keys and turn on “Swap ⌘ and ⌥”.';
   const divider = document.createElement('hr');
 
-  menus.shortcuts.panel.replaceChildren(
-    pcItem,
-    ctrlItem,
-    swapItem,
-    note,
-    divider,
-    ...shortcuts.map((sc) =>
-      menuItem(sc.label, sc.keysLabel, {
-        onSelect: () => {
-          setMenuOpen('shortcuts', false);
-          onShortcut(sc);
-        },
-      }),
-    ),
-  );
+  const shortcutItem = (sc) =>
+    menuItem(sc.label, sc.keysLabel, {
+      onSelect: () => {
+        setMenuOpen('shortcuts', false);
+        onShortcut(sc);
+      },
+    });
+  // Your own shortcuts: recorded from the next combo pressed, kept in localStorage.
+  let custom = parseCustom(storageGet(CUSTOM_KEY));
+  let recording = false;
+  function saveCustom() {
+    storageSet(CUSTOM_KEY, serializeCustom(custom));
+    renderShortcuts();
+  }
+  function customRow(sc, i) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:2px';
+    const item = shortcutItem(sc);
+    item.style.flex = '1';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = '×';
+    remove.title = `Remove ${sc.label}`;
+    remove.setAttribute('aria-label', `Remove ${sc.label}`);
+    remove.style.cssText = 'width:auto;flex:none;padding:10px 12px;color:var(--text-dim)';
+    remove.addEventListener('click', (e) => {
+      e.stopPropagation();
+      custom = custom.filter((_, j) => j !== i);
+      saveCustom();
+    });
+    row.append(item, remove);
+    return row;
+  }
+  function addShortcut() {
+    if (recording) return;
+    recording = true;
+    renderShortcuts();
+    // Capture phase on window: runs before the input handler, so the combo isn't sent.
+    const onKey = (e) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.code === 'Escape' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) return finish(null);
+      const combo = comboFromEvent(e);
+      if (combo) finish(combo);
+    };
+    const swallowUp = (e) => e.stopImmediatePropagation();
+    function finish(combo) {
+      removeEventListener('keydown', onKey, true);
+      setTimeout(() => removeEventListener('keyup', swallowUp, true), 300);
+      recording = false;
+      if (combo) {
+        const label = (prompt('Name this shortcut', combo.keysLabel) ?? '').trim();
+        if (label) custom = [...custom, ...parseCustom(serializeCustom([{ label, codes: combo.codes }]))];
+      }
+      saveCustom();
+    }
+    addEventListener('keydown', onKey, true);
+    addEventListener('keyup', swallowUp, true);
+  }
+  // A bar of shortcut buttons along the bottom, for touch screens without a keyboard.
+  const BAR_KEY = 'glass.shortcutBar';
+  let barOn = storageGet(BAR_KEY) === '1';
+  const bar = document.createElement('div');
+  bar.id = 'shortcut-bar';
+  bar.className = 'glass hidden';
+  bar.setAttribute('role', 'toolbar');
+  bar.setAttribute('aria-label', 'Shortcut bar');
+  document.body.append(bar);
+  const barItem = toggleItem('Shortcut bar', 'buttons along the bottom', barOn, (on) => {
+    barOn = on;
+    storageSet(BAR_KEY, on ? '1' : '0');
+    renderBar();
+  });
+  function renderBar() {
+    bar.classList.toggle('hidden', !barOn || $('btn-shortcuts').classList.contains('hidden'));
+    bar.replaceChildren(...[...shortcuts, ...custom].map((sc) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = sc.keysLabel;
+      b.title = sc.label;
+      b.addEventListener('pointerdown', (e) => e.preventDefault()); // keep keyboard focus
+      b.addEventListener('click', (e) => { e.preventDefault(); onShortcut(sc); });
+      return b;
+    }));
+  }
+  function renderShortcuts() {
+    renderBar();
+    const add = menuItem(recording ? 'Press a shortcut…' : 'Add shortcut…', recording ? 'Esc to cancel' : '', { onSelect: addShortcut });
+    menus.shortcuts.panel.replaceChildren(
+      pcItem,
+      ctrlItem,
+      swapItem,
+      note,
+      barItem,
+      divider,
+      ...shortcuts.map(shortcutItem),
+      ...custom.map(customRow),
+      add,
+    );
+  }
+  renderShortcuts();
 
   /** `current` is the id ("host" or "host:port") of the machine this session is on. */
-  function renderMachines(machines, current) {
+  function renderMachines(machines, current, groups = []) {
     if (!machines) {
       menus.machines.panel.replaceChildren(menuItem('Looking for machines…', '', { onSelect: () => {} }));
       return;
     }
-    const status = (m) => (m.id === current ? 'connected' : !m.online ? 'offline' : !m.glass ? 'Glass not running' : m.os);
+    // An offline machine whose network address Glass has seen can be woken up (Wake-on-LAN).
+    const wakeable = (m) => !m.online && m.macs?.length > 0;
+    const status = (m) => (m.id === current ? 'connected' : wakeable(m) ? 'offline · wake' : !m.online ? 'offline' : !m.glass ? 'Glass not running' : m.os);
     const items = machines.map((m) => {
       const item = menuItem(m.name, status(m), {
         checked: m.id === current,
         onSelect: () => {
           setMenuOpen('machines', false);
-          if (m.id !== current) onSelectMachine(m);
+          if (wakeable(m)) onWakeMachine(m);
+          else if (m.id !== current) onSelectMachine(m);
         },
       });
-      item.disabled = m.id !== current && (!m.online || !m.glass);
+      item.disabled = m.id !== current && !wakeable(m) && (!m.online || !m.glass);
       return item;
     });
     if (!items.length) items.push(menuItem('No machines found', 'needs Tailscale', { onSelect: () => {} }));
+    // Groups from the console's address book, as headings; the rest after them.
+    const groupOf = (m) => groups.find((g) => g.machines.includes(m.dns?.toLowerCase()))?.name;
+    if (groups.length && machines.some(groupOf)) {
+      const heading = (text) => {
+        const p = document.createElement('p');
+        p.className = 'note';
+        p.textContent = text;
+        return p;
+      };
+      const out = [];
+      for (const g of [...groups.map((g) => g.name), undefined]) {
+        const members = machines.map((m, i) => [m, items[i]]).filter(([m]) => groupOf(m) === g);
+        if (!members.length) continue;
+        out.push(heading(g ?? 'Other'), ...members.map(([, item]) => item));
+      }
+      menus.machines.panel.replaceChildren(...out);
+      return;
+    }
     menus.machines.panel.replaceChildren(...items);
   }
 
@@ -230,6 +372,16 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
         onSelect: () => { setMenuOpen('displays', false); onResolution?.('native'); },
       }),
     );
+    // Sharp text: full size, fewer but finer frames (and 4:2:2 colour where it can).
+    if (sharpAvailable) {
+      items.push(
+        document.createElement('hr'),
+        menuItem('Sharp text', sharpMode === 'off' ? 'for reading' : sharpMode === '4:2:2' ? 'on · 4:2:2' : 'on', {
+          checked: sharpOn,
+          onSelect: () => { setMenuOpen('displays', false); onSharp?.(!sharpOn); },
+        }),
+      );
+    }
     // Fit this device: the Mac's desktop in this screen's shape, no black bars.
     const fits = canFit ? fitSizes() : [];
     if (fits.length) {
@@ -245,12 +397,82 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
         }));
       }
     }
+    // Apps: stream one window on its own.
+    if (windowsAvailable) {
+      const heading = document.createElement('p');
+      heading.className = 'note';
+      heading.textContent = 'Apps · show one window on its own';
+      items.push(document.createElement('hr'), heading);
+      if (!windowList) items.push(menuItem('Looking for windows…', '', { onSelect: () => {} }));
+      else if (!windowList.length) items.push(menuItem('No windows', '', { onSelect: () => {} }));
+      for (const w of windowList ?? []) {
+        const meta = w.title && w.title !== w.app ? w.title : `${w.width}×${w.height}`;
+        const item = menuItem(w.app, meta.length > 32 ? `${meta.slice(0, 31)}…` : meta, {
+          checked: streamed.length === 1 && streamed[0] === w.id,
+          onSelect: () => {
+            setMenuOpen('displays', false);
+            if (streamed[0] !== w.id) onSelectWindow?.(w.id);
+          },
+        });
+        item.title = `${w.app} — ${w.title}`;
+        items.push(item);
+      }
+    }
     lastDisplays = [displays, streamed];
     menus.displays.panel.replaceChildren(...items);
   }
   let resolutionMode = resolution;
   let lastDisplays;
+
+  // The computer menu (owner only): privacy screen and restarts.
+  let privacyAvailable = false;
+  let privacyOn = false;
+  function renderMore() {
+    const items = [];
+    if (privacyAvailable) {
+      const note = document.createElement('p');
+      note.className = 'note';
+      note.textContent = "Blanks the computer's own screen and ignores its keyboard and mouse while you're connected.";
+      items.push(
+        menuItem('Privacy screen', privacyOn ? 'on' : 'off', {
+          checked: privacyOn,
+          onSelect: () => { setMenuOpen('more', false); onPrivacy?.(!privacyOn); },
+        }),
+        note,
+        document.createElement('hr'),
+      );
+    }
+    const restart = (label, meta, glass, question) =>
+      menuItem(label, meta, {
+        onSelect: () => {
+          setMenuOpen('more', false);
+          if (confirm(question)) onRestart?.(glass);
+        },
+      });
+    items.push(
+      restart('Restart Glass', 'reconnects in seconds', true, "Restart Glass on this computer? You'll reconnect in a few seconds."),
+      restart('Restart computer', 'reconnects after login', false, "Restart this computer? Open apps are asked to quit. Glass reconnects once it's back and someone is logged in."),
+    );
+    if (consoleUrl) {
+      items.push(
+        document.createElement('hr'),
+        menuItem('Console', 'links, people, settings', {
+          onSelect: () => {
+            setMenuOpen('more', false);
+            open(consoleUrl, '_blank', 'noopener');
+          },
+        }),
+      );
+    }
+    menus.more.panel.replaceChildren(...items);
+  }
+  let consoleUrl; // the owner's console (/admin/), from the Computer menu
   let canFit = true;
+  let sharpAvailable = false;
+  let sharpOn = false;
+  let sharpMode = 'off';
+  let windowsAvailable = false;
+  let windowList = null;
 
   /** Names displays by where they sit in the macOS arrangement: Left / Right, Top / Bottom. */
   function positionNames(displays) {
@@ -278,6 +500,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     error: '<path d="M12 8v4M12 16h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
     file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
     update: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
+    chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.6A8 8 0 1 1 21 12z"/>',
   };
   const svg = (paths, cls) =>
     `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
@@ -359,14 +582,50 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
       $('btn-machines').classList.toggle('hidden', guest);
       if (guest) setMenuOpen('machines', false);
     },
+    /** What this session may do: a link can be view only, or without files. */
+    setPerms({ input = true, files = true } = {}) {
+      $('btn-upload').classList.toggle('hidden', !files);
+      $('btn-download').classList.toggle('hidden', !files);
+      $('btn-keyboard').classList.toggle('hidden', !input);
+      if (!input) $('btn-shortcuts').classList.add('hidden');
+      renderBar();
+    },
     /** Only the owner can reshape the host's display (guests get an error). */
     setCanFit(on) {
       canFit = on;
       if (lastDisplays) renderDisplays(...lastDisplays);
     },
+    /** Sharp text: `available` (may this viewer turn it on), `on` (its choice), `mode` (the host's). */
+    setSharp({ available = sharpAvailable, on = sharpOn, mode = sharpMode } = {}) {
+      sharpAvailable = available;
+      sharpOn = on;
+      sharpMode = mode;
+      if (lastDisplays) renderDisplays(...lastDisplays);
+    },
+    /** The host can stream single windows (an Apps section in the displays menu). */
+    setWindowsAvailable(on) {
+      windowsAvailable = on;
+      if (lastDisplays) renderDisplays(...lastDisplays);
+    },
+    renderWindows(list) {
+      windowList = list;
+      if (lastDisplays) renderDisplays(...lastDisplays);
+    },
     setResolution(mode) {
       resolutionMode = mode;
       if (lastDisplays) renderDisplays(...lastDisplays);
+    },
+    /** The computer menu: owners only; the privacy item only where the host supports it. */
+    setComputerControls({ isOwner, privacy, console: url }) {
+      privacyAvailable = privacy;
+      consoleUrl = isOwner ? url : undefined;
+      $('btn-more').classList.toggle('hidden', !isOwner);
+      if (!isOwner) setMenuOpen('more', false);
+      renderMore();
+    },
+    setPrivacyOn(on) {
+      privacyOn = on;
+      renderMore();
     },
     setStatsPressed(on) {
       $('btn-stats').setAttribute('aria-pressed', String(on));
@@ -374,12 +633,40 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     /** The ⌘ menu (Mac shortcuts and key remaps) only applies to Mac hosts. */
     setHostOs(os) {
       $('btn-shortcuts').classList.toggle('hidden', os !== 'macos');
+      renderBar();
+    },
+    /** Shows this machine's keyboard remaps in the menu. */
+    setKeyboardProfile({ pc, ctrlAsCmd, swap }) {
+      pcItem.set(pc);
+      ctrlItem.set(ctrlAsCmd);
+      swapItem.set(swap);
+    },
+    /** Ports the host forwards (owner, tailnet): each opens in a new tab at `urlFor(port)`. */
+    setPorts(ports, urlFor) {
+      $('btn-ports').classList.toggle('hidden', !ports.length);
+      if (!ports.length) setMenuOpen('ports', false);
+      menus.ports.panel.replaceChildren(
+        ...ports.map((port) =>
+          menuItem(`localhost:${port}`, 'Open', {
+            onSelect: () => {
+              setMenuOpen('ports', false);
+              window.open(urlFor(port), '_blank', 'noopener');
+            },
+          }),
+        ),
+      );
     },
     setAudioAvailable(available) {
       $('btn-audio').classList.toggle('hidden', !available);
     },
     setAudioOn(on) {
       $('audio-waves').style.opacity = on ? '1' : '0.25';
+    },
+    setMicAvailable(available) {
+      $('btn-mic').classList.toggle('hidden', !available);
+    },
+    setMicOn(on) {
+      $('btn-mic').setAttribute('aria-pressed', String(on));
     },
   };
 }

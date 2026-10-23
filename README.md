@@ -53,6 +53,16 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Links that work once.** Let a phone or a friend's laptop in without sharing a password. Each device gets its own pass; `glass link --revoke` cuts them all off.
 - **Steady on bad Wi-Fi.** Adapts bitrate, reconnects after sleep or tab suspension, and never shows a corrupted frame.
 - **Private by default.** On your tailnet, your devices get in and nothing else does. Runs as your user, never root.
+- **Links with limits.** `--view-only`, `--no-files`, `--no-clipboard`, `--for 1h`, `--ask` (the person at the computer allows each connection) and `--passkey` (the device must use Face ID, Touch ID or a security key every time). List and revoke devices one at a time.
+- **For helping someone.** Chat, drawing on the screen (they see it on their Mac too), a privacy screen that blanks the Mac and blocks its keyboard and mouse while you work, and a connection history.
+- **Beyond the desktop.** Stream a single app's window, a terminal in the viewer, open the computer's local web ports (`/fwd/3000/`) from your tailnet, record sessions to MP4, game controllers and your microphone (Linux), HEVC when every viewer can decode it.
+- **Sharp text.** A per-viewer mode for code and documents: native size, finer frames, HEVC 4:2:2 while things move, and a lossless full-colour (4:4:4) picture once the screen is still.
+- **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps are remembered for each computer; an optional shortcut bar puts Mac shortcuts one tap away on a touch screen.
+- **A console.** `https://<computer>/admin/` (or Computer › Console in the viewer): who's connected, requests to allow, links with QR codes, revoking devices, history, settings, access rules, and an address book of your machines in your own groups.
+- **Device posture.** Require tailnet devices to carry a Tailscale tag, allow only certain operating systems, a minimum browser version, or passkeys with Face ID / Touch ID / a PIN (`glass config posture-*`).
+- **Single sign-on.** Point `glass config oidc-issuer` at Google, Entra, Okta or any OpenID Connect provider, or `glass config ldap-url` at your directory, and accounts sign in without a token. Access rules (`glass acl`) pick what each email, domain or group may do; SCIM provisioning keeps users and groups in sync and cuts off deactivated accounts.
+- **Power.** Wake a sleeping machine (Wake-on-LAN) from the machines menu, restart Glass or the whole computer and reconnect.
+- **Self-hostable relay.** Run the WebRTC introducer and TURN yourself ([site/selfhost](site/selfhost)) and point Glass at it with `glass config relay`.
 - **Agent-ready.** Ask Claude Code to "set up Glass on my Mac mini" and it does it over SSH ([skill](#set-up-with-an-ai-agent)).
 
 ## How it compares
@@ -87,12 +97,31 @@ glass setup              # guided setup: Tailscale, background service, permissi
 glass status             # running? capturing? permissions? connect URL
 glass link               # one-time link + QR code for another device
 glass link --anywhere    # the same, from any network (WebRTC, end-to-end encrypted)
-glass link --revoke      # cut off every device let in by a link
+glass link --view-only --no-files --for 1h   # limited access
+glass link --ask --passkey                   # asks you first; needs a passkey every time
+glass link --list        # devices let in by links (with ids)
+glass link --revoke [id] # cut off one device, or every device let in by a link
 glass remote off         # turn off access from outside your tailnet
+glass viewers / kick     # who's connected now; end a session
+glass requests / allow / deny   # answer connection requests (glass config ask-guests on)
+glass chat "be right there"     # message everyone viewing
+glass privacy on|off     # blank this screen and block local input while viewed
+glass log                # connection history
+glass wake <name|mac>    # Wake-on-LAN
+glass config oidc-issuer https://accounts.google.com   # single sign-on (+ oidc-client-id,
+                         # oidc-client-secret, oidc-allow ana@x.com,@corp.com, oidc-scope)
+glass config ldap-url ldaps://dir.example.com          # directory sign-in (+ ldap-user-dn
+                         # uid={user},ou=people,dc=example,dc=com, or ldap-base-dn + ldap-bind-dn)
+glass acl add group:eng --view-only --for 8h   # access rules for SSO/LDAP accounts, first match
+glass acl add @example.com                     # wins: email, @domain, group:name or *
+glass acl / glass acl remove 0                 # list; remove by position
+glass config scim-token new   # SCIM provisioning at https://<computer>/scim/v2 (Okta, Entra ID):
+                         # deactivated users can't sign in and lose their sessions
+glass config             # settings: ask-guests, record, privacy, hevc, forward-ports, name, accent, relay…
 glass feedback "…"       # tell us what broke or what you want
 ```
 
-On your tailnet, open `https://<computer>.<tailnet>.ts.net` on the iPad. Full CLI reference, keyboard tips for iPad and troubleshooting: [glassdesk.dev/docs](https://glassdesk.dev/docs).
+On your tailnet, open `https://<computer>.<tailnet>.ts.net` on the iPad. Full CLI reference, Sharp text, the console, team sign-in, keyboard tips for iPad and troubleshooting: [glassdesk.dev/docs](https://glassdesk.dev/docs).
 
 ## Set up with an AI agent
 
@@ -133,6 +162,7 @@ NSPasteboard, files ◀─▶ control + file streams ◀────────
 
 - Everything is encrypted: TLS 1.3 over QUIC on your tailnet, end-to-end encrypted WebRTC from anywhere.
 - A device gets in only if Tailscale says it's yours, or it has the access token or a one-time pass. Nothing is sent until then.
+- Narrow it further: limited or passkey-bound links, ask-first, single sign-on or LDAP with access rules, SCIM deprovisioning and device posture checks. Secrets are stored owner-only.
 - Remote access from outside your tailnet is off until you make a link or run `glass remote on`.
 - Glass runs as your user, never as root. The app sends nothing to glassdesk.dev except feedback you choose to send.
 

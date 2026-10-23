@@ -118,6 +118,8 @@ Add `--anywhere` when the device isn't on the user's tailnet (a phone on cellula
 
 To cut off everyone who was let in with a link: `glass link --revoke --json`. The user's own token and tailnet devices are unaffected.
 
+Limit a link with `--view-only`, `--no-files`, `--no-clipboard`, `--ask` (the person at the computer must allow each connection; answer with `glass requests`, `glass allow [id]`, `glass deny [id]`) or `--passkey` (the device registers a passkey and needs it every time). `glass link --list --json` shows devices let in by links with ids; `glass link --revoke <id> --json` cuts off one. Other host commands: `glass viewers --json`, `glass kick [id]`, `glass chat "…"`, `glass privacy on|off`, `glass log --json`, `glass wake <name|mac>`, and `glass config [key [value]]` for settings (ask-guests, ask-everyone, record, recordings-dir, privacy, hevc, forward-ports, name, accent, relay).
+
 ## Troubleshooting
 
 - Status and logs: `glass status`, plus `~/Library/Logs/Glass/` (macOS) or `~/.local/state/glass/` and `journalctl --user -u glass` (Linux). `client.log` holds errors reported by connected browsers.

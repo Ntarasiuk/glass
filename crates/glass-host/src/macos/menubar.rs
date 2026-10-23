@@ -89,6 +89,59 @@ define_class!(
             }
         }
 
+        #[unsafe(method(sendMessage:))]
+        fn send_message(&self, _sender: Option<&AnyObject>) {
+            if let Some(rt) = RUNTIME.get() {
+                rt.spawn(async {
+                    if let Some(text) =
+                        crate::notify::ask_text("Glass", "Message to everyone viewing this Mac:")
+                            .await
+                        && let Err(e) = crate::server::host_chat(&text)
+                    {
+                        tracing::warn!("message from the menu bar: {e:#}");
+                    }
+                });
+            }
+        }
+
+        #[unsafe(method(togglePrivacy:))]
+        fn toggle_privacy(&self, _sender: Option<&AnyObject>) {
+            if let Err(e) = crate::privacy::set_forced(!crate::privacy::active()) {
+                tracing::warn!("privacy from the menu bar: {e:#}");
+            }
+            refresh_now();
+        }
+
+        #[unsafe(method(toggleAskGuests:))]
+        fn toggle_ask_guests(&self, _sender: Option<&AnyObject>) {
+            let mut s = crate::settings::load();
+            s.ask_guests = !s.ask_guests;
+            if let Err(e) = crate::settings::save(&s) {
+                tracing::warn!("settings: {e:#}");
+            }
+            refresh_now();
+        }
+
+        #[unsafe(method(disconnectViewer:))]
+        fn disconnect_viewer(&self, sender: Option<&AnyObject>) {
+            let Some(item) = sender.and_then(|s| s.downcast_ref::<NSMenuItem>()) else { return };
+            viewers::disconnect(item.tag() as u64);
+        }
+
+        #[unsafe(method(openHistory:))]
+        fn open_history(&self, _sender: Option<&AnyObject>) {
+            // A readable copy, opened in TextEdit.
+            let path = crate::config_dir().join("connections.txt");
+            let mut text = String::from("Glass connection history (newest last)\n\n");
+            for e in crate::connlog::recent(500) {
+                text.push_str(&crate::connlog::describe(&e));
+                text.push('\n');
+            }
+            if std::fs::write(&path, text).is_ok() {
+                let _ = std::process::Command::new("open").arg("-e").arg(&path).spawn();
+            }
+        }
+
         #[unsafe(method(openLogs:))]
         fn open_logs(&self, _sender: Option<&AnyObject>) {
             let _ = std::process::Command::new("open").arg(super::log_dir()).spawn();
@@ -146,9 +199,13 @@ thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
 }
 
+/// The host's runtime, for menu actions that wait (a text prompt).
+static RUNTIME: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
+
 /// Shows the icon and runs the app on this (the main) thread. Never returns.
 pub fn run(rt: tokio::runtime::Handle) -> ! {
     let mtm = MainThreadMarker::new().expect("the menu bar runs on the main thread");
+    let _ = RUNTIME.set(rt.clone());
     let app = NSApplication::sharedApplication(mtm);
     // A menu bar item only: no Dock icon, no menu bar of its own.
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -156,6 +213,8 @@ pub fn run(rt: tokio::runtime::Handle) -> ! {
     let target = MenuTarget::new(mtm);
     UI.with(|ui| *ui.borrow_mut() = Some(Ui { item, target }));
     refresh(&viewers::subscribe().borrow().clone(), &State::now());
+    // Viewers' drawings, shown on this Mac.
+    super::overlay::start(&rt);
 
     // Redraw when viewers come and go, when permissions or updates change (checked every
     // few seconds), and each minute (for the "3 min" labels).
@@ -288,7 +347,32 @@ fn menu(
         };
         menu.addItem(&label(&heading));
         for v in list {
-            menu.addItem(&label(&format!("   {}", v.describe())));
+            // Choosing a viewer disconnects just that one.
+            let row = item(
+                mtm,
+                &format!("   {}", v.describe()),
+                Some(sel!(disconnectViewer:)),
+                target,
+            );
+            row.setTag(v.id as isize);
+            row.setToolTip(Some(ns_string!("Disconnect this viewer")));
+            menu.addItem(&row);
+        }
+        menu.addItem(&item(
+            mtm,
+            "Send a message…",
+            Some(sel!(sendMessage:)),
+            target,
+        ));
+        if crate::privacy::supported() {
+            let privacy = item(
+                mtm,
+                "Privacy screen (blank this Mac)",
+                Some(sel!(togglePrivacy:)),
+                target,
+            );
+            privacy.setState(if crate::privacy::active() { 1 } else { 0 });
+            menu.addItem(&privacy);
         }
     }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -316,10 +400,24 @@ fn menu(
     );
     remote.setState(if crate::remote::enabled() { 1 } else { 0 });
     menu.addItem(&remote);
+    let ask = item(
+        mtm,
+        "Ask before guests connect",
+        Some(sel!(toggleAskGuests:)),
+        target,
+    );
+    ask.setState(if crate::settings::load().ask_guests { 1 } else { 0 });
+    menu.addItem(&ask);
     menu.addItem(&item(
         mtm,
         "Revoke all guest links",
         Some(sel!(revokeLinks:)),
+        target,
+    ));
+    menu.addItem(&item(
+        mtm,
+        "Connection history",
+        Some(sel!(openHistory:)),
         target,
     ));
     menu.addItem(&NSMenuItem::separatorItem(mtm));

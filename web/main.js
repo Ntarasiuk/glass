@@ -3,10 +3,16 @@
 
 import { inputEvent } from './proto.js';
 import { attachInput } from './input.js';
+import { attachGamepads } from './gamepad.js';
 import { createUI } from './ui.js';
 import { log, setLogSink } from './log.js';
 import { MAC_KEYCODES as K } from './keymap.js';
 import { hostIdFor, serveRtc } from './rtc.js';
+import { createChat } from './chat.js';
+import { loadProfile, saveProfile } from './keyboard-profile.js';
+import { answerPasskey } from './passkey.js';
+import { createTerminal } from './terminal.js';
+import { createAnnotator } from './annotate.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -24,6 +30,7 @@ const SHORTCUTS = [
 
 const TOKEN_KEY = 'glass.token';
 const RESOLUTION_KEY = 'glass.resolution'; // 'auto' (sized to this screen) or 'native'
+const SHARP_KEY = 'glass.sharp'; // '1': sharp text (for reading)
 const PASS_KEY = 'glass.pass'; // guest pass from a magic link: { pass, expires }
 const SWAP_KEY = 'glass.swapCmdOption';
 const CTRL_AS_CMD_KEY = 'glass.ctrlAsCmd';
@@ -70,7 +77,46 @@ const remoteId = remoteKey && (await hostIdFor(remoteKey));
 const tokenKey = remoteId ? `${TOKEN_KEY}.${remoteId}` : TOKEN_KEY;
 const passKey = remoteId ? `${PASS_KEY}.${remoteId}` : PASS_KEY;
 if (hashToken) storage((s) => s.setItem(tokenKey, hashToken));
-if (hashToken || link) history.replaceState(null, '', location.pathname + location.search + (remoteKey ? `#r=${remoteKey}` : ''));
+// Back from single sign-on: the host handed this device a pass (like a link would).
+const ssoPass = hashParams.get('p');
+if (ssoPass) storage((s) => s.setItem(passKey, JSON.stringify({ pass: ssoPass, expires: Number(hashParams.get('e')) })));
+if (hashToken || link || ssoPass) history.replaceState(null, '', location.pathname + location.search + (remoteKey ? `#r=${remoteKey}` : ''));
+
+// Directory (LDAP) sign-in on the token screen: the host checks the password and hands
+// back a guest pass, kept like one from a link; then connect with it.
+{
+  const box = document.getElementById('ldap');
+  const field = (name) => box.querySelector(`input[name="${name}"]`);
+  const error = document.getElementById('ldap-error');
+  const submit = document.getElementById('ldap-submit');
+  submit.addEventListener('click', async () => {
+    const user = field('ldap-user').value.trim();
+    const password = field('ldap-password').value;
+    if (!user || !password) return;
+    submit.disabled = true;
+    error.classList.add('hidden');
+    try {
+      const r = await fetch('sso/ldap', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ user, password }) });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || !body.pass) throw new Error(body.error ?? 'Sign-in didn\'t work. Try again.');
+      storage((s) => s.setItem(passKey, JSON.stringify({ pass: body.pass, expires: body.expires })));
+      location.reload();
+    } catch (e) {
+      error.textContent = e.message;
+      error.classList.remove('hidden');
+      field('ldap-password').select();
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  // Enter in these fields signs in here, not with the (empty) token form.
+  box.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    e.stopPropagation();
+    submit.click();
+  });
+}
 const token = hashToken ?? storage((s) => s.getItem(tokenKey));
 const savedPass = (() => {
   try {
@@ -124,7 +170,15 @@ const worker = new Worker('worker.js', { type: 'module' });
 worker.onerror = (e) => log('error', `worker: ${e.message}`, { src: `${e.filename}:${e.lineno}` });
 
 const control = (msg) => worker.postMessage({ type: 'control', msg });
-const send = (kind, fields) => worker.postMessage({ type: 'input', bytes: inputEvent(kind, fields) });
+// A view-only link sends no input (the host would drop it anyway).
+let inputAllowed = true;
+const send = (kind, fields) => inputAllowed && worker.postMessage({ type: 'input', bytes: inputEvent(kind, fields) });
+let session = 0; // this session's id, from welcome (chat from it is our own)
+let perms = { input: true, clipboard: true, files: true, owner: true };
+let features = {};
+let sharpWanted = storage((s) => s.getItem(SHARP_KEY)) === '1';
+let sharpMode = 'off'; // what the host is doing: 'off', 'sharp' or '4:2:2'
+let deniedMsg; // why the host last turned us away
 
 // Resolves with the next clipboard text the Mac reports (used for Cmd+C / Cmd+X).
 let clipboardWaiters = [];
@@ -147,10 +201,14 @@ function nextClipboard(timeoutMs) {
 const statusEl = document.getElementById('status');
 // Friendly machine names from the last machines.json, by machine id.
 let machineNames = {};
+const brandNames = {}; // machine -> its `glass config name`
 const STATS_KEY = 'glass.stats';
 let statsVisible = storage((s) => s.getItem(STATS_KEY)) === '1';
 hud.classList.toggle('hidden', !statsVisible);
 let tokenTried = Boolean(token);
+let restarting; // 'Glass' or 'computer' after a restart request, until it's back
+// Above the input layer: in draw mode it takes the pointer, so nothing reaches the host.
+const annotator = createAnnotator({ screens, send: control });
 const input = attachInput({
   screens,
   keySink,
@@ -164,32 +222,84 @@ const input = attachInput({
   onZoom: (s) => {
     zoomScale = s;
     queueViewport();
+    annotator.invalidate();
     document.getElementById('zoom-pill').classList.toggle('hidden', s === 1);
     document.getElementById('zoom-level').textContent = `${s.toFixed(1)}×`;
   },
 });
 document.getElementById('zoom-reset').addEventListener('click', () => input.resetZoom());
+let micContext;
+let micStream;
+const gamepads = attachGamepads({
+  send,
+  log,
+  onConnect: (g) => ui.toast({ text: `Controller connected: ${g.id.replace(/\s*\(.*$/, '') || 'gamepad'}`, timeout: 3000 }),
+});
+
+// Drawing on the screen (everyone connected sees it), and recording on the host.
+const drawButton = document.getElementById('btn-draw');
+const recordButton = document.getElementById('btn-record');
+let recording = false;
+annotator.onChange((on) => drawButton.setAttribute('aria-pressed', String(on)));
+drawButton.addEventListener('click', (e) => {
+  e.preventDefault();
+  annotator.toggle();
+});
+recordButton.addEventListener('click', (e) => {
+  e.preventDefault();
+  control({ t: 'record', on: !recording });
+});
+function onRecording({ on, path }) {
+  recording = on;
+  recordButton.setAttribute('aria-pressed', String(on));
+  recordButton.title = on ? 'Stop recording' : 'Record on the host';
+  const where = path?.replace(/^\/(Users|home)\/[^/]+/, '~');
+  if (on) ui.toast({ text: 'Recording on the host', timeout: 3000 });
+  else if (where) ui.toast({ text: `Recording saved on ${machineName(currentHost)}: ${where}`, icon: 'file', timeout: 8000 });
+  log('info', `recording ${on ? 'started' : 'stopped'}`, { path });
+}
 
 const ui = createUI({
   onOpenMachines: loadMachines,
+  onWakeMachine: (m) => control({ t: 'wake', dns: m.dns }),
   onSelectMachine: (m) => switchMachine(machineId(m), m.name),
   onSelectDisplay: (id) => control(id === 'all' ? { t: 'showAll' } : { t: 'selectDisplay', id }),
+  onSharp: (on) => {
+    sharpWanted = on;
+    storage((s) => s.setItem(SHARP_KEY, on ? '1' : '0'));
+    ui.setSharp({ on });
+    control({ t: 'sharp', on });
+    // Back to sizing by this screen: the host ignored our viewport while sharp.
+    if (!on) queueViewport(true);
+    log('info', `sharp text ${on ? 'on' : 'off'}`);
+  },
+  onListWindows: () => control({ t: 'listWindows' }),
+  onSelectWindow: (id) => {
+    streamedWindows.add(id);
+    control({ t: 'selectWindow', id });
+  },
   shortcuts: SHORTCUTS,
   swapCmdOption: storage((s) => s.getItem(SWAP_KEY)) === '1',
   ctrlAsCmd,
   pcKeyboard,
   onPcKeyboard: (on) => {
     storage((s) => s.setItem(PC_KEYBOARD_KEY, on ? '1' : '0'));
+    keyboard.pc = on;
+    saveKeyboard();
     input.setPcKeyboard(on);
     log('info', `pc keyboard ${on ? 'on' : 'off'}`);
   },
   onCtrlAsCmd: (on) => {
     storage((s) => s.setItem(CTRL_AS_CMD_KEY, on ? '1' : '0'));
+    keyboard.ctrlAsCmd = on;
+    saveKeyboard();
     input.setCtrlAsCmd(on);
     log('info', `ctrl as cmd ${on ? 'on' : 'off'}`);
   },
   onSwapCmdOption: (on) => {
     storage((s) => s.setItem(SWAP_KEY, on ? '1' : '0'));
+    keyboard.swap = on;
+    saveKeyboard();
     input.setSwapCmdOption(on);
     log('info', `swap cmd/option ${on ? 'on' : 'off'}`);
   },
@@ -205,15 +315,53 @@ const ui = createUI({
     ui.toast({ text: 'Choose files in the dialog on your Mac' });
   },
   onAudio: toggleAudio,
+  onMic: toggleMic,
   onFullscreen: toggleFullscreen,
   onToggleStats: toggleStats,
+  onPrivacy: (on) => control({ t: 'privacy', on }),
+  onRestart: (glass) => {
+    restarting = glass ? 'Glass' : 'computer';
+    control({ t: 'restart', glass });
+    log('info', `restart ${restarting}`);
+    onConnectionStatus('restarting');
+  },
+  onTerminal: () => terminal.toggle(),
   onToken: (t) => {
+    signedInToken = t;
     tokenTried = true;
     showStatus('connecting', 'Connecting', machineName(currentHost));
     storage((s) => s.setItem(tokenKey, t));
     worker.postMessage({ type: 'token', token: t });
   },
 });
+const terminal = createTerminal({ control, log });
+// The token this page signed in with (if any), for opening forwarded ports.
+let signedInToken = token;
+
+/** A forwarded port on this host: with a token, via /fwd/auth so the tab gets its cookie. */
+function portUrl(port) {
+  const path = `/fwd/${port}/`;
+  return signedInToken ? `${location.origin}/fwd/auth?t=${encodeURIComponent(signedInToken)}&to=${encodeURIComponent(path)}` : `${location.origin}${path}`;
+}
+
+// This machine's keyboard remaps (each machine keeps its own).
+let keyboard = { pc: pcKeyboard, ctrlAsCmd, swap: storage((s) => s.getItem(SWAP_KEY)) === '1' };
+// Keyed by host and port, so two Glass hosts on one name (tests, or several on a box) differ.
+const profileId = () => (currentHost.includes(':') ? currentHost : `${currentHost}:${config.wtPort}`);
+function saveKeyboard() {
+  storage((s) => saveProfile((k, v) => s.setItem(k, v), profileId(), keyboard));
+}
+function applyKeyboard(hostOs) {
+  const p = storage((s) => loadProfile((k) => s.getItem(k), profileId(), { fallback: keyboard, hostOs, isPC })) ?? keyboard;
+  keyboard = { pc: p.pc, ctrlAsCmd: p.ctrlAsCmd, swap: p.swap };
+  input.setPcKeyboard(keyboard.pc);
+  input.setCtrlAsCmd(keyboard.ctrlAsCmd);
+  input.setSwapCmdOption(keyboard.swap);
+  ui.setKeyboardProfile(keyboard);
+}
+
+const chat = createChat({ onSend: (text) => control({ t: 'chat', text }), toast: (o) => ui.toast(o) });
+chat.setAvailable(false);
 
 // Launched from the home screen there's no browser UI to leave, so fullscreen is moot.
 const standalone = matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches || navigator.standalone;
@@ -351,6 +499,9 @@ let codec = '';
 let statsCount = 0;
 let targetMbps;
 let displays = [];
+// Ids of windows (not displays) this viewer has seen or picked, so a streamed window never
+// shows up in the displays list.
+const streamedWindows = new Set();
 const transfers = new Map(); // id -> toast
 
 worker.onmessage = ({ data }) => {
@@ -379,6 +530,7 @@ worker.onmessage = ({ data }) => {
     case 'size':
       videoSizes[data.stream] = `${data.width}×${data.height}`;
       input.setVideoSize(data.stream, data.width, data.height);
+      annotator.invalidate();
       hideStatus();
       break;
     case 'stats':
@@ -397,6 +549,9 @@ worker.onmessage = ({ data }) => {
       log('warn', 'token rejected');
       hideStatus();
       ui.showAuth({ rejected: tokenTried });
+      // Single sign-on is this host's own web page, so not from a remote (WebRTC) viewer.
+      document.getElementById('sso').classList.toggle('hidden', !(config.sso && !remoteKey));
+      document.getElementById('ldap').classList.toggle('hidden', !(config.ldap && !remoteKey));
       break;
     case 'control':
       onControl(data.msg);
@@ -421,16 +576,53 @@ function onControl(msg) {
       machineFailures = 0;
       clearTimeout(machineTimer);
       displays = msg.displays;
+      applyBranding(msg);
       // Nothing being streamed (e.g. capture failed): fall back to the first display.
       if (!msg.streams.length && displays.length) control({ t: 'selectDisplay', id: displays[0].id });
       ui.setAudioAvailable(msg.audio);
       input.setHostOs(msg.host_os ?? 'macos');
       ui.setHostOs(msg.host_os ?? 'macos');
+      applyKeyboard(msg.host_os ?? 'macos');
       if (remoteKey) setLogSink((lines) => control({ t: 'log', lines }));
       guest = Boolean(msg.guest);
       // Remote: other machines aren't reachable from here, so no machines menu either.
       ui.setGuest(guest || Boolean(remoteKey));
       ui.setCanFit(!guest);
+      session = msg.session ?? 0;
+      perms = msg.perms ?? perms;
+      features = msg.features ?? {};
+      inputAllowed = perms.input;
+      ui.setPerms(perms);
+      chat.setAvailable(true);
+      restarting = undefined;
+      ui.setComputerControls({
+        isOwner: msg.perms ? msg.perms.owner : !guest,
+        privacy: Boolean(msg.features?.privacy),
+        // The console is served by the host this page came from (not over remote access).
+        console: !remoteKey && currentHost === homeHost
+          ? (signedInToken ? `${location.origin}/admin/auth?t=${encodeURIComponent(signedInToken)}` : `${location.origin}/admin/`)
+          : undefined,
+      });
+      ui.setPrivacyOn(false);
+      ui.setWindowsAvailable(Boolean(msg.features?.windows));
+      // Sharp text is this device's choice: ask again on every (re)connect.
+      sharpMode = 'off';
+      ui.setSharp({ available: perms.input, on: sharpWanted && perms.input, mode: 'off' });
+      if (sharpWanted && perms.input) control({ t: 'sharp', on: true });
+      {
+        // Controllers and the mic count as input: not for view-only links.
+        const canInput = msg.perms?.input ?? true;
+        gamepads.setEnabled(Boolean(msg.features?.gamepad) && canInput);
+        gamepads.resend();
+        ui.setMicAvailable(Boolean(msg.features?.mic) && canInput);
+        if (!canInput && micStream) stopMic();
+      }
+      terminal.reset();
+      terminal.setAvailable(Boolean(msg.perms?.owner && msg.features?.terminal));
+      // Forwarded ports are this page's host's, over plain HTTPS on the tailnet.
+      ui.setPorts(msg.perms?.owner && !remoteKey && currentHost === homeHost ? msg.features?.forward_ports ?? [] : [], portUrl);
+      annotator.setSession(msg.session);
+      recordButton.classList.toggle('hidden', !(msg.features?.record && msg.perms?.owner));
       if (guest && resolutionMode.startsWith('fit:')) setResolution('auto');
       onLayout(msg.streams);
       queueViewport(true);
@@ -441,10 +633,40 @@ function onControl(msg) {
     case 'layout':
       onLayout(msg.streams);
       break;
+    case 'waiting':
+      showStatus('connecting', 'Waiting to be let in', msg.msg);
+      break;
+    case 'denied':
+      deniedMsg = msg.msg;
+      showStatus('error', 'Not let in', msg.msg);
+      ui.toast({ text: msg.msg, kind: 'error', timeout: 0, action: { label: 'Ask again', run: () => {
+        showStatus('connecting', 'Connecting', machineName(currentHost));
+        worker.postMessage({ type: 'askAgain' });
+      } } });
+      break;
+    case 'notice':
+      ui.toast({ text: msg.msg });
+      break;
+    case 'chat':
+      if (msg.sender !== session) chat.receive(msg);
+      break;
+    case 'windows':
+      for (const w of msg.windows) streamedWindows.add(w.id);
+      ui.renderWindows(msg.windows);
+      break;
     case 'pass':
       storage((s) => s.setItem(passKey, JSON.stringify({ pass: msg.pass, expires: msg.expires })));
       ui.toast({ text: `You're in. This device has access until ${formatExpiry(msg.expires)}.`, icon: 'link', timeout: 6000 });
       log('info', 'signed in with a magic link', { expires: msg.expires });
+      break;
+    case 'sharp':
+      sharpMode = msg.mode;
+      ui.setSharp({ mode: msg.mode });
+      log('info', `sharp text: ${msg.mode}`);
+      break;
+    case 'privacy':
+      ui.setPrivacyOn(msg.on);
+      log('info', `privacy screen ${msg.on ? 'on' : 'off'}`);
       break;
     case 'bitrate':
       targetMbps = msg.bps / 1e6;
@@ -458,8 +680,27 @@ function onControl(msg) {
       for (const w of clipboardWaiters) w.resolve(msg.text);
       clipboardWaiters = [];
       break;
+    case 'term':
+      terminal.onMessage(msg);
+      break;
     case 'fileSaved':
       ui.toast({ text: `Saved on ${machineName(currentHost)}: ${msg.path.replace(/^\/(Users|home)\/[^/]+/, '~')}`, icon: 'file' });
+      break;
+    case 'passkey':
+      // A --passkey link: create one now, or prove this is the device that did.
+      showStatus('connecting', 'Confirm with your passkey…', msg.mode === 'create' ? 'This link asks this device to save a passkey for Glass.' : machineName(currentHost));
+      answerPasskey(msg).then((answer) => {
+        if (answer.mode === 'error') log('warn', `passkey: ${answer.error}`);
+        else log('info', `passkey ${answer.mode} answered`);
+        control({ t: 'passkey', ...answer });
+      });
+      break;
+    case 'annotate':
+    case 'annotateClear':
+      annotator.onMessage(msg);
+      break;
+    case 'recording':
+      onRecording(msg);
       break;
     case 'error':
       if (msg.msg !== 'unauthorized') ui.toast({ text: msg.msg, kind: 'error', timeout: 6000 });
@@ -485,8 +726,28 @@ function deviceLabel() {
 }
 
 function machineName(id) {
+  if (brandNames[id]) return brandNames[id];
   if (remoteKey) return 'your computer';
   return machineNames[id] ?? id.split('.')[0].split(':')[0];
+}
+
+// Branding (glass config name / accent), from a machine's welcome.
+function applyBranding({ name, accent }) {
+  if (name) brandNames[currentHost] = name;
+  else delete brandNames[currentHost];
+  document.title = name ?? 'Glass';
+  const root = document.documentElement.style;
+  if (/^#[0-9a-f]{6}$/i.test(accent ?? '')) {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(accent.slice(i, i + 2), 16) / 255);
+    // WCAG relative luminance: dark ink on light accents, light ink on dark ones.
+    const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+    const luminance = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+    root.setProperty('--accent', accent);
+    root.setProperty('--accent-ink', luminance > 0.18 ? '#04121f' : '#ffffff');
+  } else {
+    root.removeProperty('--accent');
+    root.removeProperty('--accent-ink');
+  }
 }
 
 function showStatus(state, title, detail = '') {
@@ -503,6 +764,11 @@ function hideStatus() {
 /** Maps the worker's status text to what the person should see. */
 function onConnectionStatus(text) {
   const name = machineName(currentHost);
+  // Restarting: the connection drops and retries for a while; that's expected.
+  if (restarting && text !== 'connected' && !text.startsWith('waiting for access token')) {
+    showStatus('reconnecting', 'Restarting…', restarting === 'Glass' ? `Glass is restarting on ${name}. Reconnecting…` : `${name} is restarting. This reconnects once it's back and someone is logged in.`);
+    return;
+  }
   if (text === 'connected') showStatus('connecting', `Connected to ${name}`, 'Waiting for the screen…');
   else if (text.startsWith('disconnected')) showStatus('reconnecting', 'Reconnecting', `Lost the connection to ${name}. Trying again…`);
   else if (text.startsWith('connection failed') && remoteKey) {
@@ -512,6 +778,7 @@ function onConnectionStatus(text) {
   } else if (text.startsWith('connection failed'))
     showStatus('error', `Can't reach ${name}`, 'Retrying. Make sure Glass is running there and both devices are on Tailscale.');
   else if (text.startsWith('waiting for access token')) hideStatus();
+  else if (text === 'not let in') showStatus('error', 'Not let in', deniedMsg ?? `The person at ${name} didn't let you in.`);
 }
 
 function hudLine(...parts) {
@@ -531,7 +798,7 @@ function renderHud(d) {
   latency.className = latencyClass(d.latencyAvg);
   latency.textContent = `${d.latencyAvg.toFixed(1)} ms`;
   const lines = [
-    hudLine(host, `  ${status}  ${codec}  ${videoSizes.filter(Boolean).join(' + ')}`),
+    hudLine(host, `  ${status}  ${codec}${sharpMode === 'off' ? '' : ` · ${d.holding ? '4:4:4' : sharpMode}`}  ${videoSizes.filter(Boolean).join(' + ')}`),
     hudLine('latency ', latency, ` (max ${d.latencyMax.toFixed(1)})  rtt ${d.rtt.toFixed(1)} ms`),
     hudLine(
       `${d.fps} fps  ${d.mbps.toFixed(1)} Mbps` + (targetMbps ? ` (target ${targetMbps.toFixed(0)})` : '') + `  dropped ${d.dropped}`,
@@ -544,9 +811,9 @@ function renderHud(d) {
 async function loadMachines() {
   ui.renderMachines(undefined, currentHost);
   try {
-    const { machines } = await fetch('machines.json').then((r) => r.json());
+    const { machines, groups = [] } = await fetch('machines.json').then((r) => r.json());
     machineNames = Object.fromEntries(machines.map((m) => [machineId(m), m.name]));
-    ui.renderMachines(machines.map((m) => ({ ...m, id: machineId(m) })), currentHost);
+    ui.renderMachines(machines.map((m) => ({ ...m, id: machineId(m) })), currentHost, groups);
   } catch {
     ui.renderMachines([], currentHost);
   }
@@ -681,7 +948,8 @@ function fitSizes() {
 }
 
 function onLayout(streams) {
-  for (const d of streams) if (!displays.some((x) => x.id === d.id)) displays.push(d);
+  annotator.invalidate();
+  for (const d of streams) if (!streamedWindows.has(d.id) && !displays.some((x) => x.id === d.id)) displays.push(d);
   // The host orders streams as arranged in macOS; lay them out the same way.
   screens.dataset.arrange = arrangement(streams);
   videoSizes.length = streams.length;
@@ -804,6 +1072,38 @@ function toggleAudio() {
   }
   if (audioContext.state === 'suspended') audioContext.resume();
   worker.postMessage({ type: 'audioToggle' });
+}
+
+// The viewer's microphone, as a microphone on the host.
+async function toggleMic() {
+  if (micStream) return stopMic();
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    micContext ??= new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+    await micContext.resume();
+    await micContext.audioWorklet.addModule('mic-worklet.js');
+    const node = new AudioWorkletNode(micContext, 'glass-mic', { numberOfOutputs: 0 });
+    micContext.createMediaStreamSource(micStream).connect(node);
+    worker.postMessage({ type: 'micPort', port: node.port }, [node.port]);
+    worker.postMessage({ type: 'mic', on: true });
+    ui.setMicOn(true);
+    log('info', 'microphone on', { sampleRate: micContext.sampleRate });
+  } catch (e) {
+    micStream?.getTracks().forEach((t) => t.stop());
+    micStream = undefined;
+    ui.toast({ text: `Couldn't use the microphone: ${e.message ?? e}`, kind: 'error' });
+    log('error', `microphone failed: ${e.message ?? e}`);
+  }
+}
+
+function stopMic() {
+  micStream?.getTracks().forEach((t) => t.stop());
+  micStream = undefined;
+  worker.postMessage({ type: 'mic', on: false });
+  ui.setMicOn(false);
+  log('info', 'microphone off');
 }
 
 function toggleStats() {

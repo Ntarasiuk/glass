@@ -180,6 +180,22 @@ pub fn split(total: u32, activity: &[u64]) -> Vec<u32> {
 /// short it sends fewer, sharp frames rather than many blurry ones; a still screen keeps
 /// refining after motion stops. Measured on 2560×1440 text with VideoToolbox.
 pub fn sharp_policy(bps: u32) -> (u32, u32) {
+    policy(bps, crate::sharp::active())
+}
+
+/// [`sharp_policy`] for a bitrate, with or without sharp text (a viewer reading code or
+/// documents): then frames come at most half as often, each allowed to be finer (QP 4
+/// lower), so the same bits buy detail instead of motion.
+pub fn policy(bps: u32, text: bool) -> (u32, u32) {
+    let (fps, qp) = motion_policy(bps);
+    if text {
+        ((fps / 2).clamp(5, 30), qp.saturating_sub(4).max(20))
+    } else {
+        (fps, qp)
+    }
+}
+
+fn motion_policy(bps: u32) -> (u32, u32) {
     match bps {
         b if b >= 12_000_000 => (60, 28),
         b if b >= 8_000_000 => (60, 30),
@@ -208,6 +224,17 @@ mod tests {
             dropped: 3,
             ..clean()
         }
+    }
+
+    #[test]
+    fn text_policy_trades_frames_for_detail() {
+        for bps in [500_000, 2_000_000, 6_000_000, 20_000_000] {
+            let (fps, qp) = policy(bps, false);
+            let (tfps, tqp) = policy(bps, true);
+            assert!(tfps < fps && tfps >= 5, "{bps}: {tfps} vs {fps}");
+            assert!(tqp < qp && tqp >= 20, "{bps}: {tqp} vs {qp}");
+        }
+        assert_eq!(policy(20_000_000, true), (30, 24));
     }
 
     #[test]

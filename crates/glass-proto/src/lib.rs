@@ -17,6 +17,8 @@ pub const KIND_PING: u8 = 2;
 pub const KIND_PONG: u8 = 3;
 pub const KIND_KEYFRAME_REQUEST: u8 = 4;
 pub const KIND_AUDIO: u8 = 5;
+/// client -> host: the viewer's microphone, same layout as AUDIO (mono or stereo s16).
+pub const KIND_MIC: u8 = 6;
 
 /// 5 ms at 48 kHz: one packet fits a datagram (16 + 240 * 2 ch * 2 B = 976 bytes).
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
@@ -39,6 +41,11 @@ pub fn audio_packet(seq: u32, capture_us: u64, channels: u8, pcm: &[i16]) -> Vec
 }
 
 pub const FLAG_KEYFRAME: u8 = 1;
+/// The frame is HEVC rather than H.264.
+pub const FLAG_HEVC: u8 = 2;
+/// A re-encode of a picture that hasn't changed (idle refinement, keyframe on request):
+/// a viewer showing a lossless refresh of it may keep that on top.
+pub const FLAG_REFRESH: u8 = 4;
 /// Upper nibble of `flags`: which display stream the frame belongs to.
 pub const STREAM_SHIFT: u8 = 4;
 pub const MAX_STREAMS: usize = 4;
@@ -96,6 +103,19 @@ pub fn fragment(
     capture_us: u64,
     max_datagram: usize,
 ) -> Vec<Vec<u8>> {
+    let flags = if keyframe { FLAG_KEYFRAME } else { 0 };
+    fragment_with_flags(frame, stream, frame_id, flags, capture_us, max_datagram)
+}
+
+/// [`fragment`] with explicit flags (FLAG_KEYFRAME, FLAG_HEVC).
+pub fn fragment_with_flags(
+    frame: &[u8],
+    stream: u8,
+    frame_id: u32,
+    flags: u8,
+    capture_us: u64,
+    max_datagram: usize,
+) -> Vec<Vec<u8>> {
     let payload = max_datagram - VIDEO_HEADER_LEN;
     let checksum = fletcher16(frame);
     let frag_count = frame.len().div_ceil(payload).max(1);
@@ -105,7 +125,7 @@ pub fn fragment(
             let chunk = &frame[i * payload..((i + 1) * payload).min(frame.len())];
             let mut dgram = vec![0u8; VIDEO_HEADER_LEN + chunk.len()];
             VideoHeader {
-                flags: if keyframe { FLAG_KEYFRAME } else { 0 },
+                flags,
                 stream,
                 frag_idx: i as u16,
                 frag_count: frag_count as u16,
@@ -162,7 +182,14 @@ pub enum InputEvent {
     /// macOS virtual keycode (kVK_*), mapped from `KeyboardEvent.code` by the client.
     KeyDown { keycode: u16 },
     KeyUp { keycode: u16 },
+    /// A game controller (browser Gamepad API, standard mapping). `kind`: 0 button
+    /// (`value` 0..1), 1 axis (-1..1), 2 connected (`value` 1) or gone (0).
+    Gamepad { pad: u8, kind: u8, index: u16, value: f32 },
 }
+
+pub const GAMEPAD_BUTTON: u8 = 0;
+pub const GAMEPAD_AXIS: u8 = 1;
+pub const GAMEPAD_CONNECTED: u8 = 2;
 
 impl InputEvent {
     pub fn read(buf: &[u8; INPUT_EVENT_LEN]) -> Option<Self> {
@@ -177,6 +204,12 @@ impl InputEvent {
             4 => Self::Scroll { dx: a, dy: b },
             5 => Self::KeyDown { keycode },
             6 => Self::KeyUp { keycode },
+            7..=9 => Self::Gamepad {
+                pad: button,
+                kind: buf[0] - 7,
+                index: keycode,
+                value: a,
+            },
             _ => return None,
         })
     }
@@ -189,6 +222,12 @@ impl InputEvent {
             Self::Scroll { dx, dy } => (4, 0, 0, dx, dy),
             Self::KeyDown { keycode } => (5, 0, keycode, 0.0, 0.0),
             Self::KeyUp { keycode } => (6, 0, keycode, 0.0, 0.0),
+            Self::Gamepad {
+                pad,
+                kind,
+                index,
+                value,
+            } => (7 + kind.min(2), pad, index, value, 0.0),
         };
         let mut out = [0u8; INPUT_EVENT_LEN];
         out[0] = kind;
@@ -222,6 +261,13 @@ mod tests {
     }
 
     #[test]
+    fn hevc_flag_rides_with_keyframe() {
+        let d = fragment_with_flags(b"abc", 1, 2, FLAG_KEYFRAME | FLAG_HEVC, 3, 1200);
+        let h = VideoHeader::read(&d[0]).unwrap();
+        assert_eq!((h.flags, h.stream), (FLAG_KEYFRAME | FLAG_HEVC, 1));
+    }
+
+    #[test]
     fn fletcher16_known_values() {
         assert_eq!(fletcher16(b"abcde"), 0xC8F0);
         assert_eq!(fletcher16(b"abcdef"), 0x2057);
@@ -234,6 +280,8 @@ mod tests {
             InputEvent::MouseDown { button: 2 },
             InputEvent::Scroll { dx: -3.0, dy: 40.0 },
             InputEvent::KeyUp { keycode: 0x31 },
+            InputEvent::Gamepad { pad: 1, kind: GAMEPAD_AXIS, index: 3, value: -0.5 },
+            InputEvent::Gamepad { pad: 0, kind: GAMEPAD_CONNECTED, index: 0, value: 1.0 },
         ] {
             assert_eq!(InputEvent::read(&ev.write()), Some(ev));
         }

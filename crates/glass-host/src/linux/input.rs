@@ -109,6 +109,8 @@ impl Injector {
                     ),
                 ]);
             }
+            // Routed to crate::gamepad by the server, never here.
+            Ev::Gamepad { .. } => {}
             Ev::MouseDown { button } | Ev::MouseUp { button } => {
                 let down = matches!(ev, Ev::MouseDown { .. });
                 let code = match button {
