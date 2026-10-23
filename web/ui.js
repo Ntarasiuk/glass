@@ -6,13 +6,14 @@ const TOOLBAR_IDLE_MS = 3000;
 // Matches the slide-in transition in index.html (420 ms), plus a beat.
 const TOOLBAR_WAKE_MS = 450;
 
-export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken, onTerminal = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
     machines: { button: $('btn-machines'), panel: $('machines-panel') },
     displays: { button: $('btn-displays'), panel: $('displays-panel') },
     shortcuts: { button: $('btn-shortcuts'), panel: $('shortcuts-panel') },
+    ports: { button: $('btn-ports'), panel: $('ports-panel') },
   };
   const fileInput = $('file-input');
   const toasts = $('toasts');
@@ -70,6 +71,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
   on('btn-audio', onAudio);
   on('btn-fullscreen', onFullscreen);
   on('btn-stats', onToggleStats);
+  on('btn-terminal', onTerminal);
+  on('btn-ports', () => toggleMenu('ports'));
 
   fileInput.addEventListener('change', () => {
     if (fileInput.files.length) onUploadFiles([...fileInput.files]);
@@ -374,6 +377,21 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     /** The ⌘ menu (Mac shortcuts and key remaps) only applies to Mac hosts. */
     setHostOs(os) {
       $('btn-shortcuts').classList.toggle('hidden', os !== 'macos');
+    },
+    /** Ports the host forwards (owner, tailnet): each opens in a new tab at `urlFor(port)`. */
+    setPorts(ports, urlFor) {
+      $('btn-ports').classList.toggle('hidden', !ports.length);
+      if (!ports.length) setMenuOpen('ports', false);
+      menus.ports.panel.replaceChildren(
+        ...ports.map((port) =>
+          menuItem(`localhost:${port}`, 'Open', {
+            onSelect: () => {
+              setMenuOpen('ports', false);
+              window.open(urlFor(port), '_blank', 'noopener');
+            },
+          }),
+        ),
+      );
     },
     setAudioAvailable(available) {
       $('btn-audio').classList.toggle('hidden', !available);

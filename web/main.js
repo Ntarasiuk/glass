@@ -7,6 +7,7 @@ import { createUI } from './ui.js';
 import { log, setLogSink } from './log.js';
 import { MAC_KEYCODES as K } from './keymap.js';
 import { hostIdFor, serveRtc } from './rtc.js';
+import { createTerminal } from './terminal.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -207,13 +208,24 @@ const ui = createUI({
   onAudio: toggleAudio,
   onFullscreen: toggleFullscreen,
   onToggleStats: toggleStats,
+  onTerminal: () => terminal.toggle(),
   onToken: (t) => {
+    signedInToken = t;
     tokenTried = true;
     showStatus('connecting', 'Connecting', machineName(currentHost));
     storage((s) => s.setItem(tokenKey, t));
     worker.postMessage({ type: 'token', token: t });
   },
 });
+const terminal = createTerminal({ control, log });
+// The token this page signed in with (if any), for opening forwarded ports.
+let signedInToken = token;
+
+/** A forwarded port on this host: with a token, via /fwd/auth so the tab gets its cookie. */
+function portUrl(port) {
+  const path = `/fwd/${port}/`;
+  return signedInToken ? `${location.origin}/fwd/auth?t=${encodeURIComponent(signedInToken)}&to=${encodeURIComponent(path)}` : `${location.origin}${path}`;
+}
 
 // Launched from the home screen there's no browser UI to leave, so fullscreen is moot.
 const standalone = matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches || navigator.standalone;
@@ -431,6 +443,10 @@ function onControl(msg) {
       // Remote: other machines aren't reachable from here, so no machines menu either.
       ui.setGuest(guest || Boolean(remoteKey));
       ui.setCanFit(!guest);
+      terminal.reset();
+      terminal.setAvailable(Boolean(msg.perms?.owner && msg.features?.terminal));
+      // Forwarded ports are this page's host's, over plain HTTPS on the tailnet.
+      ui.setPorts(msg.perms?.owner && !remoteKey && currentHost === homeHost ? msg.features?.forward_ports ?? [] : [], portUrl);
       if (guest && resolutionMode.startsWith('fit:')) setResolution('auto');
       onLayout(msg.streams);
       queueViewport(true);
@@ -457,6 +473,9 @@ function onControl(msg) {
       lastMacClipboard = msg.text;
       for (const w of clipboardWaiters) w.resolve(msg.text);
       clipboardWaiters = [];
+      break;
+    case 'term':
+      terminal.onMessage(msg);
       break;
     case 'fileSaved':
       ui.toast({ text: `Saved on ${machineName(currentHost)}: ${msg.path.replace(/^\/(Users|home)\/[^/]+/, '~')}`, icon: 'file' });
