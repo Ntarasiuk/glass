@@ -58,9 +58,9 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Beyond the desktop.** Stream a single app's window, a terminal in the viewer, open the computer's local web ports (`/fwd/3000/`) from your tailnet, record sessions to MP4, game controllers and your microphone (Linux), HEVC when every viewer can decode it.
 - **Sharp text.** A per-viewer mode for code and documents: native size, finer frames, and HEVC 4:2:2 colour when every viewer can decode it.
 - **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps are remembered for each computer; an optional shortcut bar puts Mac shortcuts one tap away on a touch screen.
-- **Single sign-on.** Point `glass config oidc-issuer` at Google, Entra, Okta or any OpenID Connect provider and allow-listed accounts sign in without a token.
 - **A console.** `https://<computer>/admin/` (or Computer › Console in the viewer): who's connected, requests to allow, links with QR codes, revoking devices, history, settings, access rules, and an address book of your machines in your own groups.
 - **Device posture.** Require tailnet devices to carry a Tailscale tag, allow only certain operating systems, a minimum browser version, or passkeys with Face ID / Touch ID / a PIN (`glass config posture-*`).
+- **Single sign-on.** Point `glass config oidc-issuer` at Google, Entra, Okta or any OpenID Connect provider, or `glass config ldap-url` at your directory, and accounts sign in without a token. Access rules (`glass acl`) pick what each email, domain or group may do; SCIM provisioning keeps users and groups in sync and cuts off deactivated accounts.
 - **Power.** Wake a sleeping machine (Wake-on-LAN) from the machines menu, restart Glass or the whole computer and reconnect.
 - **Self-hostable relay.** Run the WebRTC introducer and TURN yourself ([site/selfhost](site/selfhost)) and point Glass at it with `glass config relay`.
 - **Agent-ready.** Ask Claude Code to "set up Glass on my Mac mini" and it does it over SSH ([skill](#set-up-with-an-ai-agent)).
@@ -110,6 +110,13 @@ glass log                # connection history
 glass wake <name|mac>    # Wake-on-LAN
 glass config oidc-issuer https://accounts.google.com   # single sign-on (+ oidc-client-id,
                          # oidc-client-secret, oidc-allow ana@x.com,@corp.com, oidc-scope)
+glass config ldap-url ldaps://dir.example.com          # directory sign-in (+ ldap-user-dn
+                         # uid={user},ou=people,dc=example,dc=com, or ldap-base-dn + ldap-bind-dn)
+glass acl add group:eng --view-only --for 8h   # access rules for SSO/LDAP accounts, first match
+glass acl add @example.com                     # wins: email, @domain, group:name or *
+glass acl / glass acl remove 0                 # list; remove by position
+glass config scim-token new   # SCIM provisioning at https://<computer>/scim/v2 (Okta, Entra ID):
+                         # deactivated users can't sign in and lose their sessions
 glass config             # settings: ask-guests, record, privacy, hevc, forward-ports, name, accent, relay…
 glass feedback "…"       # tell us what broke or what you want
 ```

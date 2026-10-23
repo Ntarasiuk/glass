@@ -136,12 +136,13 @@ test.describe('connecting', () => {
     await expect(page.locator('#screens canvas').first()).toBeAttached();
     expect(await hudText(page)).not.toContain('640×360');
 
-    await auth.locator('input').fill('not-the-token');
-    await auth.locator('button').click();
+    // The token form (the directory sign-in fields beside it are hidden unless set up).
+    await auth.locator('input[name="token"]').fill('not-the-token');
+    await auth.locator('button[type="submit"]').click();
     await expect(auth).toBeVisible({ timeout: 10_000 });
 
-    await auth.locator('input').fill(host.token);
-    await auth.locator('button').click();
+    await auth.locator('input[name="token"]').fill(host.token);
+    await auth.locator('button[type="submit"]').click();
     await expectVideo(page);
     await expect(auth).toBeHidden();
   });

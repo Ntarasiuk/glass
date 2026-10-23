@@ -116,6 +116,7 @@ pub async fn run(
                 "macs": crate::wol::own_macs(),
                 // The sign-in screen offers single sign-on.
                 "sso": crate::oidc::enabled(),
+                "ldap": crate::ldap::enabled(),
             }))
         }
     };
@@ -127,6 +128,9 @@ pub async fn run(
         .merge(crate::forward::routes())
         .merge(crate::oidc::routes())
         .merge(crate::admin::routes())
+        .merge(crate::ldap::routes())
+        .merge(crate::scim::routes())
+        .merge(crate::acl::routes())
         .route("/config.json", get(client_config))
         .route(
             "/machines.json",
