@@ -4,7 +4,7 @@
 import { inputEvent } from './proto.js';
 import { attachInput } from './input.js';
 import { attachGamepads } from './gamepad.js';
-import { createUI } from './ui.js';
+import { createUI, positionNames } from './ui.js';
 import { log, setLogSink } from './log.js';
 import { MAC_KEYCODES as K } from './keymap.js';
 import { hostIdFor, serveRtc } from './rtc.js';
@@ -13,6 +13,7 @@ import { loadProfile, saveProfile } from './keyboard-profile.js';
 import { answerPasskey } from './passkey.js';
 import { createTerminal } from './terminal.js';
 import { createAnnotator } from './annotate.js';
+import { createThumbs } from './thumbs.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -335,6 +336,17 @@ const ui = createUI({
   },
 });
 const terminal = createTerminal({ control, log });
+const thumbs = createThumbs({
+  control,
+  onSelect: (id) => control(id === 'all' ? { t: 'showAll' } : { t: 'selectDisplay', id }),
+  names: positionNames,
+  screens,
+  pictures: () =>
+    (rtpVideo ? videos : canvases).slice(0, streamCount).map((el, i) => {
+      const [w, h] = (videoSizes[i] ?? '').split('×').map(Number);
+      return { el, w, h };
+    }),
+});
 // The token this page signed in with (if any), for opening forwarded ports.
 let signedInToken = token;
 
@@ -456,6 +468,7 @@ function videoFor(stream) {
       if (!v.videoWidth) return;
       videoSizes[i] = `${v.videoWidth}×${v.videoHeight}`;
       input.setVideoSize(i, v.videoWidth, v.videoHeight);
+      thumbs.measure();
       hideStatus();
     });
     screens.append(v);
@@ -530,6 +543,7 @@ worker.onmessage = ({ data }) => {
     case 'size':
       videoSizes[data.stream] = `${data.width}×${data.height}`;
       input.setVideoSize(data.stream, data.width, data.height);
+      thumbs.measure();
       annotator.invalidate();
       hideStatus();
       break;
@@ -573,6 +587,7 @@ worker.onmessage = ({ data }) => {
 function onControl(msg) {
   switch (msg.t) {
     case 'welcome':
+      thumbs.setConnected(true);
       machineFailures = 0;
       clearTimeout(machineTimer);
       displays = msg.displays;
@@ -631,6 +646,8 @@ function onControl(msg) {
       log('info', 'welcome', { displays: displays.length, streams: msg.streams.map((d) => d.id), audio: msg.audio });
       break;
     case 'layout':
+      // The host's current displays (a fit adds a virtual one and hides the one it mirrors).
+      if (msg.displays) displays = msg.displays;
       onLayout(msg.streams);
       break;
     case 'waiting':
@@ -649,6 +666,9 @@ function onControl(msg) {
       break;
     case 'chat':
       if (msg.sender !== session) chat.receive(msg);
+      break;
+    case 'thumbs':
+      thumbs.onMessage(msg);
       break;
     case 'windows':
       for (const w of msg.windows) streamedWindows.add(w.id);
@@ -763,6 +783,7 @@ function hideStatus() {
 
 /** Maps the worker's status text to what the person should see. */
 function onConnectionStatus(text) {
+  if (text !== 'connected') thumbs.setConnected(false);
   const name = machineName(currentHost);
   // Restarting: the connection drops and retries for a while; that's expected.
   if (restarting && text !== 'connected' && !text.startsWith('waiting for access token')) {
@@ -955,6 +976,7 @@ function onLayout(streams) {
   videoSizes.length = streams.length;
   showStreams(streams.length);
   ui.renderDisplays(displays, streams.map((d) => d.id));
+  thumbs.setDisplays(displays.filter((d) => !streamedWindows.has(d.id)), streams.map((d) => d.id));
 }
 
 /** 'row' if the displays sit side by side in macOS, 'column' if stacked. */
@@ -1141,3 +1163,7 @@ document.addEventListener('visibilitychange', () => {
   else pauseTimer = setTimeout(pause, PAUSE_HIDDEN_AFTER_MS);
 });
 addEventListener('online', () => worker.postMessage({ type: 'wake' }));
+// Leaving (a reload included): end the session now. Safari can keep a dead page's
+// connection open otherwise, and the host would list this device twice.
+addEventListener('pagehide', () => worker.postMessage({ type: 'leave' }));
+addEventListener('pageshow', (e) => e.persisted && worker.postMessage({ type: 'wake' }));

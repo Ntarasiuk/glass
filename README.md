@@ -46,7 +46,8 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Feels local.** Hardware encode and decode, WebTransport datagrams, no buffering.
 - **Just a browser.** iPad, iPhone, Mac, Windows or Linux. Add it to the Home Screen for a fullscreen app.
 - **Full control.** Mouse, trackpad, keyboard, touch and pinch to zoom. ⌘Tab works on iPad. Unlock a locked Mac from the lock screen.
-- **Every display.** Switch screens, or show them all side by side, arranged like your desk.
+- **Every display.** Switch screens from live previews along the bottom, or show them all side by side, arranged like your desk.
+- **A toolbar that stays put.** Hide it from its last button for an unobstructed screen; a small tab brings it back.
 - **Every machine.** All your computers in one menu; switch without leaving the page.
 - **Sound, clipboard, files.** System audio, copy and paste both ways, and direct file transfer.
 - **From anywhere.** `glass link --anywhere` makes a one-time link that connects any browser straight to your computer over WebRTC: end-to-end encrypted, no ports opened, no Tailscale needed on the viewer.
@@ -55,7 +56,7 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Private by default.** On your tailnet, your devices get in and nothing else does. Runs as your user, never root.
 - **Links with limits.** `--view-only`, `--no-files`, `--no-clipboard`, `--for 1h`, `--ask` (the person at the computer allows each connection) and `--passkey` (the device must use Face ID, Touch ID or a security key every time). List and revoke devices one at a time.
 - **For helping someone.** Chat, drawing on the screen (they see it on their Mac too), a privacy screen that blanks the Mac and blocks its keyboard and mouse while you work, and a connection history.
-- **Beyond the desktop.** Stream a single app's window, a terminal in the viewer, open the computer's local web ports (`/fwd/3000/`) from your tailnet, record sessions to MP4, game controllers and your microphone (Linux), HEVC when every viewer can decode it.
+- **Beyond the desktop.** Stream a single app's window, a resizable full-screen terminal in the viewer, open the computer's local web ports (`/fwd/3000/`) from your tailnet, record sessions to MP4, game controllers and your microphone (Linux), HEVC when every viewer can decode it.
 - **Sharp text.** A per-viewer mode for code and documents: native size, finer frames, HEVC 4:2:2 while things move, and a lossless full-colour (4:4:4) picture once the screen is still.
 - **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps are remembered for each computer; an optional shortcut bar puts Mac shortcuts one tap away on a touch screen.
 - **A console.** `https://<computer>/admin/` (or Computer › Console in the viewer): who's connected, requests to allow, links with QR codes, revoking devices, history, settings, access rules, and an address book of your machines in your own groups.

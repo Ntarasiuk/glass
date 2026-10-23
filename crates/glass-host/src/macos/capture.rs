@@ -235,40 +235,86 @@ impl Capture {
 
     /// The last image as packed BGRA, if it was captured in full colour (BGRA).
     pub fn read_bgra(&self) -> Option<crate::lossless::RawFrame> {
-        use objc2_core_video::{
-            CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
-            CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
-            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
-        };
         let (image, capture_us) = {
             let last = self.state.last.lock().unwrap();
             (last.0.clone()?, last.1)
         };
-        if CVPixelBufferGetPixelFormatType(&image) != PIXEL_FORMAT_BGRA {
-            return None;
-        }
-        let (w, h) = (CVPixelBufferGetWidth(&image), CVPixelBufferGetHeight(&image));
-        if unsafe { CVPixelBufferLockBaseAddress(&image, CVPixelBufferLockFlags::ReadOnly) } != 0 {
-            return None;
-        }
-        let base = CVPixelBufferGetBaseAddress(&image) as *const u8;
-        let stride = CVPixelBufferGetBytesPerRow(&image);
-        let mut bgra = Vec::with_capacity(w * h * 4);
-        if !base.is_null() && stride >= w * 4 {
-            for y in 0..h {
-                // SAFETY: locked, and each row holds at least w * 4 bytes.
-                let row = unsafe { std::slice::from_raw_parts(base.add(y * stride), w * 4) };
-                bgra.extend_from_slice(row);
-            }
-        }
-        unsafe { CVPixelBufferUnlockBaseAddress(&image, CVPixelBufferLockFlags::ReadOnly) };
-        (bgra.len() == w * h * 4).then_some(crate::lossless::RawFrame {
-            width: w,
-            height: h,
-            bgra,
-            capture_us,
-        })
+        let (width, height, bgra) = copy_bgra(&image)?;
+        Some(crate::lossless::RawFrame { width, height, bgra, capture_us })
     }
+}
+
+/// A BGRA pixel buffer's pixels, rows packed (`None` for other formats).
+fn copy_bgra(image: &CVImageBuffer) -> Option<(usize, usize, Vec<u8>)> {
+    use objc2_core_video::{
+        CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
+        CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+        CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    };
+    if CVPixelBufferGetPixelFormatType(image) != PIXEL_FORMAT_BGRA {
+        return None;
+    }
+    let (w, h) = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
+    if unsafe { CVPixelBufferLockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) } != 0 {
+        return None;
+    }
+    let base = CVPixelBufferGetBaseAddress(image) as *const u8;
+    let stride = CVPixelBufferGetBytesPerRow(image);
+    let mut bgra = Vec::with_capacity(w * h * 4);
+    if !base.is_null() && stride >= w * 4 {
+        for y in 0..h {
+            // SAFETY: locked, and each row holds at least w * 4 bytes.
+            let row = unsafe { std::slice::from_raw_parts(base.add(y * stride), w * 4) };
+            bgra.extend_from_slice(row);
+        }
+    }
+    unsafe { CVPixelBufferUnlockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) };
+    (bgra.len() == w * h * 4).then_some((w, h, bgra))
+}
+
+/// A small picture of one display, for previews (ScreenCaptureKit screenshots: macOS 14+).
+pub fn screenshot(display_id: CGDirectDisplayID, max: [u32; 2]) -> Result<crate::lossless::RawFrame> {
+    use objc2_screen_capture_kit::SCScreenshotManager;
+    if objc2::runtime::AnyClass::get(c"SCScreenshotManager").is_none() {
+        bail!("screenshots need macOS 14");
+    }
+    let display = list_displays()?
+        .into_iter()
+        .find(|d| d.info.id == display_id)
+        .context("no such display")?;
+    let (w, h) = crate::thumbs::fit(display.info.width as usize, display.info.height as usize, max);
+    let filter = unsafe {
+        SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display.sc, &NSArray::new())
+    };
+    let config = unsafe { SCStreamConfiguration::new() };
+    unsafe {
+        config.setWidth(w);
+        config.setHeight(h);
+        config.setPixelFormat(PIXEL_FORMAT_BGRA);
+        config.setShowsCursor(false);
+    }
+    let (tx, rx) = mpsc::channel();
+    let handler = RcBlock::new(move |sample: *mut CMSampleBuffer, err: *mut NSError| {
+        let result = match unsafe { sample.as_ref() } {
+            Some(sample) => unsafe { sample.image_buffer() }
+                .and_then(|image| copy_bgra(&image))
+                .ok_or_else(|| anyhow!("no picture")),
+            None => Err(match unsafe { err.as_ref() } {
+                Some(e) => anyhow!("{}", e.localizedDescription()),
+                None => anyhow!("no screenshot"),
+            }),
+        };
+        let _ = tx.send(result);
+    });
+    unsafe {
+        SCScreenshotManager::captureSampleBufferWithFilter_configuration_completionHandler(
+            &filter,
+            &config,
+            Some(&handler),
+        )
+    };
+    let (width, height, bgra) = rx.recv_timeout(std::time::Duration::from_secs(3))??;
+    Ok(crate::lossless::RawFrame { width, height, bgra, capture_us: 0 })
 }
 
 impl Drop for Capture {
@@ -541,4 +587,18 @@ pub fn start(
         queue,
         _audio_queue: audio_queue,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    /// Needs Screen Recording permission: `cargo test -- --ignored screenshot`.
+    #[test]
+    #[ignore]
+    fn screenshot_of_main_display() {
+        let id = super::list_displays().unwrap()[0].info.id;
+        let shot = super::screenshot(id, crate::thumbs::MAX).unwrap();
+        assert!(shot.width <= 320 && shot.height <= 200 && shot.width > 0);
+        assert_eq!(shot.bgra.len(), shot.width * shot.height * 4);
+        assert!(shot.bgra.chunks_exact(4).any(|p| p[..3] != [0, 0, 0]), "all black");
+    }
 }

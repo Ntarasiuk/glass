@@ -17,9 +17,6 @@ const storageSet = (key, value) => {
   } catch {}
 };
 
-const TOOLBAR_IDLE_MS = 3000;
-// Matches the slide-in transition in index.html (420 ms), plus a beat.
-const TOOLBAR_WAKE_MS = 450;
 
 export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
@@ -35,45 +32,35 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   const toasts = $('toasts');
   const auth = $('auth');
 
-  // Fade the toolbar when idle so it doesn't cover the remote screen.
-  let idleTimer;
-  let wakingTimer;
-  function wakeToolbar() {
-    if (toolbar.classList.contains('idle')) {
-      // Buttons ignore presses until it has finished sliding in, so a tap or click aimed
-      // at the tucked toolbar can't land on whichever button slides under it.
-      toolbar.classList.add('waking');
-      clearTimeout(wakingTimer);
-      wakingTimer = setTimeout(() => toolbar.classList.remove('waking'), TOOLBAR_WAKE_MS);
-    }
-    toolbar.classList.remove('idle');
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      // Stay put while one of its menus is open.
-      const menuOpen = document.querySelector('.panel:not(.hidden)');
-      if (menuOpen) wakeToolbar();
-      else toolbar.classList.add('idle');
-    }, TOOLBAR_IDLE_MS);
+  // Hidden only when asked (its last button); a small tab at the top brings it back.
+  const TOOLBAR_HIDDEN_KEY = 'glass.toolbarHidden';
+  const toolbarShow = $('toolbar-show');
+  function setToolbarHidden(hide) {
+    toolbar.classList.toggle('tucked', hide);
+    toolbar.inert = hide;
+    toolbarShow.classList.toggle('hidden', !hide);
+    if (hide) for (const name of Object.keys(menus)) setMenuOpen(name, false);
+    storageSet(TOOLBAR_HIDDEN_KEY, hide ? '1' : '0');
   }
-  toolbar.addEventListener('pointerenter', wakeToolbar);
-  toolbar.addEventListener('pointerdown', wakeToolbar);
-  toolbar.addEventListener('focusin', wakeToolbar);
-  // A mouse heading for the top edge brings it back before it's reached.
-  addEventListener('pointermove', (e) => {
-    if (e.pointerType === 'mouse' && e.clientY < 72 && toolbar.classList.contains('idle')) wakeToolbar();
-  }, { passive: true });
-  // Fingers can't hover, so a tucked toolbar shows a grab handle sized for a fingertip
-  // (CSS keys it off data-input). A tap on the tucked toolbar only wakes it.
+  if (storageGet(TOOLBAR_HIDDEN_KEY) === '1') {
+    toolbar.classList.add('tucked');
+    toolbar.inert = true;
+    toolbarShow.classList.remove('hidden');
+  }
+  toolbarShow.addEventListener('click', (e) => {
+    e.preventDefault();
+    setToolbarHidden(false);
+  });
+  // Touch or mouse, for sizing things for a fingertip (CSS keys off data-input).
   const root = document.documentElement;
   root.dataset.input = matchMedia('(hover: none)').matches ? 'touch' : 'mouse';
   addEventListener('pointerdown', (e) => {
     const input = e.pointerType === 'touch' ? 'touch' : 'mouse';
     if (root.dataset.input !== input) root.dataset.input = input;
   }, { capture: true, passive: true });
-  wakeToolbar();
 
   // Toolbar buttons must not steal pointer events from the canvas logic or keep focus.
-  const on = (id, fn) => $(id).addEventListener('click', (e) => { e.preventDefault(); wakeToolbar(); fn(e); });
+  const on = (id, fn) => $(id).addEventListener('click', (e) => { e.preventDefault(); fn(e); });
 
   on('btn-machines', () => {
     toggleMenu('machines');
@@ -95,6 +82,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   on('btn-stats', onToggleStats);
   on('btn-terminal', onTerminal);
   on('btn-ports', () => toggleMenu('ports'));
+  on('btn-hide-toolbar', () => setToolbarHidden(true));
 
   fileInput.addEventListener('change', () => {
     if (fileInput.files.length) onUploadFiles([...fileInput.files]);
@@ -475,24 +463,6 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   let windowList = null;
 
   /** Names displays by where they sit in the macOS arrangement: Left / Right, Top / Bottom. */
-  function positionNames(displays) {
-    const horizontal =
-      Math.max(...displays.map((d) => d.x)) - Math.min(...displays.map((d) => d.x)) >=
-      Math.max(...displays.map((d) => d.y)) - Math.min(...displays.map((d) => d.y));
-    const key = horizontal ? 'x' : 'y';
-    const ordered = [...displays].sort((a, b) => a[key] - b[key]);
-    const words = horizontal ? ['Left', 'Middle', 'Right'] : ['Top', 'Middle', 'Bottom'];
-    const names = new Map();
-    ordered.forEach((d, i) => {
-      let name;
-      if (displays.length === 1) name = d.builtin ? 'Built-in display' : 'Display';
-      else if (displays.length === 2) name = `${words[i === 0 ? 0 : 2]} display`;
-      else if (displays.length === 3) name = `${words[i]} display`;
-      else name = `Display ${i + 1}`;
-      names.set(d.id, name);
-    });
-    return names;
-  }
 
   const ICONS = {
     link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
@@ -669,4 +639,24 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       $('btn-mic').setAttribute('aria-pressed', String(on));
     },
   };
+}
+
+/** Names for displays by where they sit: "Left display", "Right display"… */
+export function positionNames(displays) {
+  const horizontal =
+    Math.max(...displays.map((d) => d.x)) - Math.min(...displays.map((d) => d.x)) >=
+    Math.max(...displays.map((d) => d.y)) - Math.min(...displays.map((d) => d.y));
+  const key = horizontal ? 'x' : 'y';
+  const ordered = [...displays].sort((a, b) => a[key] - b[key]);
+  const words = horizontal ? ['Left', 'Middle', 'Right'] : ['Top', 'Middle', 'Bottom'];
+  const names = new Map();
+  ordered.forEach((d, i) => {
+    let name;
+    if (displays.length === 1) name = d.builtin ? 'Built-in display' : 'Display';
+    else if (displays.length === 2) name = `${words[i === 0 ? 0 : 2]} display`;
+    else if (displays.length === 3) name = `${words[i]} display`;
+    else name = `Display ${i + 1}`;
+    names.set(d.id, name);
+  });
+  return names;
 }

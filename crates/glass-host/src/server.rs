@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use axum::Json;
 use axum::http::{HeaderValue, header};
 use axum::routing::{get, post};
@@ -225,9 +225,20 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
     // When this client last had a keyframe request honoured: [all streams, stream 0, …].
     let mut last_keyframe_request = [None::<std::time::Instant>; MAX_STREAMS + 1];
 
+    // The page pings every 500 ms; a session that stops hearing from it is a page that's
+    // gone (Safari can keep a dead page's connection alive), or one suspended in the
+    // background, which reconnects when it's back.
+    let mut last_heard = std::time::Instant::now();
+    let mut quiet_check = tokio::time::interval(QUIET_CHECK);
+
     let result: Result<()> = async {
         loop {
             tokio::select! {
+                _ = quiet_check.tick() => {
+                    if last_heard.elapsed() > QUIET_LIMIT {
+                        bail!("viewer went quiet for {}s", QUIET_LIMIT.as_secs());
+                    }
+                }
                 frame = frames.recv() => {
                     let frame = match frame {
                         Ok(f) => f,
@@ -265,6 +276,10 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                 }
                 dgram = conn.receive_datagram() => {
                     let dgram = dgram?;
+                    if crate::testmode::deaf() {
+                        continue;
+                    }
+                    last_heard = std::time::Instant::now();
                     match dgram.first() {
                         Some(&KIND_PING) => {
                             if let Some(pong) = glass_proto::pong(&dgram, now_us()) {
@@ -330,6 +345,9 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
         }
     }
     .await;
+    // Ending here (gone quiet, an error) must end the whole session: the control stream's
+    // task holds the connection, and with it this viewer's place in the list.
+    conn.close(0u32.into(), b"session ended");
 
     if authed.load(Ordering::Relaxed) {
         shared.injector.lock().unwrap().release_all();
@@ -639,6 +657,8 @@ async fn control(
     );
     let _sharp = crate::sharp::joined(session_id, codecs.iter().any(|c| c == "hevc-rext"));
     let mut sharp_on = false;
+    let thumbs_busy = Arc::new(AtomicBool::new(false));
+    let thumbs_sent = Arc::new(std::sync::Mutex::new(crate::thumbs::Sent::default()));
     // Sharp text's lossless pictures of a still screen; <video> (RTP) viewers can't show them.
     let rtp_viewer = ctx.relayed.as_ref().is_some_and(|r| r.rtp_video);
     let lossless_reset = Arc::new(AtomicBool::new(false));
@@ -926,6 +946,32 @@ async fn control(
                     refuse(&format!("{e:#}"));
                 }
             }
+            ClientMsg::Thumbs => {
+                // One at a time per viewer; a request while one is running is dropped.
+                if !thumbs_busy.swap(true, Ordering::AcqRel) {
+                    let shared = shared.clone();
+                    let tx = ctx.ctl_tx.clone();
+                    let busy = thumbs_busy.clone();
+                    let sent = thumbs_sent.clone();
+                    tokio::spawn(async move {
+                        let pictures = tokio::task::spawn_blocking(move || {
+                            let displays = shared.video.displays().unwrap_or_default();
+                            displays
+                                .iter()
+                                .filter_map(|d| {
+                                    let frame = shared.video.thumbnail(d.id)?;
+                                    Some((d.id, crate::thumbs::png(&frame).ok()?))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .await
+                        .unwrap_or_default();
+                        let thumbs = sent.lock().unwrap().changed(pictures);
+                        let _ = tx.send(ServerMsg::Thumbs { thumbs });
+                        busy.store(false, Ordering::Release);
+                    });
+                }
+            }
             ClientMsg::ListWindows => {
                 let shared = shared.clone();
                 let tx = ctx.ctl_tx.clone();
@@ -1106,7 +1152,8 @@ fn end_fit(session: u64, shared: Arc<Shared>) {
                 if let Ok(streams) = shared.video.set_layout(Layout::Single(None)) {
                     let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
                     shared.injector.lock().unwrap().set_displays(&ids);
-                    let _ = shared.events.send(ServerMsg::Layout { streams });
+                    let displays = shared.video.displays().ok();
+                    let _ = shared.events.send(ServerMsg::Layout { streams, displays });
                 }
                 info!("displays restored (the viewer who fitted them left)");
             });
@@ -1149,17 +1196,18 @@ async fn watch_window(shared: Arc<Shared>, id: u32, generation: u64) {
                 WINDOW_WATCH.fetch_add(1, Ordering::Relaxed);
                 let video = shared.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    video.video.set_layout(Layout::Single(None))
+                    let streams = video.video.set_layout(Layout::Single(None))?;
+                    anyhow::Ok((streams, video.video.displays().ok()))
                 })
                 .await;
-                if let Ok(Ok(streams)) = result {
+                if let Ok(Ok((streams, displays))) = result {
                     let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
                     {
                         let mut injector = shared.injector.lock().unwrap();
                         injector.set_displays(&ids);
                         injector.set_window_rect(None);
                     }
-                    let _ = shared.events.send(ServerMsg::Layout { streams });
+                    let _ = shared.events.send(ServerMsg::Layout { streams, displays });
                 }
                 let msg = "The window you were viewing closed, so here's the main display.".into();
                 let _ = shared.events.send(ServerMsg::Error { msg });
@@ -1173,8 +1221,12 @@ async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
     let worker = ctx.shared.clone();
     let peer = ctx.conn.remote_address();
     info!("{peer}: layout {layout:?}");
-    match tokio::task::spawn_blocking(move || worker.video.set_layout(layout)).await? {
-        Ok(streams) => {
+    let listed = tokio::task::spawn_blocking(move || {
+        let streams = worker.video.set_layout(layout)?;
+        anyhow::Ok((streams, worker.video.displays().ok()))
+    });
+    match listed.await? {
+        Ok((streams, displays)) => {
             let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
             info!("{peer}: now streaming displays {ids:?}");
             {
@@ -1191,7 +1243,7 @@ async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
             if let Layout::Window(id) = layout {
                 tokio::spawn(watch_window(ctx.shared.clone(), id, generation));
             }
-            let _ = ctx.shared.events.send(ServerMsg::Layout { streams });
+            let _ = ctx.shared.events.send(ServerMsg::Layout { streams, displays });
         }
         Err(e) => {
             warn!("{peer}: switch display failed: {e:#}");
@@ -1223,6 +1275,9 @@ const GUEST_RECHECK: Duration = Duration::from_secs(10);
 
 /// A client's keyframe requests are honoured at most this often (per stream).
 const KEYFRAME_REQUEST_SPACING: Duration = Duration::from_millis(500);
+/// A session that hasn't heard from its page for this long is ended.
+const QUIET_LIMIT: Duration = Duration::from_secs(15);
+const QUIET_CHECK: Duration = Duration::from_secs(3);
 
 const AUTH_MAX_FAILURES: u32 = 10;
 const AUTH_WINDOW: Duration = Duration::from_secs(600);

@@ -68,7 +68,6 @@ test('a link from anywhere connects over WebRTC: video, input and files', async 
     await page.locator('#file-input').setInputFiles([{ name: 'remote.bin', mimeType: 'application/octet-stream', buffer: body }]);
     const files = async () => Object.fromEntries((await host.get('/test/downloads')).files.map((f) => [f.name, f.size]));
     await expect.poll(files, { timeout: 20_000 }).toEqual({ 'remote.bin': body.length });
-    await page.mouse.move(640, 8); // bring back the tucked toolbar, as a mouse heading up does
     await toolbarClick(page, 'btn-download');
     await expect(page.locator('.toast', { hasText: 'glass-test-pick', has: page.locator('.action') })).toBeVisible({ timeout: 10_000 });
 

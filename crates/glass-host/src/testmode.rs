@@ -37,6 +37,8 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static DROP_FRAMES: AtomicU32 = AtomicU32::new(0);
 /// Corrupt the next frame after its checksum is computed.
 static CORRUPT_NEXT: AtomicBool = AtomicBool::new(false);
+/// Sessions ignore what viewers send as datagrams (pings included): a page gone quiet.
+static DEAF: AtomicBool = AtomicBool::new(false);
 /// Self-update requests, readable at /test/updates.
 static UPDATES: AtomicU32 = AtomicU32::new(0);
 
@@ -115,6 +117,10 @@ pub fn take_drop() -> bool {
 }
 
 /// Server hook: true if this frame should be corrupted in flight.
+pub fn deaf() -> bool {
+    enabled() && DEAF.load(Ordering::Relaxed)
+}
+
 pub fn take_corrupt() -> bool {
     enabled() && CORRUPT_NEXT.swap(false, Ordering::Relaxed)
 }
@@ -209,6 +215,14 @@ impl VideoSource for TestVideo {
 
     fn set_full_colour(&self, on: bool) {
         FULL_COLOUR.store(on, Ordering::Relaxed);
+    }
+
+    fn thumbnail(&self, id: u32) -> Option<crate::lossless::RawFrame> {
+        let index = self.sources[..DISPLAYS].iter().position(|d| d.id == id)?;
+        let d = &self.sources[index];
+        let (w, h) = crate::thumbs::fit(d.width as usize, d.height as usize, crate::thumbs::MAX);
+        let frame = render(index, w, h, 0);
+        Some(crate::lossless::RawFrame { width: w, height: h, bgra: frame.data, capture_us: 0 })
     }
 
     fn frame_generation(&self, stream: u8) -> Option<u64> {
@@ -581,6 +595,10 @@ pub fn routes(events: broadcast::Sender<ServerMsg>, downloads: PathBuf) -> axum:
             post(|Query(q): Query<PauseQuery>| async move { PAUSED.store(q.on, Ordering::Relaxed) }),
         )
         .route("/test/corrupt", post(|| async { CORRUPT_NEXT.store(true, Ordering::Relaxed) }))
+        .route(
+            "/test/deaf",
+            post(|Query(q): Query<PauseQuery>| async move { DEAF.store(q.on, Ordering::Relaxed) }),
+        )
         .route(
             "/test/downloads",
             get(move || {

@@ -129,7 +129,12 @@ self.onmessage = async ({ data }) => {
   } else if (data.type === 'askAgain') {
     denied = false;
     wake?.();
+  } else if (data.type === 'leave') {
+    leaving = true;
+    kill?.('page closing');
+    try { transport?.close(); } catch {}
   } else if (data.type === 'wake') {
+    leaving = false;
     // Tab became visible or network came back: skip the remaining backoff, and drop a
     // session that went quiet while suspended instead of waiting for the watchdog.
     if (transport && performance.now() - lastRxMs > PING_INTERVAL_MS * 2) kill?.('woke with a stale session');
@@ -137,9 +142,14 @@ self.onmessage = async ({ data }) => {
   }
 };
 
+// The page is going away (reload, navigation): close the session now rather than leave
+// the host to notice, and don't reconnect unless the page comes back (bfcache).
+let leaving = false;
+
 async function run() {
   let delay = RECONNECT_MIN_MS;
   for (;;) {
+    while (leaving) await new Promise((resolve) => { wake = resolve; });
     // After a rejection, retrying would only be rejected again; wait for a new token.
     while (rejected) {
       self.postMessage({ type: 'status', text: 'waiting for access token' });

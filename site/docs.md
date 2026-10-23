@@ -111,7 +111,7 @@ Devices that aren't on your tailnet, or belong to another tailnet user, are aske
 
 ## Using Glass
 
-The toolbar (top right, fades when idle) has:
+The toolbar (top right) has:
 
 - **Displays:** pick one display, or **All displays** to show every screen side by side in the same arrangement as System Settings → Displays.
 - **⌘ (Mac shortcuts):** one-tap app switcher, Spotlight, Mission Control, Hide, Quit, Close window, screenshot, Force Quit, and Lock Screen. Also keyboard remapping options (see below).
@@ -120,6 +120,9 @@ The toolbar (top right, fades when idle) has:
 - **Get files from Mac:** opens a file chooser on the Mac's screen; chosen files arrive with a Save button.
 - **Audio:** turns Mac system audio on or off for this device.
 - **Fullscreen** (hidden when running as a Home Screen app) and **Stats**.
+- **Hide toolbar** (last button): slides it away for an unobstructed screen; the small tab at the top brings it back. Remembered.
+
+**Display previews.** With two or more displays, a strip of small live previews of each one (and **All**) sits in the empty band below the picture whenever there's room; the one being shown is outlined, and tapping another switches to it. Without room it waits behind a small tab at the bottom. Hide it with its ⌄ button; that's remembered. Live previews of displays not being shown need macOS 14 or newer.
 
 Touch gestures: tap = click, drag = drag, long-press = right-click, two fingers = scroll.
 
@@ -129,7 +132,7 @@ More in the toolbar:
 - **Displays › Apps:** show one app's window on its own (macOS).
 - **Draw on the screen:** annotate; the drawing also shows on the computer's screen.
 - **Chat:** messages with the person at the computer (`glass chat "…"` from there).
-- **Terminal:** a shell on the computer, in the viewer.
+- **Terminal:** a shell on the computer, in the viewer. Drag its top edge to resize it, or use **Full screen** (or double-click its title bar); both are remembered.
 - **Forwarded ports:** open the computer's local web servers (only ports allowed with `glass config forward-ports 3000,8888`, and only for your own devices).
 - **Record on the host:** records this session to `~/Movies/Glass` (`~/Videos/Glass` on Linux). `glass config record on` records every session.
 - **Microphone:** sends your microphone to the computer (Linux hosts).

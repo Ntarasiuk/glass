@@ -45,6 +45,39 @@ test.describe('terminal', () => {
     await expect(page.locator('#terminal')).toBeHidden();
   });
 
+  it('resizes by its top edge and goes full screen, and remembers both', async ({ page, host }) => {
+    await page.goto(host.url());
+    await expectVideo(page);
+    await toolbarClick(page, 'btn-terminal');
+    const panel = page.locator('#terminal');
+    await expect(panel.locator('.xterm')).toBeVisible();
+    const before = (await panel.boundingBox()).height;
+
+    const grip = (await page.locator('#terminal-grip').boundingBox());
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + 4);
+    await page.mouse.down();
+    await page.mouse.move(grip.x + grip.width / 2, grip.y - 150, { steps: 5 });
+    await page.mouse.up();
+    await expect.poll(async () => (await panel.boundingBox()).height).toBeGreaterThan(before + 100);
+    // The shell is told its new size.
+    const rows = await page.evaluate(() => document.querySelectorAll('#terminal .xterm-rows > div').length);
+    await page.locator('#terminal .xterm-helper-textarea').focus();
+    await page.keyboard.type('stty size');
+    await page.keyboard.press('Enter');
+    await expect(page.locator('#terminal .xterm-rows')).toContainText(new RegExp(`stty size\\s*${rows} \\d+`), { timeout: 10_000 });
+
+    await page.locator('#terminal-full').click();
+    const viewport = page.viewportSize();
+    await expect.poll(async () => (await panel.boundingBox()).height).toBeGreaterThan(viewport.height - 40);
+    await page.reload();
+    await expectVideo(page);
+    await toolbarClick(page, 'btn-terminal');
+    await expect(panel).toHaveClass(/full/);
+    await page.locator('#terminal-full').click();
+    await expect.poll(async () => Math.round((await panel.boundingBox()).height)).toBeGreaterThan(before + 100);
+    await expect.poll(async () => (await panel.boundingBox()).height).toBeLessThan(viewport.height - 40);
+  });
+
   it('is not offered to guests', async ({ page, host }) => {
     const { url } = JSON.parse(host.cli('link', '--json'));
     await page.goto(url.replace(/^https?:\/\/[^/]+/, host.base));
