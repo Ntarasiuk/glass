@@ -188,10 +188,9 @@ export async function stats(page) {
   };
 }
 
-/** Clicks a toolbar button, waking the tucked toolbar first (a real pointer would). */
+/** Clicks a toolbar button (showing the toolbar first if it was hidden). */
 export async function toolbarClick(page, id) {
-  await page.locator('#toolbar').hover();
-  await expect(page.locator('#toolbar')).not.toHaveClass(/idle|waking/);
+  if (await page.locator('#toolbar-show').isVisible()) await page.locator('#toolbar-show').click();
   await page.locator(`#${id}`).click();
 }
 

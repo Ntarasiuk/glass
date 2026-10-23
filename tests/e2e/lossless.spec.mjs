@@ -26,7 +26,6 @@ it('a still screen arrives losslessly with sharp text, and only the changed part
   await page.waitForTimeout(1500);
   expect(refreshes(host), 'none without sharp text').toEqual([]);
 
-  await page.mouse.move(640, 10); // the toolbar tucked itself away while we waited
   await page.waitForTimeout(600);
   await pickMenuItem(page, 'btn-displays', 'Sharp text');
   await expect.poll(() => refreshes(host).length, { timeout: 15_000 }).toBeGreaterThan(0);

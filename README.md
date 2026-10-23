@@ -46,7 +46,7 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Feels local.** Hardware encode and decode, WebTransport datagrams, no buffering.
 - **Just a browser.** iPad, iPhone, Mac, Windows or Linux. Add it to the Home Screen for a fullscreen app.
 - **Full control.** Mouse, trackpad, keyboard, touch and pinch to zoom. ⌘Tab works on iPad. Unlock a locked Mac from the lock screen.
-- **Every display.** Switch screens, or show them all side by side, arranged like your desk.
+- **Every display.** Switch screens from live previews along the bottom, or show them all side by side, arranged like your desk.
 - **Every machine.** All your computers in one menu; switch without leaving the page.
 - **Sound, clipboard, files.** System audio, copy and paste both ways, and direct file transfer.
 - **From anywhere.** `glass link --anywhere` makes a one-time link that connects any browser straight to your computer over WebRTC: end-to-end encrypted, no ports opened, no Tailscale needed on the viewer.

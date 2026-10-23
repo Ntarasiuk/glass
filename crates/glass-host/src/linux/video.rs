@@ -49,7 +49,13 @@ struct Monitor {
     latest: Mutex<Option<Arc<crate::lossless::RawFrame>>>,
     /// Bumped with each new captured picture.
     generation: std::sync::atomic::AtomicU64,
+    /// A small picture for display previews, refreshed while viewers want them.
+    thumb: Mutex<Option<(std::time::Instant, Arc<crate::lossless::RawFrame>)>>,
 }
+
+/// Display previews are wanted until then (each request extends it).
+static THUMBS_UNTIL: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+const THUMB_EVERY: Duration = Duration::from_secs(1);
 
 /// Lossless refreshes wanted (sharp text): keep a BGRA copy of each new picture.
 static FULL_COLOUR: AtomicBool = AtomicBool::new(false);
@@ -265,6 +271,7 @@ impl Video {
                 }),
                 slot: AtomicI32::new(-1),
                 latest: Mutex::new(None),
+                thumb: Mutex::new(None),
                 generation: std::sync::atomic::AtomicU64::new(0),
                 keyframe: AtomicBool::new(true),
                 bitrate: std::sync::atomic::AtomicU32::new(self.config.bitrate as u32),
@@ -321,6 +328,22 @@ fn encode_loop(
         let has_fresh = fresh.is_some();
         if let Some(f) = fresh {
             last = Some(f);
+        }
+        // Previews cover every monitor, shown or not.
+        if has_fresh
+            && THUMBS_UNTIL.lock().unwrap().is_some_and(|t| t > std::time::Instant::now())
+            && monitor.thumb.lock().unwrap().as_ref().is_none_or(|(at, _)| at.elapsed() >= THUMB_EVERY)
+            && let Some((frame, _)) = last.as_ref()
+            && let Some(small) = crate::thumbs::downscale(
+                &frame.data,
+                frame.width,
+                frame.height,
+                frame.stride,
+                matches!(frame.format, PixelFormat::Rgbx),
+                crate::thumbs::MAX,
+            )
+        {
+            *monitor.thumb.lock().unwrap() = Some((std::time::Instant::now(), Arc::new(small)));
         }
         let slot = monitor.slot.load(Ordering::Relaxed);
         if slot < 0 {
@@ -593,6 +616,19 @@ impl VideoSource for Video {
                 *m.latest.lock().unwrap() = None;
             }
         }
+    }
+    fn thumbnail(&self, id: u32) -> Option<crate::lossless::RawFrame> {
+        *THUMBS_UNTIL.lock().unwrap() = Some(std::time::Instant::now() + Duration::from_secs(10));
+        let monitors = self.monitors.lock().unwrap();
+        let m = monitors.as_ref()?.get(id as usize)?;
+        let thumb = m.thumb.lock().unwrap();
+        let (_, frame) = thumb.as_ref()?;
+        Some(crate::lossless::RawFrame {
+            width: frame.width,
+            height: frame.height,
+            bgra: frame.bgra.clone(),
+            capture_us: 0,
+        })
     }
     fn frame_generation(&self, stream: u8) -> Option<u64> {
         let monitors = self.monitors.lock().unwrap();

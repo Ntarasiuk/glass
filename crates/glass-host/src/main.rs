@@ -35,6 +35,7 @@ mod soft_encode;
 mod status;
 mod tailscale;
 mod testmode;
+mod thumbs;
 mod update;
 mod viewers;
 

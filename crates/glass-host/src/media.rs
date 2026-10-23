@@ -98,6 +98,11 @@ pub trait VideoSource: Send + Sync {
     fn frame_generation(&self, _stream: u8) -> Option<u64> {
         None
     }
+    /// A small picture of display `id` (by `DisplayInfo::id`), shown or not, for the viewer's
+    /// display previews. May block. `None` when there's none (yet).
+    fn thumbnail(&self, _id: u32) -> Option<crate::lossless::RawFrame> {
+        None
+    }
     /// Capture in full colour (BGRA), so `raw_frame` has pictures to send losslessly.
     fn set_full_colour(&self, _on: bool) {}
     /// Can this source provide raw frames at all?

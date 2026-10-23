@@ -639,6 +639,8 @@ async fn control(
     );
     let _sharp = crate::sharp::joined(session_id, codecs.iter().any(|c| c == "hevc-rext"));
     let mut sharp_on = false;
+    let thumbs_busy = Arc::new(AtomicBool::new(false));
+    let thumbs_sent = Arc::new(std::sync::Mutex::new(crate::thumbs::Sent::default()));
     // Sharp text's lossless pictures of a still screen; <video> (RTP) viewers can't show them.
     let rtp_viewer = ctx.relayed.as_ref().is_some_and(|r| r.rtp_video);
     let lossless_reset = Arc::new(AtomicBool::new(false));
@@ -924,6 +926,32 @@ async fn control(
             ClientMsg::Privacy { on } => {
                 if let Err(e) = crate::privacy::set_forced(on) {
                     refuse(&format!("{e:#}"));
+                }
+            }
+            ClientMsg::Thumbs => {
+                // One at a time per viewer; a request while one is running is dropped.
+                if !thumbs_busy.swap(true, Ordering::AcqRel) {
+                    let shared = shared.clone();
+                    let tx = ctx.ctl_tx.clone();
+                    let busy = thumbs_busy.clone();
+                    let sent = thumbs_sent.clone();
+                    tokio::spawn(async move {
+                        let pictures = tokio::task::spawn_blocking(move || {
+                            let displays = shared.video.displays().unwrap_or_default();
+                            displays
+                                .iter()
+                                .filter_map(|d| {
+                                    let frame = shared.video.thumbnail(d.id)?;
+                                    Some((d.id, crate::thumbs::png(&frame).ok()?))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .await
+                        .unwrap_or_default();
+                        let thumbs = sent.lock().unwrap().changed(pictures);
+                        let _ = tx.send(ServerMsg::Thumbs { thumbs });
+                        busy.store(false, Ordering::Release);
+                    });
                 }
             }
             ClientMsg::ListWindows => {

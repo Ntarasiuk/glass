@@ -344,6 +344,11 @@ impl VideoSource for Video {
             info!("capture colour: {}", if on { "BGRA (lossless refresh)" } else { "4:2:0" });
         }
     }
+    fn thumbnail(&self, id: u32) -> Option<crate::lossless::RawFrame> {
+        capture::screenshot(id, crate::thumbs::MAX)
+            .inspect_err(|e| tracing::debug!("preview of display {id}: {e:#}"))
+            .ok()
+    }
     fn frame_generation(&self, stream: u8) -> Option<u64> {
         let streams = self.streams.lock().unwrap();
         streams.get(stream as usize).map(|s| s.capture.generation())

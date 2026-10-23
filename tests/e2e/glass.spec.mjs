@@ -396,34 +396,32 @@ test.describe('input', () => {
     }
   });
 
-  it('touch: tapping the tucked toolbar handle wakes it without touching the remote screen', async ({ page, host }) => {
+  it('stays put until hidden, comes back from its tab, and remembers', async ({ page, host }) => {
     await open(page, host);
-    await touch(page, 0, [{ type: 'pointerdown', fx: 0.9, fy: 0.9 }, { type: 'pointerup', fx: 0.9, fy: 0.9 }]);
-    await expect(page.locator('#toolbar')).toHaveClass(/idle/, { timeout: 6000 });
-    await host.clearInput();
-    // Just under the tucked toolbar, where the grab handle hangs.
-    const hit = await page.evaluate(() => {
-      const r = document.getElementById('toolbar').getBoundingClientRect();
-      const x = r.left + r.width / 2;
-      const y = r.bottom + 14;
-      const target = document.elementFromPoint(x, y);
-      for (const type of ['pointerdown', 'pointerup', 'click']) {
-        target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: 'touch', pointerId: 101, clientX: x, clientY: y }));
-      }
-      return target.id;
-    });
-    expect(hit).toBe('toolbar');
-    await expect(page.locator('#toolbar')).not.toHaveClass(/idle/);
-    // While it slides in, a second tap can't land on a button passing under the finger...
-    const pressable = () => page.evaluate(() => getComputedStyle(document.getElementById('btn-download')).pointerEvents !== 'none');
-    expect(await pressable()).toBe(false);
-    // ...and once it's in place, buttons work.
-    await expect.poll(pressable).toBe(true);
-    await expect(page.locator('.panel:not(.hidden)')).toHaveCount(0);
-    await page.waitForTimeout(300);
-    expect((await host.input('down')).events).toHaveLength(0);
-  });
+    const toolbar = page.locator('#toolbar');
+    const tab = page.locator('#toolbar-show');
+    // No hiding by itself.
+    await page.waitForTimeout(4000);
+    await expect(toolbar).not.toHaveClass(/tucked/);
+    await expect(tab).toBeHidden();
 
+    await page.locator('#btn-hide-toolbar').click();
+    await expect(toolbar).toHaveClass(/tucked/);
+    await expect(tab).toBeVisible();
+    // Its buttons are out of reach while hidden.
+    expect(await page.evaluate(() => document.getElementById('toolbar').inert)).toBe(true);
+    await page.reload();
+    await expectVideo(page);
+    await expect(toolbar).toHaveClass(/tucked/);
+
+    await host.clearInput();
+    await tab.click();
+    await expect(toolbar).not.toHaveClass(/tucked/);
+    await expect(tab).toBeHidden();
+    // The tap went to the tab, not the remote screen.
+    expect((await host.input()).events.filter((e) => e.t === 'down')).toHaveLength(0);
+    expect(await page.evaluate(() => localStorage.getItem('glass.toolbarHidden'))).toBe('0');
+  });
   it('touch: tap clicks, long press right-clicks, two fingers scroll', async ({ page, host }) => {
     await open(page, host);
     await host.clearInput();

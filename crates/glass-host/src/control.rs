@@ -56,6 +56,8 @@ pub enum ClientMsg {
     Privacy { on: bool },
     /// The windows that can be streamed on their own.
     ListWindows,
+    /// Previews of every display (answered with `thumbs`, only the ones that changed).
+    Thumbs,
     /// Stream just this window (from `windows`).
     SelectWindow { id: u32 },
     /// A drawing on the screen everyone sees (opaque to the host, rebroadcast as is).
@@ -137,6 +139,8 @@ pub enum ServerMsg {
         text: String,
     },
     Windows { windows: Vec<crate::media::WindowInfo> },
+    /// Display previews that changed since this viewer's last `thumbs` request.
+    Thumbs { thumbs: Vec<crate::thumbs::Thumb> },
     Annotate { sender: u64, stroke: serde_json::Value },
     AnnotateClear { sender: u64 },
     Term(crate::terminal::ServerTerm),

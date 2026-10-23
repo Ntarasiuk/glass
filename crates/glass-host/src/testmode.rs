@@ -211,6 +211,14 @@ impl VideoSource for TestVideo {
         FULL_COLOUR.store(on, Ordering::Relaxed);
     }
 
+    fn thumbnail(&self, id: u32) -> Option<crate::lossless::RawFrame> {
+        let index = self.sources[..DISPLAYS].iter().position(|d| d.id == id)?;
+        let d = &self.sources[index];
+        let (w, h) = crate::thumbs::fit(d.width as usize, d.height as usize, crate::thumbs::MAX);
+        let frame = render(index, w, h, 0);
+        Some(crate::lossless::RawFrame { width: w, height: h, bgra: frame.data, capture_us: 0 })
+    }
+
     fn frame_generation(&self, stream: u8) -> Option<u64> {
         let d = self.source_of(stream)?;
         LATEST.lock().unwrap().get(d).map(|(g, _)| *g)
