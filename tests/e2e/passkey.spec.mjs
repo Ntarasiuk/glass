@@ -52,7 +52,12 @@ it('a passkey link registers a passkey, then needs it to sign in again', async (
   expect(pass).toBeTruthy();
   const thiefContext = await browser.newContext();
   const thief = await thiefContext.newPage();
-  await addAuthenticator(thief); // a passkey sheet, but not with that passkey on it
+  // Without that passkey the browser's sheet has nothing to offer. Answer as it would,
+  // in the page: a real lookup falls through to the system's own passkeys (on a Mac, a
+  // Keychain access prompt for whatever app launched the tests).
+  await thief.addInitScript(() => {
+    navigator.credentials.get = () => Promise.reject(new DOMException('no such passkey', 'NotAllowedError'));
+  });
   await thief.goto(`${host.base}/config.json`);
   await thief.evaluate((p) => localStorage.setItem('glass.pass', p), pass);
   await thief.goto(`${host.base}/`);
