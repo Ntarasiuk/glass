@@ -37,6 +37,8 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static DROP_FRAMES: AtomicU32 = AtomicU32::new(0);
 /// Corrupt the next frame after its checksum is computed.
 static CORRUPT_NEXT: AtomicBool = AtomicBool::new(false);
+/// Sessions ignore what viewers send as datagrams (pings included): a page gone quiet.
+static DEAF: AtomicBool = AtomicBool::new(false);
 /// Self-update requests, readable at /test/updates.
 static UPDATES: AtomicU32 = AtomicU32::new(0);
 
@@ -115,6 +117,10 @@ pub fn take_drop() -> bool {
 }
 
 /// Server hook: true if this frame should be corrupted in flight.
+pub fn deaf() -> bool {
+    enabled() && DEAF.load(Ordering::Relaxed)
+}
+
 pub fn take_corrupt() -> bool {
     enabled() && CORRUPT_NEXT.swap(false, Ordering::Relaxed)
 }
@@ -589,6 +595,10 @@ pub fn routes(events: broadcast::Sender<ServerMsg>, downloads: PathBuf) -> axum:
             post(|Query(q): Query<PauseQuery>| async move { PAUSED.store(q.on, Ordering::Relaxed) }),
         )
         .route("/test/corrupt", post(|| async { CORRUPT_NEXT.store(true, Ordering::Relaxed) }))
+        .route(
+            "/test/deaf",
+            post(|Query(q): Query<PauseQuery>| async move { DEAF.store(q.on, Ordering::Relaxed) }),
+        )
         .route(
             "/test/downloads",
             get(move || {

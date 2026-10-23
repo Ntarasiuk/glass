@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use axum::Json;
 use axum::http::{HeaderValue, header};
 use axum::routing::{get, post};
@@ -225,9 +225,20 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
     // When this client last had a keyframe request honoured: [all streams, stream 0, …].
     let mut last_keyframe_request = [None::<std::time::Instant>; MAX_STREAMS + 1];
 
+    // The page pings every 500 ms; a session that stops hearing from it is a page that's
+    // gone (Safari can keep a dead page's connection alive), or one suspended in the
+    // background, which reconnects when it's back.
+    let mut last_heard = std::time::Instant::now();
+    let mut quiet_check = tokio::time::interval(QUIET_CHECK);
+
     let result: Result<()> = async {
         loop {
             tokio::select! {
+                _ = quiet_check.tick() => {
+                    if last_heard.elapsed() > QUIET_LIMIT {
+                        bail!("viewer went quiet for {}s", QUIET_LIMIT.as_secs());
+                    }
+                }
                 frame = frames.recv() => {
                     let frame = match frame {
                         Ok(f) => f,
@@ -265,6 +276,10 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                 }
                 dgram = conn.receive_datagram() => {
                     let dgram = dgram?;
+                    if crate::testmode::deaf() {
+                        continue;
+                    }
+                    last_heard = std::time::Instant::now();
                     match dgram.first() {
                         Some(&KIND_PING) => {
                             if let Some(pong) = glass_proto::pong(&dgram, now_us()) {
@@ -1251,6 +1266,9 @@ const GUEST_RECHECK: Duration = Duration::from_secs(10);
 
 /// A client's keyframe requests are honoured at most this often (per stream).
 const KEYFRAME_REQUEST_SPACING: Duration = Duration::from_millis(500);
+/// A session that hasn't heard from its page for this long is ended.
+const QUIET_LIMIT: Duration = Duration::from_secs(15);
+const QUIET_CHECK: Duration = Duration::from_secs(3);
 
 const AUTH_MAX_FAILURES: u32 = 10;
 const AUTH_WINDOW: Duration = Duration::from_secs(600);

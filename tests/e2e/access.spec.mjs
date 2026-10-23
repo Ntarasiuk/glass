@@ -150,6 +150,20 @@ test.describe('the host CLI', () => {
     expect(host.cli('config')).toContain('ask-guests');
   });
 
+  it('drops a viewer whose page went quiet but left its connection open', async ({ page, host }) => {
+    await page.goto(host.url());
+    await expectVideo(page);
+    const viewers = () => JSON.parse(host.cli('viewers', '--json')).viewers.length;
+    expect(viewers()).toBe(1);
+    // The host stops hearing the page's pings while the connection itself stays up, as
+    // when Safari keeps a reloaded page's connection open.
+    await host.post('/test/deaf?on=true');
+    await expect.poll(viewers, { timeout: 30_000, intervals: [1000] }).toBe(0);
+    await host.post('/test/deaf?on=false');
+    // The page reconnects by itself.
+    await expect.poll(viewers, { timeout: 30_000, intervals: [1000] }).toBe(1);
+  });
+
   it('wakes a machine by MAC address', async ({ host }) => {
     expect(host.cli('wake', 'aa:bb:cc:dd:ee:ff')).toContain('aa:bb:cc:dd:ee:ff');
   });

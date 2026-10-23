@@ -1161,3 +1161,7 @@ document.addEventListener('visibilitychange', () => {
   else pauseTimer = setTimeout(pause, PAUSE_HIDDEN_AFTER_MS);
 });
 addEventListener('online', () => worker.postMessage({ type: 'wake' }));
+// Leaving (a reload included): end the session now. Safari can keep a dead page's
+// connection open otherwise, and the host would list this device twice.
+addEventListener('pagehide', () => worker.postMessage({ type: 'leave' }));
+addEventListener('pageshow', (e) => e.persisted && worker.postMessage({ type: 'wake' }));
