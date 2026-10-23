@@ -288,6 +288,15 @@
     #chat-panel .chat-form input { flex: 1; min-width: 0; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: rgb(0 0 0 / 0.35); color: var(--text); font: inherit; -webkit-user-select: text; user-select: text; }
     #chat-panel .chat-form button { width: auto; padding: 8px 12px; background: var(--accent); color: var(--accent-ink); font-weight: 650; justify-content: center; }
     #chat-panel .chat-form button:hover { background: var(--accent); filter: brightness(1.08); }
+    #shortcut-bar {
+      position: fixed; left: 50%; bottom: max(10px, env(safe-area-inset-bottom)); transform: translateX(-50%);
+      display: flex; gap: 2px; padding: 4px; border-radius: var(--radius); max-width: calc(100vw - 20px); overflow-x: auto;
+    }
+    #shortcut-bar button {
+      flex: none; min-width: 44px; height: 38px; padding: 0 10px; border: 0; border-radius: var(--radius-sm);
+      background: transparent; color: var(--text); font: 600 14px var(--font); cursor: pointer;
+    }
+    #shortcut-bar button:active { background: var(--surface-active); }
   </style>
 </head>
 <body>

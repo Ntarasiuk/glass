@@ -160,6 +160,11 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
         onChange(on);
       },
     });
+    // Set from outside (a machine's keyboard profile) without calling back.
+    item.set = (v) => {
+      on = v;
+      item.setAttribute('aria-checked', String(on));
+    };
     return item;
   }
   const pcItem = toggleItem('PC keyboard', 'Ctrl → ⌘, Super → ⌃', pcKeyboard, onPcKeyboard);
@@ -174,6 +179,10 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       onSwapCmdOption(swapOn);
     },
   });
+  swapItem.set = (v) => {
+    swapOn = v;
+    swapItem.setAttribute('aria-checked', String(swapOn));
+  };
   swapItem.title = 'Pair with iPad Settings › General › Keyboard › Hardware Keyboard › Modifier Keys: Command → Option, Option → Command. Lets ⌘Tab, ⌘Space and ⌘H reach the Mac.';
   const note = document.createElement('p');
   note.className = 'note';
@@ -239,13 +248,41 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     addEventListener('keydown', onKey, true);
     addEventListener('keyup', swallowUp, true);
   }
+  // A bar of shortcut buttons along the bottom, for touch screens without a keyboard.
+  const BAR_KEY = 'glass.shortcutBar';
+  let barOn = storageGet(BAR_KEY) === '1';
+  const bar = document.createElement('div');
+  bar.id = 'shortcut-bar';
+  bar.className = 'glass hidden';
+  bar.setAttribute('role', 'toolbar');
+  bar.setAttribute('aria-label', 'Shortcut bar');
+  document.body.append(bar);
+  const barItem = toggleItem('Shortcut bar', 'buttons along the bottom', barOn, (on) => {
+    barOn = on;
+    storageSet(BAR_KEY, on ? '1' : '0');
+    renderBar();
+  });
+  function renderBar() {
+    bar.classList.toggle('hidden', !barOn || $('btn-shortcuts').classList.contains('hidden'));
+    bar.replaceChildren(...[...shortcuts, ...custom].map((sc) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = sc.keysLabel;
+      b.title = sc.label;
+      b.addEventListener('pointerdown', (e) => e.preventDefault()); // keep keyboard focus
+      b.addEventListener('click', (e) => { e.preventDefault(); onShortcut(sc); });
+      return b;
+    }));
+  }
   function renderShortcuts() {
+    renderBar();
     const add = menuItem(recording ? 'Press a shortcut…' : 'Add shortcut…', recording ? 'Esc to cancel' : '', { onSelect: addShortcut });
     menus.shortcuts.panel.replaceChildren(
       pcItem,
       ctrlItem,
       swapItem,
       note,
+      barItem,
       divider,
       ...shortcuts.map(shortcutItem),
       ...custom.map(customRow),
@@ -508,6 +545,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       $('btn-download').classList.toggle('hidden', !files);
       $('btn-keyboard').classList.toggle('hidden', !input);
       if (!input) $('btn-shortcuts').classList.add('hidden');
+      renderBar();
     },
     /** Only the owner can reshape the host's display (guests get an error). */
     setCanFit(on) {
@@ -544,6 +582,13 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     /** The ⌘ menu (Mac shortcuts and key remaps) only applies to Mac hosts. */
     setHostOs(os) {
       $('btn-shortcuts').classList.toggle('hidden', os !== 'macos');
+      renderBar();
+    },
+    /** Shows this machine's keyboard remaps in the menu. */
+    setKeyboardProfile({ pc, ctrlAsCmd, swap }) {
+      pcItem.set(pc);
+      ctrlItem.set(ctrlAsCmd);
+      swapItem.set(swap);
     },
     /** Ports the host forwards (owner, tailnet): each opens in a new tab at `urlFor(port)`. */
     setPorts(ports, urlFor) {

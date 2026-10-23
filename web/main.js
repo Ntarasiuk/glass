@@ -9,6 +9,7 @@ import { log, setLogSink } from './log.js';
 import { MAC_KEYCODES as K } from './keymap.js';
 import { hostIdFor, serveRtc } from './rtc.js';
 import { createChat } from './chat.js';
+import { loadProfile, saveProfile } from './keyboard-profile.js';
 import { answerPasskey } from './passkey.js';
 import { createTerminal } from './terminal.js';
 import { createAnnotator } from './annotate.js';
@@ -232,16 +233,22 @@ const ui = createUI({
   pcKeyboard,
   onPcKeyboard: (on) => {
     storage((s) => s.setItem(PC_KEYBOARD_KEY, on ? '1' : '0'));
+    keyboard.pc = on;
+    saveKeyboard();
     input.setPcKeyboard(on);
     log('info', `pc keyboard ${on ? 'on' : 'off'}`);
   },
   onCtrlAsCmd: (on) => {
     storage((s) => s.setItem(CTRL_AS_CMD_KEY, on ? '1' : '0'));
+    keyboard.ctrlAsCmd = on;
+    saveKeyboard();
     input.setCtrlAsCmd(on);
     log('info', `ctrl as cmd ${on ? 'on' : 'off'}`);
   },
   onSwapCmdOption: (on) => {
     storage((s) => s.setItem(SWAP_KEY, on ? '1' : '0'));
+    keyboard.swap = on;
+    saveKeyboard();
     input.setSwapCmdOption(on);
     log('info', `swap cmd/option ${on ? 'on' : 'off'}`);
   },
@@ -284,6 +291,22 @@ let signedInToken = token;
 function portUrl(port) {
   const path = `/fwd/${port}/`;
   return signedInToken ? `${location.origin}/fwd/auth?t=${encodeURIComponent(signedInToken)}&to=${encodeURIComponent(path)}` : `${location.origin}${path}`;
+}
+
+// This machine's keyboard remaps (each machine keeps its own).
+let keyboard = { pc: pcKeyboard, ctrlAsCmd, swap: storage((s) => s.getItem(SWAP_KEY)) === '1' };
+// Keyed by host and port, so two Glass hosts on one name (tests, or several on a box) differ.
+const profileId = () => (currentHost.includes(':') ? currentHost : `${currentHost}:${config.wtPort}`);
+function saveKeyboard() {
+  storage((s) => saveProfile((k, v) => s.setItem(k, v), profileId(), keyboard));
+}
+function applyKeyboard(hostOs) {
+  const p = storage((s) => loadProfile((k) => s.getItem(k), profileId(), { fallback: keyboard, hostOs, isPC })) ?? keyboard;
+  keyboard = { pc: p.pc, ctrlAsCmd: p.ctrlAsCmd, swap: p.swap };
+  input.setPcKeyboard(keyboard.pc);
+  input.setCtrlAsCmd(keyboard.ctrlAsCmd);
+  input.setSwapCmdOption(keyboard.swap);
+  ui.setKeyboardProfile(keyboard);
 }
 
 const chat = createChat({ onSend: (text) => control({ t: 'chat', text }), toast: (o) => ui.toast(o) });
@@ -505,6 +528,7 @@ function onControl(msg) {
       ui.setAudioAvailable(msg.audio);
       input.setHostOs(msg.host_os ?? 'macos');
       ui.setHostOs(msg.host_os ?? 'macos');
+      applyKeyboard(msg.host_os ?? 'macos');
       if (remoteKey) setLogSink((lines) => control({ t: 'log', lines }));
       guest = Boolean(msg.guest);
       // Remote: other machines aren't reachable from here, so no machines menu either.
