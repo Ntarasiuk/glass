@@ -28,6 +28,7 @@
   <meta name="theme-color" content="#07080a">
   <link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/fonts/hanken-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/glassy/glassy.css">
   <link rel="stylesheet" href="/style.css">
   <script type="application/ld+json">
 {
@@ -119,7 +120,7 @@
   <script type="speculationrules">{"prefetch":[{"where":{"href_matches":["/","/features","/docs"]},"eagerness":"moderate"}]}</script>
 </head>
 <body>
-  <header class="site wrap">
+  <header class="site wrap lg-glass-surface" data-lg-preset="header">
     <a class="brand" href="/"><img src="/icon.svg" alt="" width="26" height="26">Glass</a>
     <nav aria-label="Main">
       <a href="/features">Features</a>
@@ -133,7 +134,7 @@
       <div class="hero-copy">
         <h1>Your computer, in any browser.</h1>
         <p class="lede">Control your Mac or Linux computer from an iPad, phone or laptop with about 20&nbsp;ms of delay. Nothing to install on the device in your hands.</p>
-        <div class="command" data-copy="curl -fsSL glassdesk.dev | sh">
+        <div class="command lg-glass-surface" data-lg-preset="control" data-copy="curl -fsSL glassdesk.dev | sh">
           <code><span class="prompt" aria-hidden="true">$</span> curl -fsSL glassdesk.dev | sh</code>
           <button type="button" class="copy">Copy</button>
         </div>
@@ -143,9 +144,9 @@
     </section>
 
     <section class="pillars wrap" aria-label="Why Glass">
-      <div><h2>Feels local</h2><p>Built like a game stream, not a video call.</p></div>
-      <div><h2>Just a browser</h2><p>iPad, phone or laptop. Nothing to install.</p></div>
-      <div><h2>Private, from anywhere</h2><p>End-to-end encrypted, on your tailnet or with a one-time link.</p></div>
+      <div class="lg-glass-surface"><h2>Feels local</h2><p>Built like a game stream, not a video call.</p></div>
+      <div class="lg-glass-surface"><h2>Just a browser</h2><p>iPad, phone or laptop. Nothing to install.</p></div>
+      <div class="lg-glass-surface"><h2>Private, from anywhere</h2><p>End-to-end encrypted, on your tailnet or with a one-time link.</p></div>
       <a class="more" href="/features">Everything Glass does <span aria-hidden="true">→</span></a>
     </section>
   </main>

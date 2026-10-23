@@ -1,0 +1,587 @@
+/* Glassy UI glass material (MIT, https://github.com/alexburlis/glassyui, see LICENSE here).
+   Taken from registry/glassyui/styles/liquid.css at commit 403058a: the tokens, the glass
+   surface, its rim and specular ring, the noise layer and the Chromium lens hook. Only the
+   dark theme; the React-only parts (scenes, generated backgrounds, controls) are left out.
+   Unlayered site CSS overrides it, as Tailwind utilities do in the original. */
+
+@property --lg-fresnel {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: true;
+}
+
+@property --lg-specular {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: true;
+}
+
+@property --lg-refraction-scale {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: true;
+}
+
+@property --lg-refraction-blur {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: true;
+}
+
+@property --lg-refraction-scale-a {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: true;
+}
+
+@property --lg-refraction-scale-b {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: true;
+}
+
+@property --lg-refraction-blur-a {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: true;
+}
+
+@property --lg-refraction-blur-b {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: true;
+}
+
+@property --lg-refraction-dispersion {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: true;
+}
+
+@property --lg-rim-width-scale {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+@property --lg-highlight-strength {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: true;
+}
+
+@property --lg-rim-micro-mask {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+@property --lg-rim-corner-mask {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+@property --lg-debug-micro-scale {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+@property --lg-debug-corner-scale {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+@property --lg-debug-ca-scale {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+@property --lg-debug-ca-offset-scale {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+@property --lg-debug-rim-thickness {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+@property --lg-debug-rim-alpha-scale {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+@property --lg-debug-tangent-scale {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+@property --lg-debug-highlight-scale {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+@property --lg-filter-scale {
+  syntax: '<number>';
+  initial-value: 0.98;
+  inherits: true;
+}
+
+@property --lg-bg {
+  syntax: '<color>';
+  initial-value: #1c1c1e;
+  inherits: true;
+}
+
+@property --lg-panel {
+  syntax: '<color>';
+  initial-value: rgba(255, 255, 255, 0.04);
+  inherits: true;
+}
+
+@property --lg-press {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: true;
+}
+
+/* How high a button's glass rests above the page: 1 at rest, lower under a
+   pointer, nearly down while pressed. Its shadow and the light it lets
+   through follow the height; the glass itself stays put. Registered so the
+   height eases instead of jumping. */
+@property --lg-button-rise {
+  syntax: '<number>';
+  initial-value: 1;
+  inherits: true;
+}
+
+/* Where the light on a prominent button comes from: 0deg straight overhead. A
+   pointer swings it over to the top left. Registered so the light eases
+   across instead of jumping. */
+@property --lg-button-light-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: true;
+}
+
+/* Glass scene material. Registered so the renderer reads resolved values and
+   tints can transition; engines without @property resolve them by probe. */
+@property --lg-scene-tint {
+  syntax: '<color>';
+  initial-value: transparent;
+  inherits: false;
+}
+
+@property --lg-scene-frost {
+  syntax: '<length>';
+  initial-value: 0px;
+  inherits: false;
+}
+
+@property --lg-scene-merge {
+  syntax: '<length>';
+  initial-value: 0px;
+  inherits: true;
+}
+
+@property --lg-scene-flow {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: false;
+}
+
+@property --lg-scene-ink {
+  syntax: '<color>';
+  initial-value: transparent;
+  inherits: false;
+}
+
+@layer base {
+  :where(.lg-glass-surface > *) {
+    position: relative;
+    z-index: 2;
+  }
+}
+
+@layer components {
+  :root {
+    /* Core Physics: the frost every glass layer reads. Controls, alerts, badges and
+       dock labels cap the blur at their own size and follow the rest. */
+    --lg-glass-blur: 20px;
+    --lg-glass-sat: 1.8;
+    --lg-glass-contrast: 0.9;
+    --lg-glass-brightness: 1;
+    --lg-glass-alpha: 0.02;
+    --lg-bg: #1c1c1e;
+    --lg-panel: rgba(255, 255, 255, 0.04);
+    --lg-foreground: #f5f5f7;
+    --lg-muted-foreground: #e5e5ea;
+    --lg-border: rgba(245, 245, 247, 0.22);
+    --lg-control-surface: rgba(245, 245, 247, 0.08);
+    --lg-control-surface-hover: rgba(245, 245, 247, 0.14);
+    --lg-opaque-surface: #2c2c2e;
+    /* Floating layers keep 4.5:1 text contrast over a pure white or black backdrop. */
+    --lg-overlay-surface: rgb(44 44 46 / 0.78);
+    --lg-scrim: rgb(0 0 0 / 0.45);
+    /* Slabs are clear glass. The page shows through, dimmed by brightness so
+       muted text keeps 4.5:1 over pure white. The lens rim is dimmed less, but
+       never above what holds that bar at the very edge. */
+    --lg-slab-tint: rgb(28 28 30 / 0.3);
+    --lg-slab-brightness: 0.38;
+    --lg-slab-rim-brightness: 0.46;
+    --lg-slab-blur: 3;
+    /* The header is a clearer slab. Its links sit clear of the rim, so the rim
+       lets the page through undimmed, bent and split into colour, while the top
+       keeps muted links at 4.5:1 over pure white. */
+    --lg-header-tint: rgb(28 28 30 / 0.35);
+    --lg-header-brightness: 0.55;
+    --lg-header-rim-brightness: 1;
+    /* Familiar blue for actions; Vermilion belongs to the brand and artwork. */
+    --lg-accent: #0067d9;
+    --lg-accent-foreground: #ffffff;
+    /* Prominent buttons are blue glass. The tint recolours whatever lies
+       behind them and caps how bright it can get, so white text keeps 4.5:1
+       over any backdrop. The fill stands in where there is no glass: reduced
+       transparency, forced colours and a GlassScene. */
+    --lg-prominent-fill: #0067d9;
+    --lg-prominent-tint: grayscale(1) contrast(0.4) brightness(0.55) sepia(1) hue-rotate(174deg)
+      saturate(6) brightness(1.12);
+    --lg-prominent-glow: 178 214 255;
+    --lg-prominent-shade: 4 33 65;
+    /* Focus stays neutral so it does not read as a blue selected state. */
+    --lg-focus-ring: #b8b8be;
+    --lg-invalid: #ff7a8e;
+    --lg-disabled-opacity: 0.45;
+    --lg-motion-duration: 200ms;
+    /* Springy settle for presses, toggles and moving indicators */
+    --lg-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+    --lg-ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+    /* System controls: the resting track, the switch's on state and the white
+       knob that turns to clear glass under a finger */
+    --lg-track: rgb(118 118 128 / 0.36);
+    --lg-switch-on: #0067d9;
+    --lg-knob: #ffffff;
+    --lg-knob-shadow:
+      0 2px 6px rgb(28 28 30 / 0.16), 0 1px 2px rgb(28 28 30 / 0.1),
+      0 0 0 0.5px rgb(28 28 30 / 0.05);
+
+    /* The fixed light the CSS glass is lit by: where its highlight sits (0 to
+       1 across the glass), the direction it strikes the rims from, and its
+       strength. The glass never follows the pointer. */
+    --lg-light-x: 0.5;
+    --lg-light-y: 0.5;
+    --lg-light-dir-x: 0;
+    --lg-light-dir-y: 0;
+    --lg-light-level: 0;
+
+    /* Theme Colors */
+    --lg-ink-dark: #ffffff;
+    --lg-ink-light: #000000;
+    --lg-fresnel: 0;
+    --lg-specular: 0;
+    --lg-refraction-scale: 24;
+    --lg-refraction-blur: 16;
+
+    /* Edge reflex: strength of the lit bevel and of the shaded inner edge */
+    --lg-reflex-light: 0.42;
+    --lg-reflex-dark: 1.4;
+    --lg-button-reflex-light: 0.7;
+    --lg-sheen-alpha: 0.05;
+
+    /* Specular edge: a hairline ring brightest where the light enters (top
+       left), with a softer counter highlight on the far edge. The glow is the
+       light caught inside the glass thickness. */
+    --lg-rim-width: 1px;
+    --lg-specular-peak: 0.45;
+    --lg-specular-counter: 0.22;
+    --lg-specular-floor: 0.07;
+    --lg-glow-alpha: 0.06;
+
+    /* Lighting & Depth: outer shadows only, the glass edge lives in --lg-glass-rim */
+    --lg-shadow: 0 1px 2px rgb(0 0 0 / 0.18), 0 8px 24px -4px rgb(0 0 0 / 0.28);
+    --lg-shadow-raised: 0 2px 6px rgb(0 0 0 / 0.2), 0 30px 60px -18px rgb(0 0 0 / 0.55);
+    --lg-input-shadow: inset 0 1px 2px rgb(0 0 0 / 0.24), inset 0 -1px 0 rgb(255 255 255 / 0.06);
+
+    /* Chromium edge lens, read as plain numbers by useLensFilter:
+       depth scales the edge bend, blur is the frost radius in px. */
+    --lg-lens-depth: 1;
+    --lg-lens-blur: 6;
+    --lg-lens-saturation: 1.5;
+    --lg-lens-bevel: 0;
+    --lg-lens-thickness: 0;
+    --lg-lens-ior: 1.5;
+    --lg-lens-dispersion: 0.16;
+    --lg-lens-body-brightness: 1;
+    --lg-lens-rim-brightness: 1;
+    --lg-glass-thickness: 1;
+
+    --lg-noise-alpha: 0.03;
+
+    --lg-radius-md: 16px;
+    --lg-radius-lg: 24px;
+
+    /* Glass scene: shadow and highlight strength, and extra white in the tint. */
+    --lg-scene-shadow: 0.34;
+    --lg-scene-highlight: 1;
+    --lg-scene-tint-boost: 0;
+
+    --lg-noise-image: url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"%3E%3Cfilter id="grain"%3E%3CfeTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="3" stitchTiles="stitch"/%3E%3CfeColorMatrix type="saturate" values="0"/%3E%3C/filter%3E%3Crect width="120" height="120" filter="url(%23grain)" opacity="0.5"/%3E%3C/svg%3E');
+  }
+
+  .lg-glass-surface,
+  .lg-button {
+    --lg-rim-gain: calc(
+      var(--lg-rim-tangent-alpha, 1) * var(--lg-debug-tangent-scale, 1) *
+        var(--lg-rim-micro-mask, 1) * var(--lg-debug-micro-scale, 1) *
+        var(--lg-rim-corner-mask, 1) * var(--lg-debug-corner-scale, 1) *
+        var(--lg-debug-rim-alpha-scale, 1)
+    );
+    --lg-glass-rim:
+      inset 0 0 calc(12px * var(--lg-rim-scale)) calc(-4px * var(--lg-rim-scale))
+        rgb(255 255 255 / calc(var(--lg-glow-alpha) * var(--lg-rim-gain))),
+      inset calc(1.5px * var(--lg-rim-scale)) calc(2.5px * var(--lg-rim-scale))
+        calc(1px * var(--lg-rim-scale)) -2px rgb(255 255 255 / calc(var(--lg-rim-light) * 0.7)),
+      inset calc(-1.5px * var(--lg-rim-scale)) calc(-2px * var(--lg-rim-scale))
+        calc(1px * var(--lg-rim-scale)) -2px rgb(255 255 255 / calc(var(--lg-rim-light) * 0.55)),
+      inset -0.3px -1px 4px 0 rgb(0 0 0 / calc(var(--lg-rim-dark) * 0.1)),
+      inset -1.5px 2.5px 0 -2px rgb(0 0 0 / calc(var(--lg-rim-dark) * 0.14)),
+      inset 0 3px 4px -2px rgb(0 0 0 / calc(var(--lg-rim-dark) * 0.14)),
+      inset var(--lg-rim-ca-offset) 0 3px -1px rgb(80 160 255 / var(--lg-rim-ca-alpha)),
+      inset calc(-1 * var(--lg-rim-ca-offset)) 0 3px -1px rgb(255 90 150 / var(--lg-rim-ca-alpha)),
+      inset var(--lg-rim-offset-x) var(--lg-rim-offset-y) 3px rgb(255 255 255 / var(--lg-rim-alpha));
+    /* to bottom right keeps both highlights on the corners at any aspect
+       ratio; a fixed angle would smear them along a wide pill. */
+    --lg-specular-ring:
+      radial-gradient(
+        circle at calc(var(--lg-light-x) * 100%) calc(var(--lg-light-y) * 100%),
+        rgb(255 255 255 / calc(var(--lg-light-level) * 0.85)),
+        transparent 42%
+      ),
+      linear-gradient(
+        to bottom right,
+        rgb(255 255 255 / calc(var(--lg-specular-peak) * var(--lg-rim-gain))) 0%,
+        rgb(255 255 255 / calc(var(--lg-specular-floor) * var(--lg-rim-gain))) 32%,
+        rgb(255 255 255 / calc(var(--lg-specular-floor) * var(--lg-rim-gain))) 68%,
+        rgb(255 255 255 / calc(var(--lg-specular-counter) * var(--lg-rim-gain))) 100%
+      );
+  }
+
+  /* Glass Surface - Global Refraction */
+  .lg-glass-surface {
+    --lg-thickness: calc(1 + var(--lg-light-strength) * 0.35);
+    --lg-surface-blur-base: calc(var(--lg-glass-blur) * var(--lg-thickness));
+    --lg-surface-blur: var(--lg-surface-blur-base);
+    --lg-surface-alpha: var(--lg-glass-alpha);
+    --lg-surface-lift: 0;
+    --lg-light-strength: calc(var(--lg-light-level) * 0.45);
+    /* Bevel thickness (scaled by distance-aware factor) */
+    --lg-rim-scale: calc(var(--lg-rim-width-scale, 1) * var(--lg-debug-rim-thickness, 1));
+    --lg-rim-offset-max: 4.5px;
+    --lg-rim-offset-max-scaled: calc(var(--lg-rim-offset-max) * var(--lg-rim-scale));
+    --lg-rim-tangent-alpha: 1;
+    --lg-rim-micro-mask: 1;
+    --lg-rim-corner-mask: 1;
+    --lg-rim-ca-offset: calc(2px * var(--lg-debug-ca-offset-scale, 1));
+    --lg-rim-ca-alpha: calc(0.06 * var(--lg-debug-ca-scale, 1));
+    --lg-rim-offset-x: clamp(
+      calc(-1 * var(--lg-rim-offset-max-scaled)),
+      calc(
+        var(--lg-light-dir-x) * -1 * var(--lg-rim-offset-max-scaled) *
+          (0.6 + var(--lg-light-strength))
+      ),
+      var(--lg-rim-offset-max-scaled)
+    );
+    --lg-rim-offset-y: clamp(
+      calc(-1 * var(--lg-rim-offset-max-scaled)),
+      calc(
+        var(--lg-light-dir-y) * -1 * var(--lg-rim-offset-max-scaled) *
+          (0.6 + var(--lg-light-strength))
+      ),
+      var(--lg-rim-offset-max-scaled)
+    );
+    --lg-rim-light: calc(var(--lg-reflex-light) * var(--lg-rim-gain));
+    --lg-rim-dark: var(--lg-reflex-dark);
+    --lg-rim-alpha: calc(
+      (0.05 + var(--lg-light-strength) * 0.12 + var(--lg-fresnel, 0) * 0.35 + var(--lg-specular) *
+          0.32) *
+        var(--lg-rim-gain)
+    );
+
+    position: relative;
+    border-radius: var(--lg-panel-radius, var(--lg-radius-lg));
+    isolation: isolate;
+    background: transparent;
+    color: var(--lg-foreground);
+    transition:
+      box-shadow var(--lg-motion-duration) ease,
+      transform var(--lg-motion-duration) ease;
+    box-shadow: var(--lg-panel-elevation-shadow, var(--lg-shadow));
+    overflow: hidden;
+    contain: layout paint style;
+  }
+
+  .lg-glass-surface[data-lg-preset='subtle'] {
+    --lg-surface-blur: min(var(--lg-surface-blur-base), 8px);
+    --lg-surface-alpha: max(var(--lg-glass-alpha), 0.06);
+    --lg-rim-offset-max: 1.5px;
+  }
+
+  .lg-glass-surface[data-lg-preset='standard'] {
+    --lg-surface-blur: min(var(--lg-surface-blur-base), 14px);
+    --lg-surface-alpha: max(var(--lg-glass-alpha), 0.08);
+  }
+
+  .lg-glass-surface[data-lg-preset='prominent'] {
+    --lg-surface-blur: min(var(--lg-surface-blur-base), 18px);
+    --lg-surface-alpha: max(var(--lg-glass-alpha), 0.12);
+  }
+
+  .lg-glass-surface[data-lg-preset='control'] {
+    --lg-surface-blur: min(var(--lg-surface-blur-base), 10px);
+    --lg-surface-alpha: max(var(--lg-glass-alpha), 0.08);
+    --lg-rim-offset-max: 1.25px;
+  }
+
+  .lg-glass-surface[data-lg-preset='showcase'] {
+    --lg-surface-blur: min(var(--lg-surface-blur-base), 24px);
+  }
+
+
+
+  .lg-refraction-filter {
+    position: absolute;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+
+  /* Frost, bevel and sheen. Keep blend modes, masks, filters and opacity off
+     every ancestor of this layer: in Chromium each of them isolates the
+     backdrop and silently turns the blur into a no-op. The layer carries its
+     own rounded shape: Chromium drops the host's rounded clip from a backdrop
+     blur that sits inside another rounded overflow clip, such as a card. The
+     tint is background-color alone, so a consumer's before:bg-* utility
+     recolors the glass and keeps the sheen. */
+  .lg-glass-surface::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    pointer-events: none;
+
+    background-color: rgb(255 255 255 / calc(var(--lg-surface-alpha) + var(--lg-surface-lift)));
+    background-image:
+      radial-gradient(
+        circle at calc(var(--lg-light-x) * 100%) calc(var(--lg-light-y) * 100%),
+        rgb(
+          255 255 255 /
+            calc(
+              (var(--lg-light-strength) * 0.1 + var(--lg-highlight-strength) * 0.12) *
+                var(--lg-debug-highlight-scale, 1)
+            )
+        ),
+        transparent 65%
+      ),
+      linear-gradient(180deg, rgb(255 255 255 / var(--lg-sheen-alpha)), transparent 45%);
+    box-shadow: var(--lg-glass-rim);
+
+    -webkit-backdrop-filter: blur(var(--lg-surface-blur)) brightness(var(--lg-glass-brightness))
+      contrast(var(--lg-glass-contrast)) saturate(var(--lg-glass-sat));
+    backdrop-filter: blur(var(--lg-surface-blur)) brightness(var(--lg-glass-brightness))
+      contrast(var(--lg-glass-contrast)) saturate(var(--lg-glass-sat));
+  }
+
+  .lg-glass-surface[data-lg-generated-refraction='true']::before {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  /* Specular ring. The mask lives on this sibling of the frost layer, never
+     on an ancestor, so it cannot flatten the blur. */
+  .lg-glass-surface::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    padding: var(--lg-rim-width);
+    border-radius: inherit;
+    pointer-events: none;
+    background: var(--lg-specular-ring);
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
+  }
+
+  /* Chromium edge lens: one SVG filter frosts, bends and saturates the
+     backdrop. Its displacement map is measured from the padding box the
+     frost layer fills. */
+  .lg-glass-surface[data-lg-lens='active']::before {
+    backdrop-filter: var(--lg-lens-filter);
+  }
+
+  /* Glass inside glass samples a backdrop the outer layer already saturated,
+     so it adds no saturation of its own. */
+  .lg-glass-surface .lg-glass-surface {
+    --lg-glass-sat: 1;
+    --lg-lens-saturation: 1;
+  }
+
+  .lg-noise {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    border-radius: inherit;
+    pointer-events: none;
+    background-image: var(--lg-noise-image);
+    background-size: 128px 128px;
+    opacity: var(--lg-noise-alpha);
+    /* Static by default to avoid per-frame repaints; opt-in with data-lg-animate-noise="1" on <html>. */
+    animation: none;
+    will-change: auto;
+  }
+
+
+  /* Header: a clearer slab, as GlassHeader's .lg-header-glass. */
+  .lg-glass-surface[data-lg-preset='header'] {
+    --lg-panel-radius: 999px;
+    --lg-glass-blur: calc(var(--lg-slab-blur) * 1px);
+    --lg-lens-blur: var(--lg-slab-blur);
+    --lg-lens-body-brightness: var(--lg-header-brightness);
+    --lg-lens-rim-brightness: var(--lg-header-rim-brightness);
+    --lg-glass-contrast: 1;
+    --lg-glass-sat: 1.5;
+    --lg-glass-brightness: var(--lg-header-brightness);
+    --lg-panel-elevation-shadow:
+      0 2px 4px -2px rgb(52 62 84 / 0.18), 0 4px 14px -3px rgb(52 62 84 / 0.2);
+  }
+
+  .lg-glass-surface[data-lg-preset='header']::before {
+    background-color: var(--lg-header-tint);
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .lg-glass-surface {
+      --lg-glass-blur: 0px;
+      --lg-glass-alpha: 0.95;
+      --lg-lens-depth: 0;
+    }
+    .lg-glass-surface::before { background-color: #2c2c2e; }
+  }
+}

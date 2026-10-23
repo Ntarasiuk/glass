@@ -109,12 +109,13 @@ writeFileSync(
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/fonts/hanken-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/glassy/glassy.css">
   <link rel="stylesheet" href="/style.css">
   <script type="speculationrules">{"prefetch":[{"where":{"href_matches":["/","/features","/docs"]},"eagerness":"moderate"}]}</script>
 </head>
 <body>
   <div class="wrap">
-    <header class="site">
+    <header class="site lg-glass-surface" data-lg-preset="header">
       <a class="brand" href="/"><img src="/icon.svg" alt="" width="26" height="26">Glass</a>
       <nav class="site" aria-label="Main"><a href="/">Home</a><a href="/features">Features</a><a href="/docs.md">Markdown</a><a href="/llms.txt">llms.txt</a></nav>
     </header>
@@ -123,15 +124,17 @@ ${body}
     </main>
     <footer class="site"><span>Glass. A remote desktop for Mac and Linux.</span><nav aria-label="Footer"><a href="/">Home</a><a href="/features#feedback">Feedback</a></nav></footer>
   </div>
+  <script src="/site.js" type="module"></script>
 </body>
 </html>
 `,
 );
 
-// Home page: the release its SoftwareApplication describes, and the stylesheet inlined so
-// first paint needs only the HTML (about 5 KB compressed, one round trip).
+// Home page: the release its SoftwareApplication describes, and the stylesheets inlined so
+// first paint needs only the HTML (about 10 KB compressed, one round trip).
 const home = readFileSync('index.html', 'utf8')
   .replace(/"softwareVersion": "[^"]*"/, `"softwareVersion": "${version}"`)
+  .replace('<link rel="stylesheet" href="/glassy/glassy.css">', () => `<style>\n${readFileSync('public/glassy/glassy.css', 'utf8')}</style>`)
   .replace('<link rel="stylesheet" href="/style.css">', () => `<style>\n${readFileSync('public/style.css', 'utf8')}</style>`);
 if (!home.includes('<style>')) throw new Error('index.html: stylesheet link not found');
 writeFileSync('public/index.html', home);

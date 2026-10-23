@@ -1,4 +1,6 @@
-// Shared by the site's pages: copy buttons and the feedback form.
+// Shared by the site's pages: copy buttons, the feedback form and the glass.
+
+import { lens } from '/glassy/lens.js';
 
 for (const block of document.querySelectorAll('.command')) {
   const button = block.querySelector('.copy');
@@ -38,4 +40,13 @@ if (form) {
       status.textContent = err.message;
     }
   });
+}
+
+// Glass surfaces: Glassy UI's grain, and its edge lens where the browser can run it.
+for (const surface of document.querySelectorAll('.lg-glass-surface')) {
+  const noise = document.createElement('span');
+  noise.className = 'lg-noise';
+  noise.ariaHidden = 'true';
+  surface.prepend(noise);
+  lens(surface);
 }

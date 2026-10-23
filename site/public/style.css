@@ -44,8 +44,26 @@ p { text-wrap: pretty; }
 
 .wrap { width: min(var(--max), 100% - 40px); margin-inline: auto; }
 
+/* Ambient light behind the glass (public/glassy): fixed, so glass refracts it as the page scrolls, and
+   static, so it costs nothing at rest. The grid gives the refraction lines to bend. */
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    linear-gradient(rgb(255 255 255 / 0.075) 1px, transparent 1px) 0 0 / 56px 56px,
+    linear-gradient(90deg, rgb(255 255 255 / 0.075) 1px, transparent 1px) 0 0 / 56px 56px,
+    radial-gradient(34% 30% at 16% 8%, rgb(92 178 255 / 0.55), transparent 70%),
+    radial-gradient(30% 34% at 88% 26%, rgb(150 110 255 / 0.45), transparent 70%),
+    radial-gradient(30% 26% at 28% 74%, rgb(64 200 210 / 0.30), transparent 70%),
+    radial-gradient(34% 30% at 76% 82%, rgb(230 150 110 / 0.30), transparent 70%);
+  mask: radial-gradient(140% 110% at 50% 30%, #000 45%, transparent 100%);
+}
+
+
 /* Header */
-header.site { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 22px 0; }
+header.site {
+  position: sticky; top: 12px; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  margin-top: 14px; padding: 10px 22px 10px 16px; border-radius: 999px;
+}
 .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font: 700 19px var(--display); letter-spacing: -0.02em; text-decoration: none; }
 .brand:hover { color: var(--text); }
 header.site nav { display: flex; gap: 26px; font-size: 15px; }
@@ -63,13 +81,13 @@ header.site nav a:hover, footer.site a:hover { color: var(--text); }
 
 .command {
   display: flex; align-items: center; gap: 12px; margin-top: 30px; max-width: 520px;
-  padding: 8px 8px 8px 18px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--bg-raised);
+  padding: 8px 8px 8px 18px; border-radius: 18px;
 }
 .command code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: 15px; scrollbar-width: none; }
 .command code::-webkit-scrollbar { display: none; }
 .prompt { color: var(--text-faint); user-select: none; }
 .copy {
-  flex: none; padding: 9px 16px; border: 0; border-radius: 8px; cursor: pointer;
+  flex: none; padding: 9px 16px; border: 0; border-radius: 11px; cursor: pointer;
   background: var(--text); color: var(--bg); font: 600 14px var(--body);
   transition: background-color 140ms ease;
 }
@@ -83,8 +101,8 @@ header.site nav a:hover, footer.site a:hover { color: var(--text); }
 
 /* Three reasons, then the way to everything else */
 .pillars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px 40px; padding-top: 0; }
-.pillars div { padding-top: 18px; border-top: 1px solid var(--line); }
-.pillars h2 { font-size: 20px; letter-spacing: -0.015em; line-height: 1.2; }
+.pillars div { padding: 22px 24px 24px; border-radius: 22px; }
+.pillars h2 { margin: 0; font-size: 20px; letter-spacing: -0.015em; line-height: 1.2; }
 .pillars p { margin: 6px 0 0; font-size: 16px; }
 .more { grid-column: 1 / -1; justify-self: center; margin-top: 8px; font-weight: 600; text-decoration: none; }
 .more span { display: inline-block; transition: transform 160ms var(--ease-out); }
@@ -176,6 +194,7 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
 @media (max-width: 560px) {
   .features, .all-features .features { grid-template-columns: 1fr; }
   header.site nav { gap: 16px; font-size: 14px; }
+  header.site { padding-inline: 14px 18px; }
   .command { flex-direction: column; align-items: stretch; padding: 14px; }
   .copy { width: 100%; padding: 11px; }
   #feedback-form .row { flex-direction: column; }

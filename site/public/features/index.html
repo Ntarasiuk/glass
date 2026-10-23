@@ -11,6 +11,7 @@
   <meta name="theme-color" content="#07080a">
   <link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/fonts/hanken-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/glassy/glassy.css">
   <link rel="stylesheet" href="/style.css">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <meta property="og:type" content="website">
@@ -51,7 +52,7 @@
   <script type="speculationrules">{"prefetch":[{"where":{"href_matches":["/","/features","/docs"]},"eagerness":"moderate"}]}</script>
 </head>
 <body>
-  <header class="site wrap">
+  <header class="site wrap lg-glass-surface" data-lg-preset="header">
     <a class="brand" href="/"><img src="/icon.svg" alt="" width="26" height="26">Glass</a>
     <nav aria-label="Main">
       <a href="/features">Features</a>
@@ -95,7 +96,7 @@
         <h2 id="agent">Or let your agent do it.</h2>
         <p>Glass comes with a skill for AI agents. Ask Claude Code to <q>set up Glass on my Mac mini</q> and it finds the machine on your tailnet, installs Glass over SSH, and tells you exactly which switch to click on that screen. Later, just ask it for a link to your computer.</p>
       </div>
-      <div class="command" data-copy="mkdir -p ~/.claude/skills/glass && curl -fsSL https://glassdesk.dev/skill.md -o ~/.claude/skills/glass/SKILL.md">
+      <div class="command lg-glass-surface" data-lg-preset="control" data-copy="mkdir -p ~/.claude/skills/glass && curl -fsSL https://glassdesk.dev/skill.md -o ~/.claude/skills/glass/SKILL.md">
         <code><span class="prompt" aria-hidden="true">$</span> mkdir -p ~/.claude/skills/glass &amp;&amp; curl -fsSL https://glassdesk.dev/skill.md -o ~/.claude/skills/glass/SKILL.md</code>
         <button type="button" class="copy">Copy</button>
       </div>
