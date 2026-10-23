@@ -26,11 +26,11 @@ pub fn routes() -> axum::Router {
         )
 }
 
-const COOKIE: &str = "glass_fwd";
+pub(crate) const COOKIE: &str = "glass_fwd";
 
 /// The cookie value that proves the token: an HMAC of it, so the token itself never sits
 /// in a cookie. Changes when the token does (`glass token --reset` logs browsers out).
-fn cookie_value(token: &str) -> String {
+pub(crate) fn cookie_value(token: &str) -> String {
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, token.as_bytes());
     let tag = ring::hmac::sign(&key, b"glass port forwarding");
     tag.as_ref().iter().map(|b| format!("{b:02x}")).collect()
@@ -68,7 +68,16 @@ fn other_cookies(headers: &HeaderMap) -> Option<String> {
     (!rest.is_empty()).then(|| rest.join("; "))
 }
 
-async fn is_owner(peer: IpAddr, headers: &HeaderMap) -> bool {
+/// The computer's owner: an owner tailnet device, the access token as a bearer header,
+/// or the signed cookie `/fwd/auth` (or `/admin/auth`) sets. Shared by other owner-only
+/// HTTP routes.
+pub(crate) async fn is_owner(peer: IpAddr, headers: &HeaderMap) -> bool {
+    if let (Some(auth), Some(token)) = (headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()), token())
+        && let Some(given) = auth.strip_prefix("Bearer ")
+        && crate::control::token_matches(given.trim(), &token)
+    {
+        return true;
+    }
     if let (Some(given), Some(token)) = (cookie(headers), token())
         && crate::control::token_matches(&given, &cookie_value(&token))
     {
