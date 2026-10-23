@@ -6,7 +6,7 @@ const TOOLBAR_IDLE_MS = 3000;
 // Matches the slide-in transition in index.html (420 ms), plus a beat.
 const TOOLBAR_WAKE_MS = 450;
 
-export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -68,6 +68,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
   on('btn-upload', () => fileInput.click());
   on('btn-download', onRequestFiles);
   on('btn-audio', onAudio);
+  on('btn-mic', () => onMic?.());
   on('btn-fullscreen', onFullscreen);
   on('btn-stats', onToggleStats);
 
@@ -380,6 +381,12 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     },
     setAudioOn(on) {
       $('audio-waves').style.opacity = on ? '1' : '0.25';
+    },
+    setMicAvailable(available) {
+      $('btn-mic').classList.toggle('hidden', !available);
+    },
+    setMicOn(on) {
+      $('btn-mic').setAttribute('aria-pressed', String(on));
     },
   };
 }
