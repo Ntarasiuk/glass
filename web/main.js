@@ -184,6 +184,11 @@ const ui = createUI({
   onWakeMachine: (m) => control({ t: 'wake', dns: m.dns }),
   onSelectMachine: (m) => switchMachine(machineId(m), m.name),
   onSelectDisplay: (id) => control(id === 'all' ? { t: 'showAll' } : { t: 'selectDisplay', id }),
+  onListWindows: () => control({ t: 'listWindows' }),
+  onSelectWindow: (id) => {
+    streamedWindows.add(id);
+    control({ t: 'selectWindow', id });
+  },
   shortcuts: SHORTCUTS,
   swapCmdOption: storage((s) => s.getItem(SWAP_KEY)) === '1',
   ctrlAsCmd,
@@ -371,6 +376,9 @@ let codec = '';
 let statsCount = 0;
 let targetMbps;
 let displays = [];
+// Ids of windows (not displays) this viewer has seen or picked, so a streamed window never
+// shows up in the displays list.
+const streamedWindows = new Set();
 const transfers = new Map(); // id -> toast
 
 worker.onmessage = ({ data }) => {
@@ -460,6 +468,7 @@ function onControl(msg) {
       restarting = undefined;
       ui.setComputerControls({ isOwner: msg.perms ? msg.perms.owner : !guest, privacy: Boolean(msg.features?.privacy) });
       ui.setPrivacyOn(false);
+      ui.setWindowsAvailable(Boolean(msg.features?.windows));
       if (guest && resolutionMode.startsWith('fit:')) setResolution('auto');
       onLayout(msg.streams);
       queueViewport(true);
@@ -486,6 +495,10 @@ function onControl(msg) {
       break;
     case 'chat':
       if (msg.sender !== session) chat.receive(msg);
+      break;
+    case 'windows':
+      for (const w of msg.windows) streamedWindows.add(w.id);
+      ui.renderWindows(msg.windows);
       break;
     case 'pass':
       storage((s) => s.setItem(passKey, JSON.stringify({ pass: msg.pass, expires: msg.expires })));
@@ -746,7 +759,7 @@ function fitSizes() {
 }
 
 function onLayout(streams) {
-  for (const d of streams) if (!displays.some((x) => x.id === d.id)) displays.push(d);
+  for (const d of streams) if (!streamedWindows.has(d.id) && !displays.some((x) => x.id === d.id)) displays.push(d);
   // The host orders streams as arranged in macOS; lay them out the same way.
   screens.dataset.arrange = arrangement(streams);
   videoSizes.length = streams.length;

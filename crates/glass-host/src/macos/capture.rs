@@ -19,13 +19,13 @@ use objc2_core_video::CVImageBuffer;
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
-    SCStreamOutput, SCStreamOutputType,
+    SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 
 use super::audio::Packetizer;
 use super::clock::{cmtime_us, now_us};
 use super::encode::Encoder;
-pub use crate::media::DisplayInfo;
+pub use crate::media::{DisplayInfo, WindowInfo};
 
 /// kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ('420v'), the encoder's native input.
 const PIXEL_FORMAT_420V: u32 = u32::from_be_bytes(*b"420v");
@@ -239,8 +239,109 @@ pub struct Display {
 
 unsafe impl Send for Display {}
 
-/// All capturable displays, main display first. Sleeping displays are not listed.
-pub fn list_displays() -> Result<Vec<Display>> {
+/// A window to stream on its own (single-app streaming).
+pub struct Window {
+    pub sc: Retained<SCWindow>,
+    pub info: WindowInfo,
+}
+
+unsafe impl Send for Window {}
+
+impl Window {
+    /// The window as a stream: its pixel size, and its frame on the desktop.
+    pub fn stream_info(&self) -> DisplayInfo {
+        DisplayInfo {
+            id: self.info.id,
+            width: self.info.width,
+            height: self.info.height,
+            x: self.info.x,
+            y: self.info.y,
+            points_width: self.info.points_width,
+            points_height: self.info.points_height,
+            main: false,
+            builtin: false,
+        }
+    }
+}
+
+/// What a capture shows: a whole display, or one window.
+pub enum Source<'a> {
+    Display(&'a SCDisplay),
+    Window(&'a SCWindow),
+}
+
+/// Windows smaller than this (points) aren't worth listing: palettes, badges, menus.
+const MIN_WINDOW: f64 = 100.0;
+
+/// Windows that can be streamed on their own: on screen, titled, normal level, belonging to
+/// another app. Front to back.
+pub fn list_windows() -> Result<Vec<Window>> {
+    let content = shareable_content()?;
+    let own = std::process::id() as i32;
+    let displays: Vec<(objc2_core_foundation::CGRect, f64)> = unsafe { content.displays() }
+        .iter()
+        .map(|d| {
+            let id = unsafe { d.displayID() };
+            let b = CGDisplayBounds(id);
+            (b, CGDisplayPixelsWide(id) as f64 / b.size.width.max(1.0))
+        })
+        .collect();
+    let mut windows = Vec::new();
+    for sc in unsafe { content.windows() }.iter() {
+        let (frame, layer, on_screen) =
+            unsafe { (sc.frame(), sc.windowLayer(), sc.isOnScreen()) };
+        if layer != 0
+            || !on_screen
+            || frame.size.width < MIN_WINDOW
+            || frame.size.height < MIN_WINDOW
+        {
+            continue;
+        }
+        let Some(app) = (unsafe { sc.owningApplication() }) else {
+            continue;
+        };
+        if unsafe { app.processID() } == own {
+            continue;
+        }
+        let title = unsafe { sc.title() }
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let app_name = unsafe { app.applicationName() }.to_string();
+        if title.is_empty() || app_name.is_empty() {
+            continue;
+        }
+        // Pixels per point of the display the window is mostly on (Retina: 2).
+        let (cx, cy) = (
+            frame.origin.x + frame.size.width / 2.0,
+            frame.origin.y + frame.size.height / 2.0,
+        );
+        let scale = displays
+            .iter()
+            .find(|(b, _)| {
+                cx >= b.origin.x
+                    && cx < b.origin.x + b.size.width
+                    && cy >= b.origin.y
+                    && cy < b.origin.y + b.size.height
+            })
+            .or(displays.first())
+            .map_or(1.0, |(_, s)| *s);
+        let info = WindowInfo {
+            id: unsafe { sc.windowID() },
+            app: app_name,
+            title,
+            width: ((frame.size.width * scale) as usize) & !1,
+            height: ((frame.size.height * scale) as usize) & !1,
+            x: frame.origin.x,
+            y: frame.origin.y,
+            points_width: frame.size.width,
+            points_height: frame.size.height,
+        };
+        windows.push(Window { sc, info });
+    }
+    Ok(windows)
+}
+
+fn shareable_content() -> Result<Retained<SCShareableContent>> {
     let (tx, rx) = mpsc::channel();
     let handler = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
         let result = if content.is_null() {
@@ -254,10 +355,14 @@ pub fn list_displays() -> Result<Vec<Display>> {
         let _ = tx.send(result);
     });
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
-    let content = rx.recv()?.context(
+    rx.recv()?.context(
         "Screen Recording permission is required (System Settings → Privacy & Security)",
-    )?;
+    )
+}
 
+/// All capturable displays, main display first. Sleeping displays are not listed.
+pub fn list_displays() -> Result<Vec<Display>> {
+    let content = shareable_content()?;
     let mut displays: Vec<Display> = unsafe { content.displays() }
         .iter()
         .map(|sc| {
@@ -285,7 +390,7 @@ pub fn list_displays() -> Result<Vec<Display>> {
 }
 
 pub fn start(
-    display: &SCDisplay,
+    source: Source<'_>,
     width: usize,
     height: usize,
     fps: i32,
@@ -294,12 +399,23 @@ pub fn start(
     audio: Option<Arc<std::sync::Mutex<Packetizer>>>,
 ) -> Result<Capture> {
     let captures_audio = audio.is_some();
-    let filter = unsafe {
-        SCContentFilter::initWithDisplay_excludingWindows(
-            SCContentFilter::alloc(),
-            display,
-            &NSArray::new(),
-        )
+    let (filter, source_id) = match source {
+        Source::Display(display) => (
+            unsafe {
+                SCContentFilter::initWithDisplay_excludingWindows(
+                    SCContentFilter::alloc(),
+                    display,
+                    &NSArray::new(),
+                )
+            },
+            unsafe { display.displayID() },
+        ),
+        Source::Window(window) => (
+            unsafe {
+                SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), window)
+            },
+            unsafe { window.windowID() },
+        ),
     };
     let config = unsafe { SCStreamConfiguration::new() };
     unsafe {
@@ -331,7 +447,7 @@ pub fn start(
         tiny: Default::default(),
         queue: queue.clone(),
     });
-    let output = StreamOutput::new(state.clone(), audio, unsafe { display.displayID() });
+    let output = StreamOutput::new(state.clone(), audio, source_id);
     // Separate queue so audio never waits behind a frame being encoded.
     let audio_queue = DispatchQueue::new("glass.audio", DispatchQueueAttr::SERIAL);
     unsafe {

@@ -10,7 +10,7 @@ use tokio::sync::broadcast;
 use tracing::info;
 
 use super::audio::{AudioPackets, Packetizer};
-use super::capture::{self, Capture, Display, DisplayInfo};
+use super::capture::{self, Capture, Display, DisplayInfo, Source, Window};
 use super::encode::{EncodedFrame, Encoder};
 pub use crate::media::Layout;
 use crate::media::VideoSource;
@@ -38,6 +38,30 @@ struct Stream {
     activity: std::sync::atomic::AtomicU64,
     /// Encoded width (may be below native: dynamic resolution).
     width: usize,
+    /// A single window rather than a display (`display` then describes the window).
+    window: bool,
+}
+
+/// What a stream captures.
+enum Target<'a> {
+    Display(&'a Display),
+    Window(&'a Window),
+}
+
+impl Target<'_> {
+    fn info(&self) -> DisplayInfo {
+        match self {
+            Target::Display(d) => d.info.clone(),
+            Target::Window(w) => w.stream_info(),
+        }
+    }
+
+    fn source(&self) -> Source<'_> {
+        match self {
+            Target::Display(d) => Source::Display(&d.sc),
+            Target::Window(w) => Source::Window(&w.sc),
+        }
+    }
 }
 
 pub struct Video {
@@ -96,6 +120,16 @@ impl Video {
     /// Restarts capture with `layout`. Blocks on ScreenCaptureKit.
     pub fn set_layout(&self, layout: Layout) -> Result<Vec<DisplayInfo>> {
         let mut streams = self.streams.lock().unwrap();
+        if let Layout::Window(id) = layout {
+            let windows = capture::list_windows()?;
+            let window = windows
+                .iter()
+                .find(|w| w.info.id == id)
+                .context("that window is gone")?;
+            streams.clear();
+            streams.push(self.start(0, &Target::Window(window), Some(self.audio.clone()))?);
+            return Ok(streams.iter().map(|s| s.display.clone()).collect());
+        }
         let displays = capture::list_displays()?;
         let chosen: Vec<&Display> = match layout {
             Layout::Single(Some(id)) => {
@@ -107,7 +141,7 @@ impl Video {
                 ]
             }
             Layout::Single(None) => vec![&displays[0]],
-            Layout::Window(_) => anyhow::bail!("streaming one window isn't available yet"),
+            Layout::Window(_) => unreachable!("handled above"),
             Layout::All => {
                 // Match System Settings › Displays › Arrange: left to right, then top to bottom.
                 let mut all: Vec<&Display> = displays.iter().take(MAX_STREAMS).collect();
@@ -126,7 +160,7 @@ impl Video {
         for (index, display) in chosen.into_iter().enumerate() {
             // Only the first stream carries audio, so it isn't heard once per display.
             let audio = (index == 0).then(|| self.audio.clone());
-            streams.push(self.start(index as u8, display, audio)?);
+            streams.push(self.start(index as u8, &Target::Display(display), audio)?);
         }
         Ok(streams.iter().map(|s| s.display.clone()).collect())
     }
@@ -134,17 +168,18 @@ impl Video {
     fn start(
         &self,
         index: u8,
-        display: &Display,
+        target: &Target,
         audio: Option<Arc<Mutex<Packetizer>>>,
     ) -> Result<Stream> {
-        let (w, h) = (display.info.width as f64, display.info.height as f64);
+        let info = target.info();
+        let (w, h) = (info.width as f64, info.height as f64);
         let hevc = self.hevc.load(Ordering::Relaxed);
         let max_pixels = if hevc {
             MAX_HEVC_PIXELS
         } else {
             MAX_MACROBLOCKS * 256.0
         };
-        let target = self
+        let wanted = self
             .target_widths
             .lock()
             .unwrap()
@@ -155,7 +190,7 @@ impl Video {
             .config
             .scale
             .min((max_pixels / (w * h)).sqrt())
-            .min(target.map_or(1.0, |t| t as f64 / w));
+            .min(wanted.map_or(1.0, |t| t as f64 / w));
         let width = ((w * scale) as usize) & !1;
         let height = ((h * scale) as usize) & !1;
 
@@ -180,7 +215,7 @@ impl Video {
             encoder.apply_policy(self.bitrate.load(Ordering::Relaxed)),
         ));
         let capture = capture::start(
-            &display.sc,
+            target.source(),
             width,
             height,
             self.config.fps,
@@ -188,20 +223,23 @@ impl Video {
             fps.clone(),
             audio,
         )?;
-        let id = display.info.id;
+        let id = info.id;
+        let window = matches!(target, Target::Window(_));
         info!(
-            "stream {index}: display {id} at {width}x{height} @ {}fps ({})",
+            "stream {index}: {} {id} at {width}x{height} @ {}fps ({})",
+            if window { "window" } else { "display" },
             self.config.fps,
             if hevc { "HEVC" } else { "H.264" }
         );
         Ok(Stream {
             capture,
             encoder,
-            display: display.info.clone(),
+            display: info,
             keyframe,
             fps,
             activity: Default::default(),
             width,
+            window,
         })
     }
 
@@ -209,6 +247,13 @@ impl Video {
         Ok(capture::list_displays()?
             .into_iter()
             .map(|d| d.info)
+            .collect())
+    }
+
+    pub fn windows(&self) -> Result<Vec<crate::media::WindowInfo>> {
+        Ok(capture::list_windows()?
+            .into_iter()
+            .map(|w| w.info)
             .collect())
     }
 }
@@ -239,16 +284,29 @@ impl VideoSource for Video {
             return hevc;
         };
         let mut streams = self.streams.lock().unwrap();
+        let windows = if streams.iter().any(|s| s.window) {
+            capture::list_windows().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         for index in 0..streams.len() {
             let id = streams[index].display.id;
-            let Some(display) = displays.iter().find(|d| d.info.id == id) else {
-                continue;
+            let target = if streams[index].window {
+                match windows.iter().find(|w| w.info.id == id) {
+                    Some(w) => Target::Window(w),
+                    None => continue,
+                }
+            } else {
+                match displays.iter().find(|d| d.info.id == id) {
+                    Some(d) => Target::Display(d),
+                    None => continue,
+                }
             };
             let audio = (index == 0).then(|| self.audio.clone());
             // Stop the old one first so the stream never has two encoders feeding it.
             let old = std::mem::replace(
                 &mut streams[index],
-                match self.start(index as u8, display, audio) {
+                match self.start(index as u8, &target, audio) {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::warn!("switching stream {index} codec: {e:#}");
@@ -263,6 +321,12 @@ impl VideoSource for Video {
         info!("video codec: {}", if hevc { "HEVC" } else { "H.264" });
         hevc
     }
+    fn supports_windows(&self) -> bool {
+        true
+    }
+    fn windows(&self) -> Result<Vec<crate::media::WindowInfo>> {
+        Video::windows(self)
+    }
     /// `bps` is the total for all displays (not each): shared out by `rebalance`.
     fn set_bitrate(&self, bps: u32) {
         self.bitrate.store(bps, Ordering::Relaxed);
@@ -276,6 +340,11 @@ impl VideoSource for Video {
             return;
         };
         let mut streams = self.streams.lock().unwrap();
+        let windows = if streams.iter().any(|s| s.window) {
+            capture::list_windows().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         for (index, want) in widths.iter().enumerate() {
             let Some(current) = streams.get(index) else {
                 continue;
@@ -286,14 +355,23 @@ impl VideoSource for Video {
             if current.width.abs_diff(want) <= 16 {
                 continue;
             }
-            let Some(display) = displays.iter().find(|d| d.info.id == current.display.id) else {
-                continue;
+            let id = current.display.id;
+            let target = if current.window {
+                match windows.iter().find(|w| w.info.id == id) {
+                    Some(w) => Target::Window(w),
+                    None => continue,
+                }
+            } else {
+                match displays.iter().find(|d| d.info.id == id) {
+                    Some(d) => Target::Display(d),
+                    None => continue,
+                }
             };
             let audio = (index == 0).then(|| self.audio.clone());
             // Stop the old one first so the stream never has two encoders feeding it.
             let old = std::mem::replace(
                 &mut streams[index],
-                match self.start(index as u8, display, audio) {
+                match self.start(index as u8, &target, audio) {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::warn!("resizing stream {index}: {e:#}");

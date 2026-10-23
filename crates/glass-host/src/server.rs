@@ -1050,6 +1050,7 @@ fn end_fit(session: u64, shared: Arc<Shared>) {
         let mut fit = FIT.lock().unwrap();
         if fit.as_ref().is_some_and(|f| f.owner == session) {
             let old = fit.take();
+            WINDOW_WATCH.fetch_add(1, Ordering::Relaxed);
             tokio::task::spawn_blocking(move || {
                 drop(old);
                 if let Ok(streams) = shared.video.set_layout(Layout::Single(None)) {
@@ -1065,6 +1066,59 @@ fn end_fit(session: u64, shared: Arc<Shared>) {
     let _ = (session, shared);
 }
 
+/// Bumped on every layout change, so a streamed window's watcher knows it's done.
+static WINDOW_WATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// While a window is streamed: follow it when it moves (input mapping), and go back to the
+/// main display when it closes.
+async fn watch_window(shared: Arc<Shared>, id: u32, generation: u64) {
+    let mut last = None;
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if WINDOW_WATCH.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        let video = shared.clone();
+        let Ok(Ok(windows)) = tokio::task::spawn_blocking(move || video.video.windows()).await
+        else {
+            continue;
+        };
+        if WINDOW_WATCH.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        match windows.iter().find(|w| w.id == id) {
+            Some(w) => {
+                let rect = [w.x, w.y, w.points_width, w.points_height];
+                if last.is_some_and(|l| l != rect) {
+                    shared.injector.lock().unwrap().set_window_rect(Some(rect));
+                }
+                last = Some(rect);
+            }
+            None => {
+                info!("window {id} closed; back to the main display");
+                WINDOW_WATCH.fetch_add(1, Ordering::Relaxed);
+                let video = shared.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    video.video.set_layout(Layout::Single(None))
+                })
+                .await;
+                if let Ok(Ok(streams)) = result {
+                    let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
+                    {
+                        let mut injector = shared.injector.lock().unwrap();
+                        injector.set_displays(&ids);
+                        injector.set_window_rect(None);
+                    }
+                    let _ = shared.events.send(ServerMsg::Layout { streams });
+                }
+                let msg = "The window you were viewing closed, so here's the main display.".into();
+                let _ = shared.events.send(ServerMsg::Error { msg });
+                return;
+            }
+        }
+    }
+}
+
 async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
     let worker = ctx.shared.clone();
     let peer = ctx.conn.remote_address();
@@ -1073,7 +1127,20 @@ async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
         Ok(streams) => {
             let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
             info!("{peer}: now streaming displays {ids:?}");
-            ctx.shared.injector.lock().unwrap().set_displays(&ids);
+            {
+                let mut injector = ctx.shared.injector.lock().unwrap();
+                injector.set_displays(&ids);
+                // A window: absolute coordinates on stream 0 land inside it.
+                let rect = match (layout, streams.first()) {
+                    (Layout::Window(_), Some(d)) => Some([d.x, d.y, d.points_width, d.points_height]),
+                    _ => None,
+                };
+                injector.set_window_rect(rect);
+            }
+            let generation = WINDOW_WATCH.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Layout::Window(id) = layout {
+                tokio::spawn(watch_window(ctx.shared.clone(), id, generation));
+            }
             let _ = ctx.shared.events.send(ServerMsg::Layout { streams });
         }
         Err(e) => {

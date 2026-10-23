@@ -285,8 +285,9 @@ test.describe('displays', () => {
     await open(page, host);
     await page.locator('#btn-displays').click();
     const items = page.locator('#displays-panel button');
-    // Two displays, "All displays", then the resolution choices (Auto, This Mac).
-    await expect(items).toHaveCount(5);
+    // Two displays, "All displays", the resolution choices (Auto, This Mac), then the test
+    // host's two windows (Apps).
+    await expect(items).toHaveCount(7);
     await expect(items.nth(2)).toContainText('All displays');
     await expect(items.nth(3)).toContainText('Auto');
     await expect(items.nth(4)).toContainText('This Mac');

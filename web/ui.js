@@ -6,7 +6,7 @@ const TOOLBAR_IDLE_MS = 3000;
 // Matches the slide-in transition in index.html (420 ms), plus a beat.
 const TOOLBAR_WAKE_MS = 450;
 
-export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -63,7 +63,11 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     toggleMenu('machines');
     if (!menus.machines.panel.classList.contains('hidden')) onOpenMachines();
   });
-  on('btn-displays', () => toggleMenu('displays'));
+  on('btn-displays', () => {
+    toggleMenu('displays');
+    // Windows come and go, so ask for a fresh list each time the menu opens.
+    if (windowsAvailable && !menus.displays.panel.classList.contains('hidden')) onListWindows?.();
+  });
   on('btn-shortcuts', () => toggleMenu('shortcuts'));
   on('btn-more', () => toggleMenu('more'));
   on('btn-keyboard', onKeyboard);
@@ -250,6 +254,27 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
         }));
       }
     }
+    // Apps: stream one window on its own.
+    if (windowsAvailable) {
+      const heading = document.createElement('p');
+      heading.className = 'note';
+      heading.textContent = 'Apps · show one window on its own';
+      items.push(document.createElement('hr'), heading);
+      if (!windowList) items.push(menuItem('Looking for windows…', '', { onSelect: () => {} }));
+      else if (!windowList.length) items.push(menuItem('No windows', '', { onSelect: () => {} }));
+      for (const w of windowList ?? []) {
+        const meta = w.title && w.title !== w.app ? w.title : `${w.width}×${w.height}`;
+        const item = menuItem(w.app, meta.length > 32 ? `${meta.slice(0, 31)}…` : meta, {
+          checked: streamed.length === 1 && streamed[0] === w.id,
+          onSelect: () => {
+            setMenuOpen('displays', false);
+            if (streamed[0] !== w.id) onSelectWindow?.(w.id);
+          },
+        });
+        item.title = `${w.app} — ${w.title}`;
+        items.push(item);
+      }
+    }
     lastDisplays = [displays, streamed];
     menus.displays.panel.replaceChildren(...items);
   }
@@ -288,6 +313,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     menus.more.panel.replaceChildren(...items);
   }
   let canFit = true;
+  let windowsAvailable = false;
+  let windowList = null;
 
   /** Names displays by where they sit in the macOS arrangement: Left / Right, Top / Bottom. */
   function positionNames(displays) {
@@ -407,6 +434,15 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     /** Only the owner can reshape the host's display (guests get an error). */
     setCanFit(on) {
       canFit = on;
+      if (lastDisplays) renderDisplays(...lastDisplays);
+    },
+    /** The host can stream single windows (an Apps section in the displays menu). */
+    setWindowsAvailable(on) {
+      windowsAvailable = on;
+      if (lastDisplays) renderDisplays(...lastDisplays);
+    },
+    renderWindows(list) {
+      windowList = list;
       if (lastDisplays) renderDisplays(...lastDisplays);
     },
     setResolution(mode) {

@@ -37,8 +37,14 @@ pub struct WindowInfo {
     pub id: u32,
     pub app: String,
     pub title: String,
+    /// Pixel size.
     pub width: usize,
     pub height: usize,
+    /// Position and size on the desktop (global points), for input mapping.
+    pub x: f64,
+    pub y: f64,
+    pub points_width: f64,
+    pub points_height: f64,
 }
 
 /// Fixed-size PCM packets (see `glass_proto::audio_packet`), fanned out to sessions.
