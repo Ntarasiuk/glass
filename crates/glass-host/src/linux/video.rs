@@ -173,6 +173,7 @@ impl Video {
                 vec![id]
             }
             Layout::Single(None) => vec![0],
+            Layout::Window(_) => anyhow::bail!("streaming one window isn't available on Linux yet"),
             Layout::All => {
                 // Left to right, then top to bottom, like the compositor arrangement.
                 let mut all: Vec<(u32, f64, f64)> = monitors
@@ -359,6 +360,7 @@ fn encode_loop(
                     data,
                     keyframe,
                     capture_us,
+                    hevc: false,
                 }));
             }
             Ok(None) => {}

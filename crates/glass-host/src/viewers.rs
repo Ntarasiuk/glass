@@ -71,6 +71,7 @@ fn channel() -> &'static watch::Sender<Vec<Viewer>> {
 fn publish(entries: &[Entry]) {
     let list = entries.iter().map(|e| e.viewer.clone()).collect();
     channel().send_replace(list);
+    crate::privacy::viewers_changed(entries.len());
 }
 
 /// The current viewers, and every change to them.
@@ -108,6 +109,18 @@ pub fn disconnect_all() {
         e.conn.close(0u32.into(), b"disconnected by the host");
     }
     tracing::info!("disconnected {} viewer(s) from the host", entries.len());
+}
+
+/// Ends one session; false if it's gone already.
+pub fn disconnect(id: u64) -> bool {
+    let entries = ENTRIES.lock().unwrap();
+    match entries.iter().find(|e| e.viewer.id == id) {
+        Some(e) => {
+            e.conn.close(0u32.into(), b"disconnected by the host");
+            true
+        }
+        None => false,
+    }
 }
 
 pub fn next_id() -> u64 {

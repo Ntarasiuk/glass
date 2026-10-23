@@ -101,6 +101,7 @@ impl Video {
                 ]
             }
             Layout::Single(None) => vec![&displays[0]],
+            Layout::Window(_) => anyhow::bail!("streaming one window isn't available yet"),
             Layout::All => {
                 // Match System Settings › Displays › Arrange: left to right, then top to bottom.
                 let mut all: Vec<&Display> = displays.iter().take(MAX_STREAMS).collect();

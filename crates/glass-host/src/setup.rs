@@ -192,7 +192,7 @@ fn finish(tailnet: Option<String>) -> Result<()> {
             .interact()?;
             let link = if make {
                 let base = status::read().and_then(|s| s.url).unwrap_or_default();
-                Some(crate::make_link(&base, ANYWHERE_GRANT, true)?)
+                Some(crate::make_link(&base, ANYWHERE_GRANT, true, crate::access::Scope::default())?)
             } else {
                 None
             };

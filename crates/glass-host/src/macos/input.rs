@@ -105,6 +105,8 @@ impl Injector {
                 );
                 self.post(ev);
             }
+            // Routed to crate::gamepad by the server, never here.
+            InputEvent::Gamepad { .. } => {}
             InputEvent::KeyDown { keycode } | InputEvent::KeyUp { keycode } => {
                 let down = matches!(ev, InputEvent::KeyDown { .. });
                 if let Some(flag) = modifier_flag(keycode) {

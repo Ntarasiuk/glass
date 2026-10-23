@@ -32,7 +32,36 @@ pub enum ClientMsg {
         /// What the viewer is, e.g. "Safari on iPad" (shown on the host).
         #[serde(default)]
         device: Option<String>,
+        /// Video codecs this viewer can decode, e.g. ["h264", "hevc"].
+        #[serde(default)]
+        codecs: Vec<String>,
     },
+    /// The browser's answer to a `passkey` request (WebAuthn), all fields base64url.
+    Passkey(crate::passkey::Response),
+    /// A chat message to the host and the other viewers.
+    Chat { text: String },
+    /// Restart the computer (`glass: false`) or just the Glass service. Owner only.
+    Restart {
+        #[serde(default)]
+        glass: bool,
+    },
+    /// Send Wake-on-LAN to a tailnet machine this host has seen (by its DNS name).
+    Wake { dns: String },
+    /// Privacy mode: blank this computer's screen and block its local input. Owner only.
+    Privacy { on: bool },
+    /// The windows that can be streamed on their own.
+    ListWindows,
+    /// Stream just this window (from `windows`).
+    SelectWindow { id: u32 },
+    /// A drawing on the screen everyone sees (opaque to the host, rebroadcast as is).
+    Annotate { stroke: serde_json::Value },
+    AnnotateClear,
+    /// Start or stop sending this viewer's microphone (KIND_MIC datagrams).
+    Mic { on: bool },
+    /// A shell on the host. Owner only.
+    Term(crate::terminal::ClientTerm),
+    /// Start or stop recording this session's video on the host. Owner only.
+    Record { on: bool },
     /// Stream just this display.
     SelectDisplay { id: u32 },
     /// Stream every display side by side.
@@ -74,7 +103,33 @@ pub enum ServerMsg {
         audio: bool,
         host_os: &'static str,
         guest: bool,
+        /// This session's id (chat and drawings from it carry it as `sender`).
+        session: u64,
+        perms: Perms,
+        features: Features,
+        /// Branding from `glass config name` / `accent`.
+        name: Option<String>,
+        accent: Option<String>,
+        /// The codec the video arrives in: "h264" or "hevc".
+        codec: &'static str,
     },
+    /// Waiting for the person at the computer to allow this connection.
+    Waiting { msg: String },
+    /// Asks the browser to create (`mode: create`) or use (`get`) a passkey.
+    Passkey(crate::passkey::Challenge),
+    Chat {
+        from: String,
+        sender: u64,
+        text: String,
+    },
+    Windows { windows: Vec<crate::media::WindowInfo> },
+    Annotate { sender: u64, stroke: serde_json::Value },
+    AnnotateClear { sender: u64 },
+    Term(crate::terminal::ServerTerm),
+    /// The video codec changed; a keyframe in the new codec follows.
+    Codec { codec: &'static str },
+    Recording { on: bool, path: Option<String> },
+    Privacy { on: bool },
     /// A guest pass for this device, traded for the link it opened (unix-seconds expiry).
     Pass {
         pass: String,
@@ -101,6 +156,51 @@ pub enum ServerMsg {
     Error {
         msg: String,
     },
+}
+
+/// What this session may do.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct Perms {
+    pub input: bool,
+    pub clipboard: bool,
+    pub files: bool,
+    /// The computer's owner (token or tailnet): may update, restart, fit, open a shell…
+    pub owner: bool,
+}
+
+impl Perms {
+    pub fn owner() -> Self {
+        Self {
+            input: true,
+            clipboard: true,
+            files: true,
+            owner: true,
+        }
+    }
+
+    pub fn guest(scope: &crate::access::Scope) -> Self {
+        Self {
+            input: !scope.view_only,
+            clipboard: scope.clipboard,
+            files: scope.files,
+            owner: false,
+        }
+    }
+}
+
+/// What this host can do, so the viewer shows only what works.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Features {
+    pub privacy: bool,
+    pub gamepad: bool,
+    pub mic: bool,
+    pub windows: bool,
+    pub terminal: bool,
+    pub restart: bool,
+    pub record: bool,
+    pub hevc: bool,
+    /// Ports an owner may open through `/fwd/<port>/` (tailnet only).
+    pub forward_ports: Vec<u16>,
 }
 
 /// Header that follows the `STREAM_FILE` tag in either direction.

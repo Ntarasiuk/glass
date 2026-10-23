@@ -336,6 +336,7 @@ unsafe fn annex_b(sample: &CMSampleBuffer) -> Option<EncodedFrame> {
         data: out,
         keyframe,
         capture_us: 0,
+        hevc: false,
     })
 }
 

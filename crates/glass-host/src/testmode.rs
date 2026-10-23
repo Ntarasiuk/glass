@@ -47,6 +47,34 @@ pub fn record_fit(size: Option<[u32; 2]>) {
     FITS.lock().unwrap().push(size);
 }
 
+/// Everything else the host did instead of touching the real computer, by kind
+/// (notification, privacy, restart, mic, wake), readable at /test/records?kind=….
+static RECORDS: Mutex<Vec<(&'static str, serde_json::Value)>> = Mutex::new(Vec::new());
+
+pub fn record(kind: &'static str, value: serde_json::Value) {
+    RECORDS.lock().unwrap().push((kind, value));
+}
+
+pub fn record_notification(title: &str, body: &str) {
+    record("notification", serde_json::json!({"title": title, "body": body}));
+}
+
+pub fn record_privacy(on: bool) {
+    record("privacy", serde_json::json!(on));
+}
+
+pub fn record_restart(what: &str) {
+    record("restart", serde_json::json!(what));
+}
+
+pub fn record_mic(bytes: usize) {
+    record("mic", serde_json::json!(bytes));
+}
+
+pub fn record_wake(mac: &str) {
+    record("wake", serde_json::json!(mac));
+}
+
 /// Current adaptive bitrate, readable at /test/bitrate.
 static BITRATE: AtomicU32 = AtomicU32::new(0);
 
@@ -178,6 +206,7 @@ impl VideoSource for TestVideo {
                 vec![id]
             }
             Layout::Single(None) => vec![0],
+            Layout::Window(_) => anyhow::bail!("test mode has no windows"),
             Layout::All => (0..DISPLAYS.min(MAX_STREAMS) as u32).collect(),
         };
         for slot in &self.slots {
@@ -246,6 +275,7 @@ fn pattern_loop(
                 data,
                 keyframe: key,
                 capture_us: now_us(),
+                hevc: false,
             }));
         }
     }
@@ -331,6 +361,9 @@ impl InputSink for FakeInput {
                 serde_json::json!({"t": "keydown", "keycode": keycode})
             }
             InputEvent::KeyUp { keycode } => serde_json::json!({"t": "keyup", "keycode": keycode}),
+            InputEvent::Gamepad { pad, kind, index, value } => {
+                serde_json::json!({"t": "gamepad", "pad": pad, "kind": kind, "index": index, "value": value})
+            }
         };
         INPUT.lock().unwrap().events.push(json);
     }
@@ -368,6 +401,17 @@ pub fn picked_files() -> Vec<PathBuf> {
 // ---- Test-only HTTP routes ----
 
 #[derive(serde::Deserialize)]
+struct KindQuery {
+    kind: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DecideQuery {
+    id: Option<u64>,
+    allow: bool,
+}
+
+#[derive(serde::Deserialize)]
 struct DropQuery {
     frames: u32,
 }
@@ -401,6 +445,25 @@ pub fn routes(events: broadcast::Sender<ServerMsg>, downloads: PathBuf) -> axum:
         .route("/test/updates", get(|| async { Json(serde_json::json!({"count": UPDATES.load(Ordering::Relaxed)})) }))
         .route("/test/fit", get(|| async { Json(serde_json::json!({"requests": *FITS.lock().unwrap()})) }))
         .route("/test/bitrate", get(|| async { Json(serde_json::json!({"bps": BITRATE.load(Ordering::Relaxed)})) }))
+        .route(
+            "/test/records",
+            get(|Query(q): Query<KindQuery>| async move {
+                let r = RECORDS.lock().unwrap();
+                let list: Vec<_> = r.iter().filter(|(k, _)| *k == q.kind).map(|(_, v)| v.clone()).collect();
+                Json(serde_json::json!({"records": list}))
+            }),
+        )
+        .route(
+            "/test/approvals",
+            get(|| async { Json(serde_json::json!({"pending": crate::approval::pending()})) }).post(
+                |Query(q): Query<DecideQuery>| async move {
+                    // No id: the oldest waiting request.
+                    let id = q.id.or_else(|| crate::approval::pending().first().map(|r| r.id));
+                    let ok = id.is_some_and(|id| crate::approval::decide(id, q.allow));
+                    Json(serde_json::json!({"ok": ok}))
+                },
+            ),
+        )
         .route("/test/corrupt", post(|| async { CORRUPT_NEXT.store(true, Ordering::Relaxed) }))
         .route(
             "/test/downloads",

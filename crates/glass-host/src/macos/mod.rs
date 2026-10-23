@@ -10,6 +10,7 @@ pub mod encode;
 pub mod input;
 pub mod menubar;
 pub mod permissions;
+pub mod privacy;
 pub mod setup;
 pub mod video;
 pub mod virtual_display;

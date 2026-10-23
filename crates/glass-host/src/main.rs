@@ -1,7 +1,22 @@
 mod access;
+mod approval;
+mod codec;
+mod connlog;
 mod control;
 mod files;
+mod forward;
+mod gamepad;
+mod ipc;
 mod media;
+mod mic;
+mod notify;
+mod passkey;
+mod power;
+mod privacy;
+mod recording;
+mod settings;
+mod terminal;
+mod wol;
 mod rate;
 mod remote;
 mod resolution;
@@ -124,9 +139,29 @@ enum Command {
         /// How long the access lasts once the link is opened (e.g. 30m, 24h, 7d).
         #[arg(long = "for", value_name = "DURATION", default_value = "24h", value_parser = access::parse_duration)]
         grant: std::time::Duration,
-        /// Cut off every device let in with a magic link, and void unused links.
+        /// Cut off one device (by the id from --list), or with no id every device let in
+        /// with a magic link, voiding unused links too.
+        #[arg(long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
+        revoke: Option<String>,
+        /// List the devices let in with magic links.
         #[arg(long)]
-        revoke: bool,
+        list: bool,
+        /// Watch only: no mouse, keyboard or controllers.
+        #[arg(long)]
+        view_only: bool,
+        /// No sending or getting files.
+        #[arg(long)]
+        no_files: bool,
+        /// No copy and paste.
+        #[arg(long)]
+        no_clipboard: bool,
+        /// Ask the person at this computer before each connection.
+        #[arg(long)]
+        ask: bool,
+        /// The device must register a passkey (Face ID, Touch ID, a security key) and
+        /// use it every time.
+        #[arg(long)]
+        passkey: bool,
         /// Print JSON ({url, link_expires, grant_secs, summary}) for scripts and agents.
         #[arg(long)]
         json: bool,
@@ -150,6 +185,43 @@ enum Command {
         #[arg(long, default_value_t = 6)]
         seconds: u64,
     },
+    /// Show or change settings (no arguments: list them all).
+    Config {
+        key: Option<String>,
+        value: Option<String>,
+    },
+    /// Connection history: who connected, when, how, and for how long.
+    Log {
+        #[arg(short = 'n', default_value_t = 20)]
+        count: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Who's connected right now.
+    Viewers {
+        #[arg(long)]
+        json: bool,
+    },
+    /// End a session (by the id from `glass viewers`), or every one.
+    Kick { id: Option<u64> },
+    /// Connections waiting to be allowed (see `glass config ask-guests`).
+    Requests {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Let a waiting connection in (the oldest, without an id).
+    Allow { id: Option<u64> },
+    /// Turn a waiting connection away (the oldest, without an id).
+    Deny { id: Option<u64> },
+    /// Send a message to everyone viewing.
+    Chat { message: Vec<String> },
+    /// Blank this screen and block local input while viewed (or stop): on or off.
+    Privacy {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+    /// Wake a machine with Wake-on-LAN, by a MAC address or a tailnet name seen before.
+    Wake { target: String },
     /// Show the access token for devices outside your tailnet.
     Token {
         /// Replace it with a new one; devices using the old token must sign in again.
@@ -167,8 +239,9 @@ pub(crate) fn make_link(
     base: &str,
     grant: std::time::Duration,
     anywhere: bool,
+    scope: access::Scope,
 ) -> Result<(String, access::NewLink)> {
-    let link = access::create_link(&access::file_for(&default_token_file()), grant)?;
+    let link = access::create_link(&access::file_for(&default_token_file()), grant, scope)?;
     let url = if anywhere {
         remote::set_enabled(true)?;
         remote::link_url(&remote::HostKey::load_or_create()?, &link.code)
@@ -179,20 +252,26 @@ pub(crate) fn make_link(
 }
 
 /// `glass link`: a one-time link (and QR code) to the running host.
-fn print_link(grant: std::time::Duration, json: bool, anywhere: bool) -> Result<()> {
+fn print_link(
+    grant: std::time::Duration,
+    json: bool,
+    anywhere: bool,
+    scope: access::Scope,
+) -> Result<()> {
     let base = status::read()
         .filter(|s| s.is_fresh())
         .and_then(|s| s.url)
         .ok_or_else(|| {
             anyhow::anyhow!("Glass isn't running here. Start it (glass setup), then try again.")
         })?;
-    let (url, link) = make_link(&base, grant, anywhere)?;
+    let (url, link) = make_link(&base, grant, anywhere, scope)?;
     if json {
         let out = serde_json::json!({
             "url": url,
             "link_expires": link.expires,
             "grant_secs": link.grant.as_secs(),
-            "summary": format!("Works once, within {}. Gives that device {} of access.", access::describe(access::LINK_TTL), access::describe(link.grant)),
+            "scope": link.scope,
+            "summary": format!("Works once, within {}. Gives that device {} of access ({}).", access::describe(access::LINK_TTL), access::describe(link.grant), link.scope.describe()),
         });
         println!("{out}");
         return Ok(());
@@ -200,10 +279,72 @@ fn print_link(grant: std::time::Duration, json: bool, anywhere: bool) -> Result<
     println!("{}", setup::qr(&url));
     println!("{url}\n");
     println!(
-        "Works once, within {}. Gives that device {} of access.\nCut off everyone let in this way: glass link --revoke",
+        "Works once, within {}. Gives that device {} of access ({}).\nSee who's in: glass link --list · cut off everyone: glass link --revoke",
         access::describe(access::LINK_TTL),
         access::describe(link.grant),
+        link.scope.describe(),
     );
+    Ok(())
+}
+
+/// `glass link --list`.
+fn list_passes(json: bool) -> Result<()> {
+    let passes = access::list(&access::file_for(&default_token_file()));
+    if json {
+        println!("{}", serde_json::json!({ "passes": passes }));
+        return Ok(());
+    }
+    if passes.is_empty() {
+        println!("No devices have magic-link access.");
+        return Ok(());
+    }
+    let now = access::now();
+    for p in passes {
+        let device = if p.device.is_empty() { "A browser" } else { &p.device };
+        println!(
+            "{}  {device}  {}  {} left",
+            p.id,
+            p.scope.describe(),
+            access::describe(std::time::Duration::from_secs(p.expires.saturating_sub(now))),
+        );
+    }
+    println!("\nCut one off: glass link --revoke <id>");
+    Ok(())
+}
+
+/// `glass config [key [value]]`.
+fn config_cli(key: Option<&str>, value: Option<&str>) -> Result<()> {
+    let mut s = settings::load();
+    match (key, value) {
+        (None, _) => {
+            for (k, help) in settings::KEYS {
+                println!("{k:<16} {:<12} {help}", s.get(k)?);
+            }
+        }
+        (Some(k), None) => println!("{}", s.get(k)?),
+        (Some(k), Some(v)) => {
+            s.set(k, v)?;
+            settings::save(&s)?;
+            println!("{k} = {}", s.get(k)?);
+        }
+    }
+    Ok(())
+}
+
+/// `glass allow|deny [id]`.
+fn decide_cli(id: Option<u64>, allow: bool) -> Result<()> {
+    let id = match id {
+        Some(id) => id,
+        None => {
+            let pending = ipc::call(&ipc::Request::Pending)?;
+            pending["pending"][0]["id"]
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("nobody is waiting to connect"))?
+        }
+    };
+    let reply = ipc::call(&ipc::Request::Decide { id, allow })?;
+    anyhow::ensure!(reply["ok"] == true, "no waiting connection {id}");
+    println!("{}", if allow { "Allowed." } else { "Denied." });
     Ok(())
 }
 
@@ -295,8 +436,27 @@ async fn async_main(args: Args) -> Result<()> {
         }
         Some(Command::Feedback { message }) => send_feedback(&message.join(" ")),
         Some(Command::Update) => update::run_cli(),
+        Some(Command::Link { list: true, json, .. }) => list_passes(*json),
         Some(Command::Link {
-            revoke: true, json, ..
+            revoke: Some(id),
+            json,
+            ..
+        }) if !id.is_empty() => {
+            anyhow::ensure!(
+                access::revoke(&access::file_for(&default_token_file()), id)?,
+                "no single device matches {id}; see glass link --list"
+            );
+            if *json {
+                println!("{}", serde_json::json!({ "revoked": 1 }));
+            } else {
+                println!("Revoked. That device lost access within seconds.");
+            }
+            Ok(())
+        }
+        Some(Command::Link {
+            revoke: Some(_),
+            json,
+            ..
         }) => {
             let n = access::revoke_all(&access::file_for(&default_token_file()))?;
             if *json {
@@ -313,8 +473,89 @@ async fn async_main(args: Args) -> Result<()> {
             grant,
             json,
             anywhere,
+            view_only,
+            no_files,
+            no_clipboard,
+            ask,
+            passkey,
             ..
-        }) => print_link(*grant, *json, *anywhere),
+        }) => print_link(
+            *grant,
+            *json,
+            *anywhere,
+            access::Scope {
+                view_only: *view_only,
+                files: !*no_files,
+                clipboard: !*no_clipboard,
+                ask: *ask,
+                passkey: *passkey,
+            },
+        ),
+        Some(Command::Config { key, value }) => config_cli(key.as_deref(), value.as_deref()),
+        Some(Command::Log { count, json }) => {
+            let entries = connlog::recent(*count);
+            if *json {
+                println!("{}", serde_json::json!({ "connections": entries }));
+            } else if entries.is_empty() {
+                println!("No connections yet.");
+            } else {
+                for e in &entries {
+                    println!("{}", connlog::describe(e));
+                }
+            }
+            Ok(())
+        }
+        Some(Command::Viewers { json }) => {
+            let reply = ipc::call(&ipc::Request::Viewers)?;
+            if *json {
+                println!("{reply}");
+            } else if reply["viewers"].as_array().is_none_or(|v| v.is_empty()) {
+                println!("Nobody is connected.");
+            } else {
+                for v in reply["viewers"].as_array().into_iter().flatten() {
+                    println!("{}  {}", v["id"], v["describe"].as_str().unwrap_or(""));
+                }
+            }
+            Ok(())
+        }
+        Some(Command::Kick { id }) => {
+            let reply = ipc::call(&ipc::Request::Disconnect { id: *id })?;
+            println!("Disconnected {}.", reply["disconnected"]);
+            Ok(())
+        }
+        Some(Command::Requests { json }) => {
+            let reply = ipc::call(&ipc::Request::Pending)?;
+            if *json {
+                println!("{reply}");
+            } else if reply["pending"].as_array().is_none_or(|p| p.is_empty()) {
+                println!("Nobody is waiting to connect.");
+            } else {
+                for r in reply["pending"].as_array().into_iter().flatten() {
+                    println!("{}  {}", r["id"], r["who"].as_str().unwrap_or(""));
+                }
+                println!("\nglass allow <id> · glass deny <id>");
+            }
+            Ok(())
+        }
+        Some(Command::Allow { id }) => decide_cli(*id, true),
+        Some(Command::Deny { id }) => decide_cli(*id, false),
+        Some(Command::Chat { message }) => {
+            let reply = ipc::call(&ipc::Request::Chat {
+                text: message.join(" "),
+            })?;
+            println!("Sent to {} viewer(s).", reply["sent"]);
+            Ok(())
+        }
+        Some(Command::Privacy { state }) => {
+            ipc::call(&ipc::Request::Privacy { on: state == "on" })?;
+            println!("Privacy mode {state} (until everyone disconnects).");
+            Ok(())
+        }
+        Some(Command::Wake { target }) => {
+            let macs = wol::wake_target(target)?;
+            println!("Sent a wake-up to {target} ({macs}).");
+            Ok(())
+        }
         Some(Command::Remote { action }) => remote_cli(action),
         #[cfg(target_os = "macos")]
         Some(Command::DisplayTest { size, seconds }) => {
@@ -556,6 +797,9 @@ async fn run_host(args: Args) -> Result<()> {
     };
     status::set_capturing(true);
     update::watch();
+    if let Err(e) = ipc::serve() {
+        tracing::warn!("CLI socket: {e:#}");
+    }
 
     let test_routes = args
         .test
