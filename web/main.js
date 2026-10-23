@@ -646,6 +646,8 @@ function onControl(msg) {
       log('info', 'welcome', { displays: displays.length, streams: msg.streams.map((d) => d.id), audio: msg.audio });
       break;
     case 'layout':
+      // The host's current displays (a fit adds a virtual one and hides the one it mirrors).
+      if (msg.displays) displays = msg.displays;
       onLayout(msg.streams);
       break;
     case 'waiting':

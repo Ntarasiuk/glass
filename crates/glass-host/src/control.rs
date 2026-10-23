@@ -157,6 +157,10 @@ pub enum ServerMsg {
     },
     Layout {
         streams: Vec<DisplayInfo>,
+        /// Every display there is now: fitting adds a virtual one and hides the display it
+        /// mirrors, so the viewer's list is replaced, not added to.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        displays: Option<Vec<DisplayInfo>>,
     },
     /// Current adaptive target bitrate per stream.
     Bitrate {

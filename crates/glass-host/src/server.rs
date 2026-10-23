@@ -345,6 +345,9 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
         }
     }
     .await;
+    // Ending here (gone quiet, an error) must end the whole session: the control stream's
+    // task holds the connection, and with it this viewer's place in the list.
+    conn.close(0u32.into(), b"session ended");
 
     if authed.load(Ordering::Relaxed) {
         shared.injector.lock().unwrap().release_all();
@@ -1149,7 +1152,8 @@ fn end_fit(session: u64, shared: Arc<Shared>) {
                 if let Ok(streams) = shared.video.set_layout(Layout::Single(None)) {
                     let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
                     shared.injector.lock().unwrap().set_displays(&ids);
-                    let _ = shared.events.send(ServerMsg::Layout { streams });
+                    let displays = shared.video.displays().ok();
+                    let _ = shared.events.send(ServerMsg::Layout { streams, displays });
                 }
                 info!("displays restored (the viewer who fitted them left)");
             });
@@ -1192,17 +1196,18 @@ async fn watch_window(shared: Arc<Shared>, id: u32, generation: u64) {
                 WINDOW_WATCH.fetch_add(1, Ordering::Relaxed);
                 let video = shared.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    video.video.set_layout(Layout::Single(None))
+                    let streams = video.video.set_layout(Layout::Single(None))?;
+                    anyhow::Ok((streams, video.video.displays().ok()))
                 })
                 .await;
-                if let Ok(Ok(streams)) = result {
+                if let Ok(Ok((streams, displays))) = result {
                     let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
                     {
                         let mut injector = shared.injector.lock().unwrap();
                         injector.set_displays(&ids);
                         injector.set_window_rect(None);
                     }
-                    let _ = shared.events.send(ServerMsg::Layout { streams });
+                    let _ = shared.events.send(ServerMsg::Layout { streams, displays });
                 }
                 let msg = "The window you were viewing closed, so here's the main display.".into();
                 let _ = shared.events.send(ServerMsg::Error { msg });
@@ -1216,8 +1221,12 @@ async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
     let worker = ctx.shared.clone();
     let peer = ctx.conn.remote_address();
     info!("{peer}: layout {layout:?}");
-    match tokio::task::spawn_blocking(move || worker.video.set_layout(layout)).await? {
-        Ok(streams) => {
+    let listed = tokio::task::spawn_blocking(move || {
+        let streams = worker.video.set_layout(layout)?;
+        anyhow::Ok((streams, worker.video.displays().ok()))
+    });
+    match listed.await? {
+        Ok((streams, displays)) => {
             let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
             info!("{peer}: now streaming displays {ids:?}");
             {
@@ -1234,7 +1243,7 @@ async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
             if let Layout::Window(id) = layout {
                 tokio::spawn(watch_window(ctx.shared.clone(), id, generation));
             }
-            let _ = ctx.shared.events.send(ServerMsg::Layout { streams });
+            let _ = ctx.shared.events.send(ServerMsg::Layout { streams, displays });
         }
         Err(e) => {
             warn!("{peer}: switch display failed: {e:#}");
