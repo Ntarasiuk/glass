@@ -81,6 +81,42 @@ if (hashToken) storage((s) => s.setItem(tokenKey, hashToken));
 const ssoPass = hashParams.get('p');
 if (ssoPass) storage((s) => s.setItem(passKey, JSON.stringify({ pass: ssoPass, expires: Number(hashParams.get('e')) })));
 if (hashToken || link || ssoPass) history.replaceState(null, '', location.pathname + location.search + (remoteKey ? `#r=${remoteKey}` : ''));
+
+// Directory (LDAP) sign-in on the token screen: the host checks the password and hands
+// back a guest pass, kept like one from a link; then connect with it.
+{
+  const box = document.getElementById('ldap');
+  const field = (name) => box.querySelector(`input[name="${name}"]`);
+  const error = document.getElementById('ldap-error');
+  const submit = document.getElementById('ldap-submit');
+  submit.addEventListener('click', async () => {
+    const user = field('ldap-user').value.trim();
+    const password = field('ldap-password').value;
+    if (!user || !password) return;
+    submit.disabled = true;
+    error.classList.add('hidden');
+    try {
+      const r = await fetch('sso/ldap', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ user, password }) });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || !body.pass) throw new Error(body.error ?? 'Sign-in didn\'t work. Try again.');
+      storage((s) => s.setItem(passKey, JSON.stringify({ pass: body.pass, expires: body.expires })));
+      location.reload();
+    } catch (e) {
+      error.textContent = e.message;
+      error.classList.remove('hidden');
+      field('ldap-password').select();
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  // Enter in these fields signs in here, not with the (empty) token form.
+  box.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    e.stopPropagation();
+    submit.click();
+  });
+}
 const token = hashToken ?? storage((s) => s.getItem(tokenKey));
 const savedPass = (() => {
   try {
@@ -515,6 +551,7 @@ worker.onmessage = ({ data }) => {
       ui.showAuth({ rejected: tokenTried });
       // Single sign-on is this host's own web page, so not from a remote (WebRTC) viewer.
       document.getElementById('sso').classList.toggle('hidden', !(config.sso && !remoteKey));
+      document.getElementById('ldap').classList.toggle('hidden', !(config.ldap && !remoteKey));
       break;
     case 'control':
       onControl(data.msg);

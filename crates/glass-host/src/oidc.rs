@@ -1,6 +1,7 @@
 //! Single sign-on with OpenID Connect: people sign in with their Google, Microsoft, Okta…
-//! account instead of a token or a link, if their email is on the allow-list
-//! (`glass config oidc-allow`). Signing in mints a guest pass, as a link would.
+//! account instead of a token or a link, if the access rules allow them (`glass acl`, or
+//! the older `glass config oidc-allow`; see acl.rs) and SCIM hasn't deactivated them.
+//! Signing in mints a guest pass, as a link would.
 //!
 //! Authorization code flow with PKCE. The state, nonce and code verifier ride in a
 //! short-lived cookie signed with a key derived from the access token. The ID token is
@@ -22,8 +23,6 @@ use crate::remote::{b64url, b64url_decode};
 const COOKIE: &str = "glass_sso";
 /// How long a sign-in may take at the provider.
 const FLOW_TTL: u64 = 600;
-/// How long an SSO sign-in lasts on that device.
-const GRANT: Duration = Duration::from_secs(24 * 3600);
 /// Clock skew allowed on `exp`.
 const SKEW: u64 = 60;
 const DISCOVERY_TTL: Duration = Duration::from_secs(3600);
@@ -34,8 +33,6 @@ struct Config {
     issuer: String,
     client_id: String,
     secret: String,
-    allow: Vec<String>,
-    view_only: bool,
 }
 
 fn config() -> Option<Config> {
@@ -49,8 +46,6 @@ fn config() -> Option<Config> {
         issuer,
         client_id: s.oidc_client_id?,
         secret: crate::settings::oidc_secret()?,
-        allow: s.oidc_allow,
-        view_only: s.oidc_view_only,
     })
 }
 
@@ -302,16 +297,15 @@ async fn finish(cfg: &Config, headers: &HeaderMap, q: CallbackQuery) -> std::res
     let jwks = keys(&d.jwks_uri, kid.as_deref()).await?;
     let claims = verify_id_token(&id_token, &jwks, &d.issuer, &cfg.client_id, &flow.nonce, crate::access::now())?;
     let email = claims.email.to_ascii_lowercase();
-    if !allowed(&cfg.allow, &email) {
-        return Err(Refusal::NotAllowed(email));
-    }
-    let scope = crate::access::Scope {
-        view_only: cfg.view_only,
-        ..crate::access::Scope::default()
+    // The access rules (glass acl, or oidc-allow) and the SCIM directory decide.
+    let person = crate::ldap::Person {
+        email: email.clone(),
+        groups: Vec::new(),
     };
-    let shared = crate::server::shared().context("host not ready")?;
-    let granted = crate::access::grant_pass(&crate::access::file_for(&shared.token_file), GRANT, scope, &email)?;
-    Ok((email, granted))
+    match crate::ldap::grant(&person)? {
+        Some(granted) => Ok((email, granted)),
+        None => Err(Refusal::NotAllowed(email)),
+    }
 }
 
 /// A short plain page for errors (no details: those go to the host log).
@@ -350,18 +344,6 @@ pub fn pkce_challenge(verifier: &str) -> String {
     b64url(ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes()).as_ref())
 }
 
-/// True if `email` is listed, or its domain is (`@example.com`).
-pub fn allowed(allow: &[String], email: &str) -> bool {
-    let email = email.to_ascii_lowercase();
-    let Some((_, domain)) = email.rsplit_once('@') else { return false };
-    allow.iter().any(|a| {
-        let a = a.to_ascii_lowercase();
-        match a.strip_prefix('@') {
-            Some(d) => d == domain,
-            None => a == email,
-        }
-    })
-}
 
 /// Key for the flow cookie: derived from the access token, so a token reset voids it.
 fn flow_key() -> Option<ring::hmac::Key> {
@@ -594,15 +576,6 @@ mod tests {
         assert!(ok(&sign(&other, claims(now))).is_err(), "unknown signer");
     }
 
-    #[test]
-    fn allow_list() {
-        let allow = vec!["ana@example.com".to_string(), "@corp.example".to_string()];
-        assert!(allowed(&allow, "ANA@example.com"));
-        assert!(allowed(&allow, "bob@corp.example"));
-        assert!(!allowed(&allow, "bob@example.com"));
-        assert!(!allowed(&allow, "bob@evilcorp.example"));
-        assert!(!allowed(&[], "ana@example.com"), "empty list lets nobody in");
-    }
 
     #[test]
     fn pkce_matches_the_rfc_example() {

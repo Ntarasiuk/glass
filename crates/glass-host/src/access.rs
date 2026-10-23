@@ -115,6 +115,10 @@ struct Pass {
     /// A passkey bound to this pass (SPKI DER, base64url), once registered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     passkey: Option<Passkey>,
+    /// The directory account (email) it was minted for by single sign-on or LDAP, so
+    /// deprovisioning that account (SCIM) revokes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
 }
 
 /// A WebAuthn credential (ES256) bound to a guest pass.
@@ -198,7 +202,18 @@ pub fn create_link(path: &Path, grant: Duration, scope: Scope) -> Result<NewLink
 }
 
 /// A guest pass issued directly (single sign-on), without a link.
+/// A pass for a directory account (SSO, LDAP): revoked with [`revoke_account`].
 pub fn grant_pass(path: &Path, grant: Duration, scope: Scope, device: &str) -> Result<Granted> {
+    grant_pass_for(path, grant, scope, device, Some(device))
+}
+
+pub fn grant_pass_for(
+    path: &Path,
+    grant: Duration,
+    scope: Scope,
+    device: &str,
+    account: Option<&str>,
+) -> Result<Granted> {
     let grant = grant.clamp(MIN_GRANT, MAX_GRANT);
     let pass = random_code()?;
     let expires = now() + grant.as_secs();
@@ -210,6 +225,7 @@ pub fn grant_pass(path: &Path, grant: Duration, scope: Scope, device: &str) -> R
             created: now(),
             device: device.to_string(),
             passkey: None,
+            account: account.map(|a| a.to_ascii_lowercase()),
         });
     })?;
     Ok(Granted {
@@ -217,6 +233,20 @@ pub fn grant_pass(path: &Path, grant: Duration, scope: Scope, device: &str) -> R
         expires,
         scope,
     })
+}
+
+/// Removes every pass minted for `account`; returns how many.
+pub fn revoke_account(path: &Path, account: &str) -> Result<usize> {
+    let account = account.to_ascii_lowercase();
+    let mut n = 0;
+    update(path, |store| {
+        let before = store.passes.len();
+        store
+            .passes
+            .retain(|p| p.account.as_deref() != Some(account.as_str()));
+        n = before - store.passes.len();
+    })?;
+    Ok(n)
 }
 
 /// Uses up a link, if it's valid, and returns a new guest pass in its place.
@@ -239,6 +269,7 @@ pub fn redeem_link(path: &Path, code: &str, device: &str) -> Result<Option<Grant
                 created: now(),
                 device: device.to_string(),
                 passkey: None,
+                account: None,
             });
             granted = Some(Granted {
                 pass: pass.clone(),
@@ -509,6 +540,17 @@ mod tests {
         assert!(revoke(&path, &listed[0].id).unwrap());
         assert!(check_pass(&path, &ga.pass).is_none());
         assert!(check_pass(&path, &gb.pass).is_some());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn deprovisioning_an_account_revokes_its_passes() {
+        let path = temp().with_file_name("accounts.json");
+        let a = grant_pass(&path, Duration::from_secs(3600), Scope::default(), "Ana@Example.com").unwrap();
+        let b = grant_pass(&path, Duration::from_secs(3600), Scope::default(), "bob@example.com").unwrap();
+        assert_eq!(revoke_account(&path, "ana@example.com").unwrap(), 1);
+        assert!(check_pass(&path, &a.pass).is_none());
+        assert!(check_pass(&path, &b.pass).is_some());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

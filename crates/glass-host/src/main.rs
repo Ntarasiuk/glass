@@ -1,4 +1,5 @@
 mod access;
+mod acl;
 mod approval;
 mod codec;
 mod connlog;
@@ -7,6 +8,7 @@ mod files;
 mod forward;
 mod gamepad;
 mod ipc;
+mod ldap;
 mod media;
 mod mic;
 mod notify;
@@ -15,6 +17,7 @@ mod passkey;
 mod power;
 mod privacy;
 mod recording;
+mod scim;
 mod settings;
 mod sharp;
 mod terminal;
@@ -187,6 +190,13 @@ enum Command {
         #[arg(long, default_value_t = 6)]
         seconds: u64,
     },
+    /// Access rules for directory sign-in (SSO, LDAP): who gets in, and what they may do.
+    Acl {
+        #[command(subcommand)]
+        action: Option<AclCommand>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or change settings (no arguments: list them all).
     Config {
         key: Option<String>,
@@ -314,6 +324,94 @@ fn list_passes(json: bool) -> Result<()> {
     Ok(())
 }
 
+#[derive(clap::Subcommand)]
+enum AclCommand {
+    /// Add a rule at the end (or at --at): an email, @domain, group:name or *.
+    Add {
+        #[arg(value_name = "MATCH")]
+        matcher: String,
+        #[arg(long)]
+        view_only: bool,
+        #[arg(long)]
+        no_files: bool,
+        #[arg(long)]
+        no_clipboard: bool,
+        /// Ask the person at the computer each time.
+        #[arg(long)]
+        ask: bool,
+        /// How long a sign-in lasts (default 24h).
+        #[arg(long = "for", value_name = "DURATION", value_parser = access::parse_duration)]
+        grant: Option<std::time::Duration>,
+        /// Position (0 = first); rules are checked in order.
+        #[arg(long)]
+        at: Option<usize>,
+    },
+    /// Remove the rule at this position (see glass acl).
+    Remove { index: usize },
+}
+
+/// `glass acl [add|remove]`.
+fn acl_cli(action: Option<&AclCommand>, json: bool) -> Result<()> {
+    let mut rules = acl::load();
+    match action {
+        None => {
+            let implicit = rules.is_empty();
+            let shown = if implicit { acl::effective() } else { rules };
+            if json {
+                println!("{}", serde_json::json!({ "rules": shown, "implicit": implicit }));
+                return Ok(());
+            }
+            if shown.is_empty() {
+                println!("No access rules: nobody can sign in with a directory account.\nAdd one: glass acl add @example.com");
+            } else {
+                if implicit {
+                    println!("From oidc-allow (glass acl add … replaces these):");
+                }
+                for (i, r) in shown.iter().enumerate() {
+                    println!("{}", acl::describe(i, r));
+                }
+            }
+            return Ok(());
+        }
+        Some(AclCommand::Add { matcher, view_only, no_files, no_clipboard, ask, grant, at }) => {
+            acl::validate(matcher)?;
+            // The first explicit rule takes over from the implicit SSO ones: keep them.
+            if rules.is_empty() {
+                rules = acl::effective();
+            }
+            let rule = acl::Rule {
+                matcher: matcher.trim().to_ascii_lowercase(),
+                scope: access::Scope {
+                    view_only: *view_only,
+                    files: !*no_files,
+                    clipboard: !*no_clipboard,
+                    ask: *ask,
+                    passkey: false,
+                },
+                duration_secs: grant.map(|d| d.as_secs()),
+            };
+            let i = at.unwrap_or(rules.len()).min(rules.len());
+            rules.insert(i, rule);
+        }
+        Some(AclCommand::Remove { index }) => {
+            if rules.is_empty() {
+                rules = acl::effective();
+            }
+            anyhow::ensure!(*index < rules.len(), "no rule {index}; see glass acl");
+            rules.remove(*index);
+        }
+    }
+    acl::save(&rules)?;
+    if json {
+        println!("{}", serde_json::json!({ "rules": rules }));
+    } else {
+        for (i, r) in rules.iter().enumerate() {
+            println!("{}", acl::describe(i, r));
+        }
+    }
+    Ok(())
+}
+
 /// `glass config [key [value]]`.
 fn config_cli(key: Option<&str>, value: Option<&str>) -> Result<()> {
     let mut s = settings::load();
@@ -328,6 +426,12 @@ fn config_cli(key: Option<&str>, value: Option<&str>) -> Result<()> {
             s.set(k, v)?;
             settings::save(&s)?;
             println!("{k} = {}", s.get(k)?);
+            // A generated token is shown once, to paste into the identity provider.
+            if k == "scim-token" && v == "new"
+                && let Some(t) = settings::scim_token()
+            {
+                println!("SCIM token: {t}\nIn your identity provider: base URL <this computer's https address>/scim/v2, bearer token as above.");
+            }
         }
     }
     Ok(())
@@ -494,6 +598,7 @@ async fn async_main(args: Args) -> Result<()> {
             },
         ),
         Some(Command::Config { key, value }) => config_cli(key.as_deref(), value.as_deref()),
+        Some(Command::Acl { action, json }) => acl_cli(action.as_ref(), *json),
         Some(Command::Log { count, json }) => {
             let entries = connlog::recent(*count);
             if *json {

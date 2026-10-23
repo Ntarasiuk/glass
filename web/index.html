@@ -299,6 +299,7 @@
     #shortcut-bar button:active { background: var(--surface-active); }
     #auth .sso { display: block; padding: 11px; border-radius: var(--radius-sm); border: 1px solid var(--border); color: var(--text); text-align: center; text-decoration: none; font-weight: 600; }
     #auth .sso:hover { background: var(--surface-hover); }
+    #auth .ldap { display: grid; gap: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
   </style>
 </head>
 <body>
@@ -383,6 +384,13 @@
       <input name="token" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Access token" aria-label="Access token" required>
       <button type="submit">Connect</button>
       <a id="sso" class="sso hidden" href="sso/start">Sign in with your organization</a>
+      <div id="ldap" class="ldap hidden">
+        <p>Or sign in with your directory account.</p>
+        <input name="ldap-user" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="Username" aria-label="Directory username">
+        <input name="ldap-password" type="password" autocomplete="current-password" placeholder="Password" aria-label="Directory password">
+        <p id="ldap-error" class="error hidden" role="alert"></p>
+        <button type="button" id="ldap-submit">Sign in</button>
+      </div>
     </form>
   </div>
 

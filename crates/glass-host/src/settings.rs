@@ -38,6 +38,18 @@ pub struct Settings {
     pub oidc_allow: Vec<String>,
     /// What SSO users may do: full control, or view only.
     pub oidc_view_only: bool,
+    /// Directory sign-in (LDAP): the server, `ldaps://…` or `ldap://…` (with StartTLS).
+    pub ldap_url: Option<String>,
+    /// Bind DN for a user, with `{user}` for the name typed, e.g.
+    /// `uid={user},ou=people,dc=example,dc=com`. Without it: search under `ldap_base_dn`.
+    pub ldap_user_dn: Option<String>,
+    pub ldap_base_dn: Option<String>,
+    /// Search filter for the user, with `{user}`; default `(|(uid={user})(mail={user}))`.
+    pub ldap_user_filter: Option<String>,
+    /// Account to search with (its password is `ldap-bind-password`); none: anonymous.
+    pub ldap_bind_dn: Option<String>,
+    /// Attribute listing the user's groups; default `memberOf`.
+    pub ldap_group_attr: Option<String>,
 }
 
 /// The OIDC client secret lives in its own owner-only file, not in settings.json.
@@ -53,21 +65,50 @@ pub fn oidc_secret() -> Option<String> {
 }
 
 fn save_oidc_secret(secret: &str) -> Result<()> {
-    let p = oidc_secret_path();
+    save_secret(&oidc_secret_path(), secret)
+}
+
+/// The LDAP search account's password (owner-only file).
+pub fn ldap_bind_password_path() -> PathBuf {
+    crate::config_dir().join("ldap-bind-password")
+}
+
+pub fn ldap_bind_password() -> Option<String> {
+    read_secret(&ldap_bind_password_path())
+}
+
+/// The bearer token SCIM provisioning (an identity provider) must present.
+pub fn scim_token_path() -> PathBuf {
+    crate::config_dir().join("scim-token")
+}
+
+pub fn scim_token() -> Option<String> {
+    read_secret(&scim_token_path())
+}
+
+fn read_secret(p: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(p)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Writes an owner-only secret file; an empty value removes it.
+fn save_secret(p: &std::path::Path, secret: &str) -> Result<()> {
     if secret.is_empty() {
-        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(p);
         return Ok(());
     }
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let _ = std::fs::remove_file(&p);
+    let _ = std::fs::remove_file(p);
     use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    opts.open(&p)?.write_all(secret.as_bytes())?;
+    opts.open(p)?.write_all(secret.as_bytes())?;
     Ok(())
 }
 
@@ -109,7 +150,15 @@ pub const KEYS: &[(&str, &str)] = &[
     ("oidc-client-id", "the OAuth client id registered with that provider"),
     ("oidc-client-secret", "its client secret (stored separately, owner-only)"),
     ("oidc-allow", "who may sign in: emails or @domain, comma-separated"),
-    ("oidc-scope", "full or view-only: what SSO users may do"),
+    ("oidc-scope", "full or view-only: what SSO users may do (glass acl for more)"),
+    ("ldap-url", "directory sign-in server, ldaps://… or ldap://… (StartTLS)"),
+    ("ldap-user-dn", "bind DN with {user}, e.g. uid={user},ou=people,dc=example,dc=com"),
+    ("ldap-base-dn", "or: where to search for the user, e.g. dc=example,dc=com"),
+    ("ldap-user-filter", "search filter with {user}, default (|(uid={user})(mail={user}))"),
+    ("ldap-bind-dn", "account to search with (default anonymous)"),
+    ("ldap-bind-password", "its password (stored separately, owner-only)"),
+    ("ldap-group-attr", "attribute listing a user's groups (default memberOf)"),
+    ("scim-token", "bearer token for SCIM provisioning; new makes one"),
 ];
 
 /// A relay must be HTTPS (browsers need a secure page for WebRTC and passkeys), except
@@ -170,6 +219,14 @@ impl Settings {
             "oidc-client-secret" => if oidc_secret().is_some() { "(set)" } else { "" }.into(),
             "oidc-allow" => self.oidc_allow.join(","),
             "oidc-scope" => if self.oidc_view_only { "view-only" } else { "full" }.into(),
+            "ldap-url" => self.ldap_url.clone().unwrap_or_default(),
+            "ldap-user-dn" => self.ldap_user_dn.clone().unwrap_or_default(),
+            "ldap-base-dn" => self.ldap_base_dn.clone().unwrap_or_default(),
+            "ldap-user-filter" => self.ldap_user_filter.clone().unwrap_or_default(),
+            "ldap-bind-dn" => self.ldap_bind_dn.clone().unwrap_or_default(),
+            "ldap-bind-password" => if ldap_bind_password().is_some() { "(set)" } else { "" }.into(),
+            "ldap-group-attr" => self.ldap_group_attr.clone().unwrap_or_default(),
+            "scim-token" => if scim_token().is_some() { "(set)" } else { "" }.into(),
             _ => anyhow::bail!("unknown setting {key}; see glass config"),
         })
     }
@@ -255,6 +312,54 @@ impl Settings {
                     "view-only" => true,
                     _ => anyhow::bail!("expected full or view-only"),
                 }
+            }
+            "ldap-url" => {
+                anyhow::ensure!(
+                    value.is_empty()
+                        || ((value.starts_with("ldaps://") || value.starts_with("ldap://"))
+                            && !value.contains(' ')),
+                    "expected ldaps://host or ldap://host"
+                );
+                self.ldap_url = (!value.is_empty()).then(|| value.trim_end_matches('/').to_string());
+            }
+            "ldap-user-dn" => {
+                anyhow::ensure!(
+                    value.is_empty() || value.contains("{user}"),
+                    "the DN needs {{user}} where the name goes"
+                );
+                self.ldap_user_dn = (!value.is_empty()).then(|| value.to_string());
+            }
+            "ldap-base-dn" => self.ldap_base_dn = (!value.is_empty()).then(|| value.to_string()),
+            "ldap-user-filter" => {
+                anyhow::ensure!(
+                    value.is_empty() || (value.starts_with('(') && value.contains("{user}")),
+                    "expected a filter like (uid={{user}})"
+                );
+                self.ldap_user_filter = (!value.is_empty()).then(|| value.to_string());
+            }
+            "ldap-bind-dn" => self.ldap_bind_dn = (!value.is_empty()).then(|| value.to_string()),
+            "ldap-bind-password" => save_secret(&ldap_bind_password_path(), value)?,
+            "ldap-group-attr" => {
+                anyhow::ensure!(
+                    value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                    "expected an attribute name like memberOf"
+                );
+                self.ldap_group_attr = (!value.is_empty()).then(|| value.to_string());
+            }
+            "scim-token" => {
+                let token = if value == "new" {
+                    use std::io::Read;
+                    let mut bytes = [0u8; 24];
+                    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+                    bytes.iter().map(|b| format!("{b:02x}")).collect()
+                } else {
+                    anyhow::ensure!(
+                        value.is_empty() || (value.len() >= 16 && !value.contains(' ')),
+                        "use at least 16 characters, or new"
+                    );
+                    value.to_string()
+                };
+                save_secret(&scim_token_path(), &token)?;
             }
             _ => anyhow::bail!("unknown setting {key}; see glass config"),
         }
