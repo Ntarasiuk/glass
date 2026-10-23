@@ -27,6 +27,10 @@ use crate::soft_encode::{Encoder, Frame, PixelFormat};
 const WIDTH: usize = 640;
 const HEIGHT: usize = 360;
 const DISPLAYS: usize = 2;
+/// Fake windows for single-app streaming: (id, app, title), each WINDOW_WIDTH×WINDOW_HEIGHT.
+const WINDOWS: [(u32, &str, &str); 2] = [(100, "Notes", "Notes — todo.txt"), (101, "Terminal", "Terminal")];
+const WINDOW_WIDTH: usize = 480;
+const WINDOW_HEIGHT: usize = 320;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Frames to drop before sending (simulated loss).
@@ -118,7 +122,8 @@ pub fn take_corrupt() -> bool {
 // ---- Video: a moving test pattern per fake display ----
 
 pub struct TestVideo {
-    displays: Vec<DisplayInfo>,
+    /// The fake displays, then the fake windows (as streams they look the same).
+    sources: Vec<DisplayInfo>,
     slots: Vec<Arc<AtomicI32>>,
     keyframes: Vec<Arc<AtomicBool>>,
     shown: Mutex<Vec<u32>>,
@@ -141,23 +146,37 @@ impl TestVideo {
                 main: i == 0,
                 builtin: false,
             })
+            .chain(WINDOWS.iter().enumerate().map(|(i, &(id, _, _))| DisplayInfo {
+                id,
+                width: WINDOW_WIDTH,
+                height: WINDOW_HEIGHT,
+                x: 40.0 + i as f64 * 60.0,
+                y: 40.0,
+                points_width: WINDOW_WIDTH as f64,
+                points_height: WINDOW_HEIGHT as f64,
+                main: false,
+                builtin: false,
+            }))
             .collect();
-        let slots: Vec<_> = (0..DISPLAYS)
+        let count = displays.len();
+        let slots: Vec<_> = (0..count)
             .map(|_| Arc::new(AtomicI32::new(-1)))
             .collect();
-        let keyframes: Vec<_> = (0..DISPLAYS)
+        let keyframes: Vec<_> = (0..count)
             .map(|_| Arc::new(AtomicBool::new(true)))
             .collect();
-        let widths: Vec<_> = (0..DISPLAYS)
-            .map(|_| Arc::new(std::sync::atomic::AtomicUsize::new(WIDTH)))
+        let widths: Vec<_> = displays
+            .iter()
+            .map(|d| Arc::new(std::sync::atomic::AtomicUsize::new(d.width)))
             .collect();
-        for i in 0..DISPLAYS {
+        for i in 0..count {
             let (slot, keyframe, frames) = (slots[i].clone(), keyframes[i].clone(), frames.clone());
             let width = widths[i].clone();
-            std::thread::spawn(move || pattern_loop(i, slot, keyframe, width, frames, fps));
+            let size = (displays[i].width, displays[i].height);
+            std::thread::spawn(move || pattern_loop(i, size, slot, keyframe, width, frames, fps));
         }
         Self {
-            displays,
+            sources: displays,
             slots,
             keyframes,
             shown: Mutex::new(Vec::new()),
@@ -172,7 +191,7 @@ impl VideoSource for TestVideo {
             .lock()
             .unwrap()
             .iter()
-            .map(|&i| self.displays[i as usize].clone())
+            .map(|&i| self.sources[i as usize].clone())
             .collect()
     }
 
@@ -180,11 +199,12 @@ impl VideoSource for TestVideo {
         for (d, slot) in self.slots.iter().enumerate() {
             let s = slot.load(Ordering::Relaxed);
             if s >= 0 {
+                let native = self.sources[d].width;
                 let w = widths
                     .get(s as usize)
                     .copied()
                     .flatten()
-                    .map_or(WIDTH, |w| (w as usize).min(WIDTH));
+                    .map_or(native, |w| (w as usize).min(native));
                 self.widths[d].store(w, Ordering::Relaxed);
             }
         }
@@ -206,7 +226,14 @@ impl VideoSource for TestVideo {
                 vec![id]
             }
             Layout::Single(None) => vec![0],
-            Layout::Window(_) => anyhow::bail!("test mode has no windows"),
+            Layout::Window(id) => {
+                let i = self
+                    .sources
+                    .iter()
+                    .position(|d| d.id == id && d.id >= WINDOWS[0].0)
+                    .ok_or_else(|| anyhow::anyhow!("that window is gone"))?;
+                vec![i as u32]
+            }
             Layout::All => (0..DISPLAYS.min(MAX_STREAMS) as u32).collect(),
         };
         for slot in &self.slots {
@@ -219,12 +246,34 @@ impl VideoSource for TestVideo {
         *self.shown.lock().unwrap() = ids.clone();
         Ok(ids
             .iter()
-            .map(|&i| self.displays[i as usize].clone())
+            .map(|&i| self.sources[i as usize].clone())
             .collect())
     }
 
     fn displays(&self) -> Result<Vec<DisplayInfo>> {
-        Ok(self.displays.clone())
+        Ok(self.sources[..DISPLAYS].to_vec())
+    }
+
+    fn supports_windows(&self) -> bool {
+        true
+    }
+
+    fn windows(&self) -> Result<Vec<crate::media::WindowInfo>> {
+        Ok(WINDOWS
+            .iter()
+            .zip(&self.sources[DISPLAYS..])
+            .map(|(&(id, app, title), d)| crate::media::WindowInfo {
+                id,
+                app: app.into(),
+                title: title.into(),
+                width: d.width,
+                height: d.height,
+                x: d.x,
+                y: d.y,
+                points_width: d.points_width,
+                points_height: d.points_height,
+            })
+            .collect())
     }
 
     fn set_bitrate(&self, bps: u32) {
@@ -234,6 +283,7 @@ impl VideoSource for TestVideo {
 
 fn pattern_loop(
     display: usize,
+    (w, h): (usize, usize),
     slot: Arc<AtomicI32>,
     keyframe: Arc<AtomicBool>,
     width: Arc<std::sync::atomic::AtomicUsize>,
@@ -241,8 +291,8 @@ fn pattern_loop(
     fps: u32,
 ) {
     let mut applied = BITRATE.load(Ordering::Relaxed);
-    let mut encoded_width = WIDTH;
-    let mut encoder = Encoder::new(WIDTH, HEIGHT, fps, applied, 1.0).expect("test encoder");
+    let mut encoded_width = w;
+    let mut encoder = Encoder::new(w, h, fps, applied, 1.0).expect("test encoder");
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
     let mut next = Instant::now();
     for n in 0u64.. {
@@ -255,8 +305,8 @@ fn pattern_loop(
         // Dynamic resolution: a new size means a new encoder, starting on a keyframe.
         let want = width.load(Ordering::Relaxed);
         if want != encoded_width {
-            let scale = want as f64 / WIDTH as f64;
-            if let Ok(e) = Encoder::new(WIDTH, HEIGHT, fps, applied, scale) {
+            let scale = want as f64 / w as f64;
+            if let Ok(e) = Encoder::new(w, h, fps, applied, scale) {
                 encoder = e;
                 encoded_width = want;
                 keyframe.store(true, Ordering::Relaxed);
@@ -267,7 +317,7 @@ fn pattern_loop(
             encoder.set_bitrate(target);
             applied = target;
         }
-        let frame = render(display, n);
+        let frame = render(display, w, h, n);
         let force = keyframe.swap(false, Ordering::Relaxed);
         if let Ok(Some((data, key))) = encoder.encode(&frame, force) {
             let _ = frames.send(Arc::new(EncodedFrame {
@@ -281,27 +331,28 @@ fn pattern_loop(
     }
 }
 
-/// A distinct background per display with a bar sweeping across.
-fn render(display: usize, n: u64) -> Frame {
-    let mut data = vec![0u8; WIDTH * HEIGHT * 4];
-    let bar = (n as usize * 8) % WIDTH;
-    let bg = if display == 0 {
-        [200, 80, 30]
-    } else {
-        [30, 160, 90]
+/// A distinct background per display (and window) with a bar sweeping across.
+fn render(display: usize, width: usize, height: usize, n: u64) -> Frame {
+    let mut data = vec![0u8; width * height * 4];
+    let bar = (n as usize * 8) % width;
+    let bg = match display {
+        0 => [200, 80, 30],
+        1 => [30, 160, 90],
+        2 => [170, 60, 160],
+        _ => [60, 60, 200],
     };
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
-            let p = &mut data[(y * WIDTH + x) * 4..][..4];
+    for y in 0..height {
+        for x in 0..width {
+            let p = &mut data[(y * width + x) * 4..][..4];
             let on_bar = x >= bar && x < bar + 24;
             let [b, g, r] = if on_bar { [255, 255, 255] } else { bg };
             p.copy_from_slice(&[b, g, r, 255]);
         }
     }
     Frame {
-        width: WIDTH,
-        height: HEIGHT,
-        stride: WIDTH * 4,
+        width,
+        height,
+        stride: width * 4,
         format: PixelFormat::Bgrx,
         data,
     }
