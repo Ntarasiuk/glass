@@ -62,6 +62,9 @@ pub enum ClientMsg {
     Term(crate::terminal::ClientTerm),
     /// Start or stop recording this session's video on the host. Owner only.
     Record { on: bool },
+    /// Sharp text: native size, a finer encoding policy and (HEVC) 4:2:2 colour, for
+    /// reading. Shared by every viewer; not for view-only links.
+    Sharp { on: bool },
     /// Stream just this display.
     SelectDisplay { id: u32 },
     /// Stream every display side by side.
@@ -134,6 +137,8 @@ pub enum ServerMsg {
     Codec { codec: &'static str },
     Recording { on: bool, path: Option<String> },
     Privacy { on: bool },
+    /// Sharp text in force: "4:2:2", "sharp" or "off".
+    Sharp { mode: &'static str },
     /// A guest pass for this device, traded for the link it opened (unix-seconds expiry).
     Pass {
         pass: String,

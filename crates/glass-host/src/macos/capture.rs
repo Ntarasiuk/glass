@@ -29,6 +29,8 @@ pub use crate::media::{DisplayInfo, WindowInfo};
 
 /// kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ('420v'), the encoder's native input.
 const PIXEL_FORMAT_420V: u32 = u32::from_be_bytes(*b"420v");
+/// kCVPixelFormatType_32BGRA: full colour, for the HEVC 4:2:2 sharp-text encoder.
+const PIXEL_FORMAT_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
 
 /// The most recent captured frame, kept so a keyframe can be produced on demand: a static
 /// screen yields no new frames, and a client that just connected would otherwise wait.
@@ -422,7 +424,11 @@ pub fn start(
         config.setWidth(width);
         config.setHeight(height);
         config.setMinimumFrameInterval(CMTime::new(1, fps));
-        config.setPixelFormat(PIXEL_FORMAT_420V);
+        config.setPixelFormat(if encoder.wants_bgra() {
+            PIXEL_FORMAT_BGRA
+        } else {
+            PIXEL_FORMAT_420V
+        });
         config.setShowsCursor(true);
         // One buffer is held as the last frame, so leave the pool room for new ones.
         config.setQueueDepth(4);

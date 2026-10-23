@@ -87,6 +87,14 @@ pub trait VideoSource: Send + Sync {
     fn set_hevc(&self, _hevc: bool) -> bool {
         false
     }
+    /// Sharp text: HEVC 4:2:2 instead of 4:2:0 while HEVC is on; returns whether it's in use.
+    fn set_rext(&self, _on: bool) -> bool {
+        false
+    }
+    /// Can this source encode HEVC 4:2:2 (Range Extensions)?
+    fn supports_rext(&self) -> bool {
+        false
+    }
     /// Can this source encode HEVC at all?
     fn supports_hevc(&self) -> bool {
         false

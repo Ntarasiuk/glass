@@ -76,6 +76,8 @@ pub struct Video {
     target_widths: Mutex<Vec<Option<u32>>>,
     /// Encode in HEVC rather than H.264 (crate::codec decides).
     hevc: AtomicBool,
+    /// HEVC 4:2:2 for sharp text (crate::sharp decides; only while HEVC is on).
+    rext: AtomicBool,
 }
 
 impl Video {
@@ -94,6 +96,7 @@ impl Video {
             bitrate,
             target_widths: Mutex::new(Vec::new()),
             hevc: AtomicBool::new(false),
+            rext: AtomicBool::new(false),
         }
     }
 
@@ -174,6 +177,7 @@ impl Video {
         let info = target.info();
         let (w, h) = (info.width as f64, info.height as f64);
         let hevc = self.hevc.load(Ordering::Relaxed);
+        let rext = hevc && self.rext.load(Ordering::Relaxed);
         let max_pixels = if hevc {
             MAX_HEVC_PIXELS
         } else {
@@ -202,6 +206,7 @@ impl Video {
             self.config.fps,
             self.config.bitrate,
             hevc,
+            rext,
             keyframe.clone(),
             Arc::new(move |frame| {
                 let _ = frames.send(Arc::new(EncodedFrame {
@@ -229,7 +234,13 @@ impl Video {
             "stream {index}: {} {id} at {width}x{height} @ {}fps ({})",
             if window { "window" } else { "display" },
             self.config.fps,
-            if hevc { "HEVC" } else { "H.264" }
+            if rext {
+                "HEVC 4:2:2"
+            } else if hevc {
+                "HEVC"
+            } else {
+                "H.264"
+            }
         );
         Ok(Stream {
             capture,
@@ -241,6 +252,48 @@ impl Video {
             width,
             window,
         })
+    }
+
+    /// Restarts every stream with the current codec settings (each starts on a keyframe).
+    fn restart_all(&self, why: &str) {
+        let Ok(displays) = capture::list_displays() else {
+            return;
+        };
+        let mut streams = self.streams.lock().unwrap();
+        let windows = if streams.iter().any(|s| s.window) {
+            capture::list_windows().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for index in 0..streams.len() {
+            let id = streams[index].display.id;
+            let target = if streams[index].window {
+                match windows.iter().find(|w| w.info.id == id) {
+                    Some(w) => Target::Window(w),
+                    None => continue,
+                }
+            } else {
+                match displays.iter().find(|d| d.info.id == id) {
+                    Some(d) => Target::Display(d),
+                    None => continue,
+                }
+            };
+            let audio = (index == 0).then(|| self.audio.clone());
+            // Stop the old one first so the stream never has two encoders feeding it.
+            let old = std::mem::replace(
+                &mut streams[index],
+                match self.start(index as u8, &target, audio) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("restarting stream {index} ({why}): {e:#}");
+                        continue;
+                    }
+                },
+            );
+            drop(old);
+        }
+        drop(streams);
+        self.rebalance();
     }
 
     pub fn displays(&self) -> Result<Vec<DisplayInfo>> {
@@ -274,50 +327,25 @@ impl VideoSource for Video {
     fn supports_hevc(&self) -> bool {
         super::encode::supports_hevc()
     }
+    fn supports_rext(&self) -> bool {
+        super::encode::supports_rext()
+    }
+    /// Sharp text: HEVC 4:2:2 instead of 4:2:0 (applies while HEVC is on).
+    fn set_rext(&self, on: bool) -> bool {
+        let on = on && super::encode::supports_rext();
+        if self.rext.swap(on, Ordering::Relaxed) != on && self.hevc.load(Ordering::Relaxed) {
+            self.restart_all("chroma");
+            info!("video chroma: {}", if on { "4:2:2" } else { "4:2:0" });
+        }
+        on && self.hevc.load(Ordering::Relaxed)
+    }
     /// Restarts every stream in the new codec (each starts on a keyframe).
     fn set_hevc(&self, hevc: bool) -> bool {
         let hevc = hevc && super::encode::supports_hevc();
         if self.hevc.swap(hevc, Ordering::Relaxed) == hevc {
             return hevc;
         }
-        let Ok(displays) = capture::list_displays() else {
-            return hevc;
-        };
-        let mut streams = self.streams.lock().unwrap();
-        let windows = if streams.iter().any(|s| s.window) {
-            capture::list_windows().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        for index in 0..streams.len() {
-            let id = streams[index].display.id;
-            let target = if streams[index].window {
-                match windows.iter().find(|w| w.info.id == id) {
-                    Some(w) => Target::Window(w),
-                    None => continue,
-                }
-            } else {
-                match displays.iter().find(|d| d.info.id == id) {
-                    Some(d) => Target::Display(d),
-                    None => continue,
-                }
-            };
-            let audio = (index == 0).then(|| self.audio.clone());
-            // Stop the old one first so the stream never has two encoders feeding it.
-            let old = std::mem::replace(
-                &mut streams[index],
-                match self.start(index as u8, &target, audio) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!("switching stream {index} codec: {e:#}");
-                        continue;
-                    }
-                },
-            );
-            drop(old);
-        }
-        drop(streams);
-        self.rebalance();
+        self.restart_all("codec");
         info!("video codec: {}", if hevc { "HEVC" } else { "H.264" });
         hevc
     }

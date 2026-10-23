@@ -29,6 +29,7 @@ const SHORTCUTS = [
 
 const TOKEN_KEY = 'glass.token';
 const RESOLUTION_KEY = 'glass.resolution'; // 'auto' (sized to this screen) or 'native'
+const SHARP_KEY = 'glass.sharp'; // '1': sharp text (for reading)
 const PASS_KEY = 'glass.pass'; // guest pass from a magic link: { pass, expires }
 const SWAP_KEY = 'glass.swapCmdOption';
 const CTRL_AS_CMD_KEY = 'glass.ctrlAsCmd';
@@ -135,6 +136,8 @@ const send = (kind, fields) => inputAllowed && worker.postMessage({ type: 'input
 let session = 0; // this session's id, from welcome (chat from it is our own)
 let perms = { input: true, clipboard: true, files: true, owner: true };
 let features = {};
+let sharpWanted = storage((s) => s.getItem(SHARP_KEY)) === '1';
+let sharpMode = 'off'; // what the host is doing: 'off', 'sharp' or '4:2:2'
 let deniedMsg; // why the host last turned us away
 
 // Resolves with the next clipboard text the Mac reports (used for Cmd+C / Cmd+X).
@@ -221,6 +224,15 @@ const ui = createUI({
   onWakeMachine: (m) => control({ t: 'wake', dns: m.dns }),
   onSelectMachine: (m) => switchMachine(machineId(m), m.name),
   onSelectDisplay: (id) => control(id === 'all' ? { t: 'showAll' } : { t: 'selectDisplay', id }),
+  onSharp: (on) => {
+    sharpWanted = on;
+    storage((s) => s.setItem(SHARP_KEY, on ? '1' : '0'));
+    ui.setSharp({ on });
+    control({ t: 'sharp', on });
+    // Back to sizing by this screen: the host ignored our viewport while sharp.
+    if (!on) queueViewport(true);
+    log('info', `sharp text ${on ? 'on' : 'off'}`);
+  },
   onListWindows: () => control({ t: 'listWindows' }),
   onSelectWindow: (id) => {
     streamedWindows.add(id);
@@ -520,6 +532,10 @@ function onControl(msg) {
       ui.setComputerControls({ isOwner: msg.perms ? msg.perms.owner : !guest, privacy: Boolean(msg.features?.privacy) });
       ui.setPrivacyOn(false);
       ui.setWindowsAvailable(Boolean(msg.features?.windows));
+      // Sharp text is this device's choice: ask again on every (re)connect.
+      sharpMode = 'off';
+      ui.setSharp({ available: perms.input, on: sharpWanted && perms.input, mode: 'off' });
+      if (sharpWanted && perms.input) control({ t: 'sharp', on: true });
       {
         // Controllers and the mic count as input: not for view-only links.
         const canInput = msg.perms?.input ?? true;
@@ -569,6 +585,11 @@ function onControl(msg) {
       storage((s) => s.setItem(passKey, JSON.stringify({ pass: msg.pass, expires: msg.expires })));
       ui.toast({ text: `You're in. This device has access until ${formatExpiry(msg.expires)}.`, icon: 'link', timeout: 6000 });
       log('info', 'signed in with a magic link', { expires: msg.expires });
+      break;
+    case 'sharp':
+      sharpMode = msg.mode;
+      ui.setSharp({ mode: msg.mode });
+      log('info', `sharp text: ${msg.mode}`);
       break;
     case 'privacy':
       ui.setPrivacyOn(msg.on);
@@ -704,7 +725,7 @@ function renderHud(d) {
   latency.className = latencyClass(d.latencyAvg);
   latency.textContent = `${d.latencyAvg.toFixed(1)} ms`;
   const lines = [
-    hudLine(host, `  ${status}  ${codec}  ${videoSizes.filter(Boolean).join(' + ')}`),
+    hudLine(host, `  ${status}  ${codec}${sharpMode === 'off' ? '' : ` · ${sharpMode}`}  ${videoSizes.filter(Boolean).join(' + ')}`),
     hudLine('latency ', latency, ` (max ${d.latencyMax.toFixed(1)})  rtt ${d.rtt.toFixed(1)} ms`),
     hudLine(
       `${d.fps} fps  ${d.mbps.toFixed(1)} Mbps` + (targetMbps ? ` (target ${targetMbps.toFixed(0)})` : '') + `  dropped ${d.dropped}`,
