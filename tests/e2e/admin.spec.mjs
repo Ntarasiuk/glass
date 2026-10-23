@@ -28,7 +28,7 @@ test.describe('console', () => {
     const page = await ctx.newPage();
     await page.goto(`${host.base}/admin/auth?t=${host.token}`);
     await expect(page).toHaveURL(`${host.base}/admin/`);
-    await expect(page.locator('#viewers li')).toHaveText(/Chrome on Mac/);
+    await expect(page.locator('#viewers li')).toHaveText(/Chrome on (Mac|Linux)/);
 
     // A view-only link: the guest gets video but no keyboard button.
     await page.locator('#link-form input[name=view_only]').check();

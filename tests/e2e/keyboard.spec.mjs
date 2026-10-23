@@ -23,12 +23,14 @@ test('each machine keeps its own keyboard remaps', async ({ page }) => {
     await page.goto(host.url());
     await expectVideo(page);
     expect(await checked(page, 'Ctrl as ⌘')).toBe('true');
+    // PC keyboard starts on in Linux and Windows browsers.
+    const pc = (await checked(page, 'PC keyboard')) === 'true';
     await toggle(page, 'Ctrl as ⌘');
     await toggle(page, 'Swap ⌘ and ⌥');
     // Saved under this machine (host and port), alongside another machine's own profile.
     const id = `localhost:${host.wt}`;
     const saved = await page.evaluate((id) => JSON.parse(localStorage.getItem(`glass.keyboard.${id}`)), id);
-    expect(saved).toEqual({ pc: false, ctrlAsCmd: false, swap: true });
+    expect(saved).toEqual({ pc, ctrlAsCmd: false, swap: true });
     await page.evaluate((id) => localStorage.setItem(`glass.keyboard.${id}`, JSON.stringify({ pc: true, ctrlAsCmd: true, swap: false })), id);
     // On reconnect the machine's profile is what applies, not the last toggles.
     await page.reload();

@@ -155,6 +155,8 @@
     .panel {
       position: fixed; top: calc(var(--top) + 56px); right: var(--right);
       min-width: 252px; max-width: min(320px, calc(100vw - 20px)); padding: 6px; border-radius: var(--radius);
+      /* Long menus scroll instead of running off a short screen. */
+      max-height: calc(100dvh - var(--top) - 66px); overflow-y: auto; overscroll-behavior: contain;
       transform-origin: top right; animation: open 220ms var(--ease-out);
     }
     @keyframes open { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
