@@ -5,7 +5,7 @@ import {
   AUDIO_HEADER_LEN, KIND_AUDIO, KIND_KEYFRAME_REQUEST, KIND_PONG, KIND_VIDEO,
   ping, readPong, readVideoHeader,
 } from './proto.js';
-import { VideoStream, probeDecoders, setDecoderStep } from './video-stream.js';
+import { VideoStream, probeCodecs, probeDecoders, setDecoderStep } from './video-stream.js';
 import { RtcTransport } from './rtc-transport.js';
 
 const PING_INTERVAL_MS = 500;
@@ -32,6 +32,7 @@ let device; // e.g. "Safari on iPad", shown on the host
 let rtcPort; // remote access: WebRTC over the main thread instead of WebTransport
 let link; // magic link code; traded for a guest pass on first sign-in
 let pass; // guest pass
+let codecs = ['h264']; // what this browser decodes, offered in hello (HEVC if hardware)
 let rejected = false;
 let controlWriter;
 let audioPort; // MessagePort of the main thread's AudioWorkletNode
@@ -75,6 +76,7 @@ self.onmessage = async ({ data }) => {
     ({ url, certHash, token, link, pass, rtcPort, device } = data);
     setDecoderStep(data.decoderStep ?? 0);
     await probeDecoders(log);
+    codecs = await probeCodecs();
     setInterval(() => datagramWriter?.write(ping(performance.now())).catch(() => {}), PING_INTERVAL_MS);
     setInterval(tick, 1000);
     run();
@@ -187,7 +189,7 @@ async function connect() {
   // Control stream first: the host ignores everything else until hello is accepted.
   const control = await transport.createBidirectionalStream();
   controlWriter = control.writable.getWriter();
-  sendControl({ t: 'hello', token, link, pass, device });
+  sendControl({ t: 'hello', token, link, pass, device, codecs });
   if (audioOn) sendControl({ t: 'audio', on: true });
   if (!visible) sendControl({ t: 'video', on: false });
   readControl(control.readable).catch((e) => log('warn', `control read ended: ${e.message ?? e}`));

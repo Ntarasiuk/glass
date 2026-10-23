@@ -1199,11 +1199,16 @@ fn send_frame(
     if crate::testmode::take_drop() {
         return Ok(());
     }
-    let mut dgrams = glass_proto::fragment(
+    let flags = if frame.keyframe {
+        glass_proto::FLAG_KEYFRAME
+    } else {
+        0
+    } | if frame.hevc { glass_proto::FLAG_HEVC } else { 0 };
+    let mut dgrams = glass_proto::fragment_with_flags(
         &frame.data,
         frame.stream,
         id,
-        frame.keyframe,
+        flags,
         frame.capture_us,
         max,
     );

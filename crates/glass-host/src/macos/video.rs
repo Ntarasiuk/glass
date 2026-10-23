@@ -15,7 +15,10 @@ use super::encode::{EncodedFrame, Encoder};
 pub use crate::media::Layout;
 use crate::media::VideoSource;
 
+/// H.264 level 5.2 caps a frame at 36864 macroblocks (e.g. 4096x2304); HEVC (level 6.2)
+/// takes 8192x4320, so a 5K display goes out at full size only in HEVC.
 const MAX_MACROBLOCKS: f64 = 36864.0;
+const MAX_HEVC_PIXELS: f64 = 8192.0 * 4320.0;
 
 pub struct VideoConfig {
     pub fps: i32,
@@ -47,6 +50,8 @@ pub struct Video {
     bitrate: std::sync::atomic::AtomicU32,
     /// Per stream: the width viewers need (`None` = native), from dynamic resolution.
     target_widths: Mutex<Vec<Option<u32>>>,
+    /// Encode in HEVC rather than H.264 (crate::codec decides).
+    hevc: AtomicBool,
 }
 
 impl Video {
@@ -64,6 +69,7 @@ impl Video {
             streams: Mutex::new(Vec::new()),
             bitrate,
             target_widths: Mutex::new(Vec::new()),
+            hevc: AtomicBool::new(false),
         }
     }
 
@@ -132,8 +138,12 @@ impl Video {
         audio: Option<Arc<Mutex<Packetizer>>>,
     ) -> Result<Stream> {
         let (w, h) = (display.info.width as f64, display.info.height as f64);
-        // H.264 level 5.2 caps a frame at 36864 macroblocks (e.g. 4096x2304), so a 5K
-        // display is downscaled until HEVC lands.
+        let hevc = self.hevc.load(Ordering::Relaxed);
+        let max_pixels = if hevc {
+            MAX_HEVC_PIXELS
+        } else {
+            MAX_MACROBLOCKS * 256.0
+        };
         let target = self
             .target_widths
             .lock()
@@ -144,7 +154,7 @@ impl Video {
         let scale = self
             .config
             .scale
-            .min((MAX_MACROBLOCKS * 256.0 / (w * h)).sqrt())
+            .min((max_pixels / (w * h)).sqrt())
             .min(target.map_or(1.0, |t| t as f64 / w));
         let width = ((w * scale) as usize) & !1;
         let height = ((h * scale) as usize) & !1;
@@ -156,6 +166,7 @@ impl Video {
             height as i32,
             self.config.fps,
             self.config.bitrate,
+            hevc,
             keyframe.clone(),
             Arc::new(move |frame| {
                 let _ = frames.send(Arc::new(EncodedFrame {
@@ -179,8 +190,9 @@ impl Video {
         )?;
         let id = display.info.id;
         info!(
-            "stream {index}: display {id} at {width}x{height} @ {}fps",
-            self.config.fps
+            "stream {index}: display {id} at {width}x{height} @ {}fps ({})",
+            self.config.fps,
+            if hevc { "HEVC" } else { "H.264" }
         );
         Ok(Stream {
             capture,
@@ -213,6 +225,43 @@ impl VideoSource for Video {
     }
     fn displays(&self) -> Result<Vec<DisplayInfo>> {
         Video::displays(self)
+    }
+    fn supports_hevc(&self) -> bool {
+        super::encode::supports_hevc()
+    }
+    /// Restarts every stream in the new codec (each starts on a keyframe).
+    fn set_hevc(&self, hevc: bool) -> bool {
+        let hevc = hevc && super::encode::supports_hevc();
+        if self.hevc.swap(hevc, Ordering::Relaxed) == hevc {
+            return hevc;
+        }
+        let Ok(displays) = capture::list_displays() else {
+            return hevc;
+        };
+        let mut streams = self.streams.lock().unwrap();
+        for index in 0..streams.len() {
+            let id = streams[index].display.id;
+            let Some(display) = displays.iter().find(|d| d.info.id == id) else {
+                continue;
+            };
+            let audio = (index == 0).then(|| self.audio.clone());
+            // Stop the old one first so the stream never has two encoders feeding it.
+            let old = std::mem::replace(
+                &mut streams[index],
+                match self.start(index as u8, display, audio) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("switching stream {index} codec: {e:#}");
+                        continue;
+                    }
+                },
+            );
+            drop(old);
+        }
+        drop(streams);
+        self.rebalance();
+        info!("video codec: {}", if hevc { "HEVC" } else { "H.264" });
+        hevc
     }
     /// `bps` is the total for all displays (not each): shared out by `rebalance`.
     fn set_bitrate(&self, bps: u32) {

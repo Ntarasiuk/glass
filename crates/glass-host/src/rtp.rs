@@ -437,6 +437,12 @@ pub async fn pump(outs: Vec<VideoOut>, target: Arc<AtomicU64>, mut viewer: Viewe
                     started[s] = false;
                     continue;
                 }
+                // RTP tracks are H.264; crate::codec keeps HEVC off while one is open, so
+                // HEVC frames here are only the tail of a switch.
+                if frame.hevc {
+                    started[s] = false;
+                    continue;
+                }
                 if !started[s] && !frame.keyframe {
                     continue;
                 }
