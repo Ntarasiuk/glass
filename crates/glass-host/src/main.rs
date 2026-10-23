@@ -161,6 +161,23 @@ enum Command {
     },
 }
 
+/// A one-time link to this host: on the tailnet (`base` is the host's own address), or from
+/// anywhere over WebRTC, which turns remote access on.
+pub(crate) fn make_link(
+    base: &str,
+    grant: std::time::Duration,
+    anywhere: bool,
+) -> Result<(String, access::NewLink)> {
+    let link = access::create_link(&access::file_for(&default_token_file()), grant)?;
+    let url = if anywhere {
+        remote::set_enabled(true)?;
+        remote::link_url(&remote::HostKey::load_or_create()?, &link.code)
+    } else {
+        format!("{}/#l={}", base.trim_end_matches('/'), link.code)
+    };
+    Ok((url, link))
+}
+
 /// `glass link`: a one-time link (and QR code) to the running host.
 fn print_link(grant: std::time::Duration, json: bool, anywhere: bool) -> Result<()> {
     let base = status::read()
@@ -169,17 +186,7 @@ fn print_link(grant: std::time::Duration, json: bool, anywhere: bool) -> Result<
         .ok_or_else(|| {
             anyhow::anyhow!("Glass isn't running here. Start it (glass setup), then try again.")
         })?;
-    let link = access::create_link(&access::file_for(&default_token_file()), grant)?;
-    let url = if anywhere {
-        remote::set_enabled(true)?;
-        remote::link_url(&remote::HostKey::load_or_create()?, &link.code)
-    } else {
-        format!(
-            "{}#l={}",
-            base.trim_end_matches('/').to_owned() + "/",
-            link.code
-        )
-    };
+    let (url, link) = make_link(&base, grant, anywhere)?;
     if json {
         let out = serde_json::json!({
             "url": url,

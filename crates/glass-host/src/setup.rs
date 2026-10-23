@@ -8,11 +8,13 @@ use cliclack::{confirm, intro, log, note, outro, spinner};
 use console::style;
 
 use crate::status::{self, Status};
-use crate::{agent, platform, tailscale};
+use crate::{access, agent, platform, tailscale};
 
 use platform::setup::{TAILSCALE_INSTALL, TAILSCALE_SIGN_IN, TAILSCALE_START};
 const TAILSCALE_DNS_ADMIN: &str = "https://login.tailscale.com/admin/dns";
 const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a device let in by setup's link keeps access: a week, as it's the owner's iPad.
+const ANYWHERE_GRANT: Duration = Duration::from_secs(7 * 24 * 3600);
 
 pub async fn run() -> Result<()> {
     intro(style(" glass ").black().on_cyan())?;
@@ -39,7 +41,10 @@ async fn tailscale_step() -> Result<Option<String>> {
                     "Tailscale isn't installed. It's free and gives your devices a private, secure link.\n\
                      {TAILSCALE_INSTALL}"
                 ))?;
-                if !ask_retry("Installed it?", "Skip (use Glass only on this computer)")? {
+                if !ask_retry(
+                    "Installed it?",
+                    "Skip (connect with a one-time link instead)",
+                )? {
                     return Ok(None);
                 }
             }
@@ -177,16 +182,46 @@ fn finish(tailnet: Option<String>) -> Result<()> {
                 ),
             )?;
         }
+        // No tailnet: a one-time link still connects any browser, directly over WebRTC.
         None => {
-            note(
-                "Use Glass on this computer",
-                format!(
-                    "Open {} to try it here.\n\
-                     Run {} again once Tailscale is set up to connect from other devices.",
-                    style("http://localhost:8080/").cyan(),
-                    style("glass setup").bold(),
-                ),
-            )?;
+            log::step("Connect from anywhere")?;
+            let make = confirm(
+                "Make a link for your iPad? It works from any network, end-to-end encrypted, with no open ports.",
+            )
+            .initial_value(true)
+            .interact()?;
+            let link = if make {
+                let base = status::read().and_then(|s| s.url).unwrap_or_default();
+                Some(crate::make_link(&base, ANYWHERE_GRANT, true)?)
+            } else {
+                None
+            };
+            match link {
+                Some((url, link)) => note(
+                    "Connect from your iPad",
+                    format!(
+                        "{qr}\n\
+                         Scan this, or open the link on the iPad:\n{url}\n\n\
+                         Works once, within {ttl}, and gives that device {grant}.\n\
+                         Make another any time: {again}",
+                        qr = qr(&url),
+                        url = style(&url).cyan().underlined(),
+                        ttl = access::describe(access::LINK_TTL),
+                        grant = access::describe(link.grant),
+                        again = style("glass link --anywhere").bold(),
+                    ),
+                )?,
+                None => note(
+                    "Use Glass on this computer",
+                    format!(
+                        "Open {} to try it here.\n\
+                         To connect another device later, run {}, or set up Tailscale and run {} again.",
+                        style("http://localhost:8080/").cyan(),
+                        style("glass link --anywhere").bold(),
+                        style("glass setup").bold(),
+                    ),
+                )?,
+            }
         }
     }
     outro(format!(
@@ -291,7 +326,10 @@ pub async fn run_unattended(json: bool) -> Result<()> {
         tailscale::Probe::Missing => {
             needs.push(Need {
                 step: "tailscale-install",
-                action: TAILSCALE_INSTALL.replace('\n', " "),
+                action: format!(
+                    "{} Or skip Tailscale: `glass link --anywhere` makes a link that connects from any network.",
+                    TAILSCALE_INSTALL.replace('\n', " ")
+                ),
                 on_screen: false,
             });
             None
