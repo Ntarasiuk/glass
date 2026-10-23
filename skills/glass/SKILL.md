@@ -49,7 +49,7 @@ run '~/.glass/bin/glass status --json || echo not-installed'
 run 'curl -fsSL https://glassdesk.dev/install.sh | sh'
 ```
 
-Without a terminal it installs and prints "Next: run glass setup" instead of starting the interactive setup. Re-running updates in place.
+Without a terminal it installs and prints "Next: run glass setup" instead of starting the interactive setup. Re-running updates in place; on a machine that is already set up it prints "Updated Glass X → Y" and skips setup.
 
 ## 5. Set up without a human (as far as possible)
 

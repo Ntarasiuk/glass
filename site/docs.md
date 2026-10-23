@@ -43,13 +43,13 @@ The installer:
 3. Installs to `~/.glass` and links the `glass` command into `~/.local/bin` (adding that to your PATH if needed).
 4. Starts `glass setup`, the interactive setup guide.
 
-Running the same command again updates Glass in place and restarts the background service.
+Running the same command again updates Glass in place (it says which version it updated from), restarts the background service, and skips the setup guide if Glass is already set up. Settings and macOS permissions carry over.
 
 ## Setup (`glass setup`)
 
 The setup guide walks through four steps and checks each one live:
 
-1. **Tailscale (remote access).** Glass uses [Tailscale](https://tailscale.com) to reach the Mac securely from other devices, with no port forwarding. Setup checks that Tailscale is installed and signed in, and that **HTTPS Certificates** are enabled for your tailnet (one switch on https://login.tailscale.com/admin/dns; browsers require HTTPS for the APIs Glass uses). It then fetches a certificate for the Mac's tailnet name. You can skip this to use Glass only on the Mac itself.
+1. **Tailscale (remote access).** Glass uses [Tailscale](https://tailscale.com) to reach the Mac securely from other devices, with no port forwarding. Setup checks that Tailscale is installed and signed in, and that **HTTPS Certificates** are enabled for your tailnet (one switch on https://login.tailscale.com/admin/dns; browsers require HTTPS for the APIs Glass uses). It then fetches a certificate for the Mac's tailnet name. Without Tailscale, skip this step: setup ends by offering a one-time link that connects your iPad from any network instead (see *From anywhere* below).
 2. **Background service.** Glass installs a per-user LaunchAgent (`dev.glassdesk.host`) so it runs in the background, optionally starts at login, and restarts if it crashes.
 3. **Screen Recording permission.** macOS asks to let `glass` record the screen. Setup opens the right System Settings pane (Privacy & Security › Screen Recording on macOS 13–14, Screen & System Audio Recording on 15+) and waits until capture works.
 4. **Accessibility permission.** Needed to inject mouse and keyboard input. Setup opens the pane and waits until it's allowed.
@@ -204,7 +204,7 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 - **"Glass isn't running":** run `glass status`, then check `~/Library/Logs/Glass/agent.log` and `host.log`.
 - **Black screen after connecting:** Glass sends the current frame on connect; if it persists, check Screen Recording permission (`glass status`) and re-run `glass setup`.
 - **Mouse and keyboard don't work:** Accessibility permission is missing. Re-run `glass setup` or enable Glass under System Settings → Privacy & Security → Accessibility.
-- **After updating, permissions are asked again:** macOS ties permissions to the exact binary. Re-run `glass setup` to re-grant.
+- **After updating, permissions are asked again:** releases are signed with the same identity, so macOS keeps Screen Recording and Accessibility across updates. Glass you built yourself, or a copy you run from a terminal, is a different app to macOS and needs its own grant. Re-run `glass setup` to grant it.
 - **iPad leaves fullscreen when swiping down:** a Safari fullscreen rule; use Add to Home Screen instead.
 - **⌘Tab or ⌘Space doesn't reach the Mac:** iPadOS reserves them; use Ctrl+Tab / Ctrl+Space (Ctrl as ⌘) or the ⌘ menu.
 - **"connecting…" forever:** both devices must be on Tailscale, and the URL must use the Mac's `.ts.net` name (not an IP), because the certificate is issued for that name.

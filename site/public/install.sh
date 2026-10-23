@@ -47,6 +47,9 @@ else
 fi
 [ "$expected" = "$actual" ] || fail "Checksum mismatch: the download is corrupt or was tampered with."
 
+# What's there already, so an update can say so (and skip the setup guide).
+previous=$("$PREFIX/bin/glass" --version 2>/dev/null | cut -d' ' -f2 || true)
+
 info "Installing to ~/.glass"
 tar -xzf "$tmp/glass.tar.gz" -C "$tmp"
 rm -rf "$PREFIX.new"
@@ -56,10 +59,14 @@ mv "$PREFIX.new" "$PREFIX"
 
 mkdir -p "$BIN_DIR"
 ln -sf "$PREFIX/bin/glass" "$BIN_DIR/glass"
+glass_cmd=glass
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
-    case "${SHELL##*/}-$(uname -s)" in
+    # This shell won't see the PATH change until a new terminal opens.
+    glass_cmd='~/.local/bin/glass'
+    shell="${SHELL:-}"
+    case "${shell##*/}-$(uname -s)" in
       bash-Darwin) shell_rc="$HOME/.bash_profile" ;;
       bash-*) shell_rc="$HOME/.bashrc" ;;
       fish-*) shell_rc="$HOME/.config/fish/config.fish" ;;
@@ -76,19 +83,33 @@ case ":$PATH:" in
 esac
 
 version=$("$PREFIX/bin/glass" --version | cut -d' ' -f2)
-info "Installed Glass $version"
+if [ -z "$previous" ]; then
+  info "Installed Glass $version"
+elif [ "$previous" = "$version" ]; then
+  info "Glass $version is the latest; reinstalled it"
+else
+  info "Updated Glass $previous → $version"
+fi
 
 # An update replaces the binary; restart the background service onto it.
+service=
 if [ -f "$HOME/Library/LaunchAgents/dev.glassdesk.host.plist" ]; then
+  service=1
   launchctl kickstart -k "gui/$(id -u)/dev.glassdesk.host" 2>/dev/null && info "Restarted the Glass service"
 elif [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/glass.service" ]; then
+  service=1
   systemctl --user restart glass 2>/dev/null && info "Restarted the Glass service"
 fi
 
 echo
+# Already set up: the service keeps its settings and permissions, so skip the guide.
+if [ -n "$previous" ] && [ -n "$service" ]; then
+  bold "Glass is up to date and running. To change settings: $glass_cmd setup"
+  exit 0
+fi
 # Piped from curl, stdin is this script, so the interactive setup reads the terminal.
 if (exec < /dev/tty) 2>/dev/null; then
   exec "$PREFIX/bin/glass" setup < /dev/tty > /dev/tty 2>&1
 else
-  bold "Next: run  glass setup"
+  bold "Next: run  $glass_cmd setup"
 fi

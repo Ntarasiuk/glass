@@ -148,7 +148,7 @@ Found a security issue? Please open a [private security advisory](https://github
 
 **Can I control a locked Mac?** Yes, type your password at the lock screen. After a reboot, FileVault still needs one local login.
 
-**Why do updates ask for permissions again?** Builds aren't code-signed yet, so macOS sees each update as a new app. Re-run `glass setup`.
+**Do updates ask for permissions again?** No: releases are signed with a stable identity, so macOS keeps the grants. A build you made yourself, or Glass run from a terminal (which uses the terminal's permissions), is a different app to macOS and needs its own grant: run `glass setup`.
 
 More in the [docs](https://glassdesk.dev/docs#faq).
 
