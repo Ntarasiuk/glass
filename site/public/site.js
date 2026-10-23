@@ -42,10 +42,6 @@ if (form) {
   });
 }
 
-// The hero logo settles into place once; with reduced motion it stays on its final frame (the poster).
-const mark = document.querySelector('video.mark');
-if (mark && !matchMedia('(prefers-reduced-motion: reduce)').matches) mark.play().catch(() => {});
-
 // Glass surfaces: Glassy UI's grain, and its edge lens where the browser can run it.
 for (const surface of document.querySelectorAll('.lg-glass-surface')) {
   const noise = document.createElement('span');
