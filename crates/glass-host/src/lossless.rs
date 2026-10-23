@@ -6,7 +6,7 @@
 //! (video frames that only refine an unchanged picture carry `FLAG_REFRESH`).
 //!
 //! On macOS capture switches to BGRA while sharp text is on, so the last captured image is
-//! the exact picture. Linux doesn't keep raw frames yet, so it has no lossless refresh.
+//! the exact picture. Linux sends the BGRx frames PipeWire captured, unconverted.
 //! WebRTC viewers get it over the bridged "uni" data channel; RTP (<video>) viewers don't.
 //!
 //! Stream layout (host -> client, unidirectional): `STREAM_LOSSLESS`, u32 LE header length,
