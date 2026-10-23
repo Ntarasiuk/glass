@@ -156,6 +156,8 @@ pub fn run(rt: tokio::runtime::Handle) -> ! {
     let target = MenuTarget::new(mtm);
     UI.with(|ui| *ui.borrow_mut() = Some(Ui { item, target }));
     refresh(&viewers::subscribe().borrow().clone(), &State::now());
+    // Viewers' drawings, shown on this Mac.
+    super::overlay::start(&rt);
 
     // Redraw when viewers come and go, when permissions or updates change (checked every
     // few seconds), and each minute (for the "3 min" labels).

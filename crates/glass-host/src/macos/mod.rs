@@ -9,6 +9,7 @@ pub mod clock;
 pub mod encode;
 pub mod input;
 pub mod menubar;
+pub mod overlay;
 pub mod permissions;
 pub mod privacy;
 pub mod setup;
