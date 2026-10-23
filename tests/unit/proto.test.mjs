@@ -52,3 +52,23 @@ test('ping / pong round trip', () => {
   new DataView(pong.buffer).setBigUint64(16, 99n, true);
   assert.deepEqual(readPong(new DataView(pong.buffer)), { clientMs: 1234.5, hostUs: 99 });
 });
+
+test('mic packets match the host audio layout', async () => {
+  const { micPacket, KIND_MIC, AUDIO_HEADER_LEN } = await import('../../web/proto.js');
+  const p = micPacket(9, 77.9, 1, new Int16Array([1, -2, 300]));
+  assert.equal(p.length, AUDIO_HEADER_LEN + 6);
+  const v = new DataView(p.buffer);
+  assert.equal(v.getUint8(0), KIND_MIC);
+  assert.equal(v.getUint8(1), 1);
+  assert.equal(v.getUint32(4, true), 9);
+  assert.equal(v.getBigUint64(8, true), 77n);
+  assert.deepEqual([0, 1, 2].map((i) => v.getInt16(AUDIO_HEADER_LEN + i * 2, true)), [1, -2, 300]);
+  // A full 5 ms packet fits one datagram.
+  assert.ok(micPacket(0, 0, 1, new Int16Array(240)).length <= 1200);
+});
+
+test('gamepad events carry pad, index and value', () => {
+  const e = inputEvent(Input.PAD_AXIS, { button: 2, keycode: 3, a: -0.5 });
+  const v = new DataView(e.buffer);
+  assert.deepEqual([v.getUint8(0), v.getUint8(1), v.getUint16(2, true), v.getFloat32(4, true)], [8, 2, 3, -0.5]);
+});

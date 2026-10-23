@@ -3,6 +3,7 @@
 
 import { inputEvent } from './proto.js';
 import { attachInput } from './input.js';
+import { attachGamepads } from './gamepad.js';
 import { createUI } from './ui.js';
 import { log, setLogSink } from './log.js';
 import { MAC_KEYCODES as K } from './keymap.js';
@@ -179,6 +180,13 @@ const input = attachInput({
   },
 });
 document.getElementById('zoom-reset').addEventListener('click', () => input.resetZoom());
+let micContext;
+let micStream;
+const gamepads = attachGamepads({
+  send,
+  log,
+  onConnect: (g) => ui.toast({ text: `Controller connected: ${g.id.replace(/\s*\(.*$/, '') || 'gamepad'}`, timeout: 3000 }),
+});
 
 const ui = createUI({
   onOpenMachines: loadMachines,
@@ -221,6 +229,7 @@ const ui = createUI({
     ui.toast({ text: 'Choose files in the dialog on your Mac' });
   },
   onAudio: toggleAudio,
+  onMic: toggleMic,
   onFullscreen: toggleFullscreen,
   onToggleStats: toggleStats,
   onPrivacy: (on) => control({ t: 'privacy', on }),
@@ -471,6 +480,14 @@ function onControl(msg) {
       ui.setComputerControls({ isOwner: msg.perms ? msg.perms.owner : !guest, privacy: Boolean(msg.features?.privacy) });
       ui.setPrivacyOn(false);
       ui.setWindowsAvailable(Boolean(msg.features?.windows));
+      {
+        // Controllers and the mic count as input: not for view-only links.
+        const canInput = msg.perms?.input ?? true;
+        gamepads.setEnabled(Boolean(msg.features?.gamepad) && canInput);
+        gamepads.resend();
+        ui.setMicAvailable(Boolean(msg.features?.mic) && canInput);
+        if (!canInput && micStream) stopMic();
+      }
       if (guest && resolutionMode.startsWith('fit:')) setResolution('auto');
       onLayout(msg.streams);
       queueViewport(true);
@@ -904,6 +921,38 @@ function toggleAudio() {
   }
   if (audioContext.state === 'suspended') audioContext.resume();
   worker.postMessage({ type: 'audioToggle' });
+}
+
+// The viewer's microphone, as a microphone on the host.
+async function toggleMic() {
+  if (micStream) return stopMic();
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    micContext ??= new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+    await micContext.resume();
+    await micContext.audioWorklet.addModule('mic-worklet.js');
+    const node = new AudioWorkletNode(micContext, 'glass-mic', { numberOfOutputs: 0 });
+    micContext.createMediaStreamSource(micStream).connect(node);
+    worker.postMessage({ type: 'micPort', port: node.port }, [node.port]);
+    worker.postMessage({ type: 'mic', on: true });
+    ui.setMicOn(true);
+    log('info', 'microphone on', { sampleRate: micContext.sampleRate });
+  } catch (e) {
+    micStream?.getTracks().forEach((t) => t.stop());
+    micStream = undefined;
+    ui.toast({ text: `Couldn't use the microphone: ${e.message ?? e}`, kind: 'error' });
+    log('error', `microphone failed: ${e.message ?? e}`);
+  }
+}
+
+function stopMic() {
+  micStream?.getTracks().forEach((t) => t.stop());
+  micStream = undefined;
+  worker.postMessage({ type: 'mic', on: false });
+  ui.setMicOn(false);
+  log('info', 'microphone off');
 }
 
 function toggleStats() {

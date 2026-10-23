@@ -3,7 +3,7 @@
 
 import {
   AUDIO_HEADER_LEN, KIND_AUDIO, KIND_KEYFRAME_REQUEST, KIND_PONG, KIND_VIDEO,
-  ping, readPong, readVideoHeader,
+  micPacket, ping, readPong, readVideoHeader,
 } from './proto.js';
 import { VideoStream, probeCodecs, probeDecoders, setDecoderStep } from './video-stream.js';
 import { RtcTransport } from './rtc-transport.js';
@@ -42,6 +42,8 @@ let audioPackets = 0;
 let audioLost = 0;
 let lastAudioSeq;
 let audioUnderruns = 0;
+let micOn = false;
+let micSeq = 0;
 let transport;
 let lastRxMs = 0;
 let kill; // ends the current session's read loop even if the transport never reports closing
@@ -108,6 +110,17 @@ self.onmessage = async ({ data }) => {
     audioPort = data.port;
     // Underruns are normal when a sound ends; count them for the stats instead of logging.
     audioPort.onmessage = ({ data: m }) => { audioUnderruns = m.underruns; };
+  } else if (data.type === 'micPort') {
+    // 5 ms mono packets from the main thread's mic worklet, sent as datagrams.
+    data.port.onmessage = ({ data: pcm }) => {
+      if (!micOn || !datagramWriter) return;
+      const captureUs = clockSynced ? performance.now() * 1000 + clockOffsetUs : 0;
+      micSeq = (micSeq + 1) >>> 0;
+      datagramWriter.write(micPacket(micSeq, captureUs, 1, new Int16Array(pcm))).catch(() => {});
+    };
+  } else if (data.type === 'mic') {
+    micOn = data.on;
+    sendControl({ t: 'mic', on: micOn });
   } else if (data.type === 'audioToggle') {
     audioOn = !audioOn;
     sendControl({ t: 'audio', on: audioOn });
@@ -191,6 +204,7 @@ async function connect() {
   controlWriter = control.writable.getWriter();
   sendControl({ t: 'hello', token, link, pass, device, codecs });
   if (audioOn) sendControl({ t: 'audio', on: true });
+  if (micOn) sendControl({ t: 'mic', on: true });
   if (!visible) sendControl({ t: 'video', on: false });
   readControl(control.readable).catch((e) => log('warn', `control read ended: ${e.message ?? e}`));
 
