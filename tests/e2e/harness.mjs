@@ -18,7 +18,9 @@ const PORTS_PER_WORKER = 400;
 // GLASS_E2E_PORT_BASE moves the whole range, so two test runs on one machine don't collide.
 const firstPort =
   Number(process.env.GLASS_E2E_PORT_BASE ?? 21000) + Number(process.env.TEST_PARALLEL_INDEX ?? 0) * PORTS_PER_WORKER;
-let nextOffset = 0;
+// A worker restarted after a failure keeps its index: start somewhere else in the block so
+// it doesn't reuse ports its predecessor's hosts (and Chrome's QUIC sessions) just had.
+let nextOffset = (process.pid * 37) % PORTS_PER_WORKER;
 
 // Free on both IPv4 and IPv6: the host binds 0.0.0.0, which an IPv6-only check misses.
 function isFreeOn(port, kind, family) {
