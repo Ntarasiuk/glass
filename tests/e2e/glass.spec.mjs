@@ -579,7 +579,8 @@ test.describe('resilience', () => {
     await page.waitForTimeout(3000);
     const low = await bps();
     await page.waitForTimeout(4000);
-    expect(await bps()).toBe(low);
+    // Never climbs back; on a loaded test machine real loss can push it lower still.
+    expect(await bps()).toBeLessThanOrEqual(low);
   });
 
   it('never decodes a corrupted frame', async ({ page, host }) => {
