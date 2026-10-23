@@ -61,6 +61,14 @@ export default {
       });
     }
 
+    // The web client for remote access lives at /app/, with the slash, so its relative URLs
+    // resolve under /app/. drop-trailing-slash would redirect it to /app and break them.
+    if (url.pathname === '/app') {
+      url.pathname = '/app/';
+      return Response.redirect(url.toString(), 301);
+    }
+    if (url.pathname === '/app/') return env.ASSETS.fetch(new Request(new URL('/app', url), request));
+
     if (url.pathname === '/' && (request.method === 'GET' || request.method === 'HEAD')) {
       const res = await env.ASSETS.fetch(wantsMarkdown ? new Request(new URL('/index.md', url), request) : request);
       const out = new Response(res.body, res);

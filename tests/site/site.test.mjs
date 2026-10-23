@@ -54,6 +54,16 @@ test('browsers get the landing page with structured data', async () => {
   assert.match(html, /curl -fsSL glassdesk\.dev \| sh/);
 });
 
+test('the remote-access client is served at /app/, where its relative URLs resolve', async () => {
+  const res = await get('/app/');
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /src="main\.js"/);
+  assert.equal((await get('/app/main.js')).status, 200);
+  const bare = await get('/app');
+  assert.equal(bare.status, 301);
+  assert.equal(new URL(bare.headers.get('location')).pathname, '/app/');
+});
+
 test('docs exist in every format and agree', async () => {
   const md = await (await get('/docs.md')).text();
   const full = await (await get('/llms-full.txt')).text();
