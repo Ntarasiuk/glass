@@ -110,6 +110,12 @@ header.site nav a:hover, footer.site a:hover { color: var(--text); }
 .hero-solo .hero-copy { display: grid; justify-items: center; }
 .hero-solo .lede, .hero-solo .hint { margin-inline: auto; }
 .hero-solo .command { width: min(520px, 100%); text-align: left; }
+/* The logo, rendered as liquid glass; its black background blends into the page. */
+.mark {
+  display: block; width: clamp(132px, 17vw, 192px); height: auto; aspect-ratio: 1; margin: -28px 0 2px; mix-blend-mode: screen;
+  mask: linear-gradient(90deg, transparent, #000 9% 91%, transparent), linear-gradient(transparent, #000 9% 91%, transparent);
+  mask-composite: intersect;
+}
 
 /* Hero showcase: a tablet showing a Mac through Glass. Everything inside is sized in cqw
    (1% of the figure's width) so the drawing scales as one picture. Static: no animation. */
