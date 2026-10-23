@@ -56,6 +56,9 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Links with limits.** `--view-only`, `--no-files`, `--no-clipboard`, `--for 1h`, `--ask` (the person at the computer allows each connection) and `--passkey` (the device must use Face ID, Touch ID or a security key every time). List and revoke devices one at a time.
 - **For helping someone.** Chat, drawing on the screen (they see it on their Mac too), a privacy screen that blanks the Mac and blocks its keyboard and mouse while you work, and a connection history.
 - **Beyond the desktop.** Stream a single app's window, a terminal in the viewer, open the computer's local web ports (`/fwd/3000/`) from your tailnet, record sessions to MP4, game controllers and your microphone (Linux), HEVC when every viewer can decode it.
+- **Sharp text.** A per-viewer mode for code and documents: native size, finer frames, and HEVC 4:2:2 colour when every viewer can decode it.
+- **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps are remembered for each computer; an optional shortcut bar puts Mac shortcuts one tap away on a touch screen.
+- **Single sign-on.** Point `glass config oidc-issuer` at Google, Entra, Okta or any OpenID Connect provider and allow-listed accounts sign in without a token.
 - **Power.** Wake a sleeping machine (Wake-on-LAN) from the machines menu, restart Glass or the whole computer and reconnect.
 - **Self-hostable relay.** Run the WebRTC introducer and TURN yourself ([site/selfhost](site/selfhost)) and point Glass at it with `glass config relay`.
 - **Agent-ready.** Ask Claude Code to "set up Glass on my Mac mini" and it does it over SSH ([skill](#set-up-with-an-ai-agent)).
