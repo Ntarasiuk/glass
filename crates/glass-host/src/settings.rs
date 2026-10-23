@@ -31,6 +31,44 @@ pub struct Settings {
     pub accent: Option<String>,
     /// A self-hosted introducer for remote access (site/selfhost), instead of glassdesk.dev.
     pub relay: Option<String>,
+    /// Single sign-on (OpenID Connect): the provider, e.g. https://accounts.google.com.
+    pub oidc_issuer: Option<String>,
+    pub oidc_client_id: Option<String>,
+    /// Who may sign in: emails, or `@example.com` for a whole domain. Empty: nobody.
+    pub oidc_allow: Vec<String>,
+    /// What SSO users may do: full control, or view only.
+    pub oidc_view_only: bool,
+}
+
+/// The OIDC client secret lives in its own owner-only file, not in settings.json.
+pub fn oidc_secret_path() -> PathBuf {
+    crate::config_dir().join("oidc-secret")
+}
+
+pub fn oidc_secret() -> Option<String> {
+    std::fs::read_to_string(oidc_secret_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn save_oidc_secret(secret: &str) -> Result<()> {
+    let p = oidc_secret_path();
+    if secret.is_empty() {
+        let _ = std::fs::remove_file(&p);
+        return Ok(());
+    }
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let _ = std::fs::remove_file(&p);
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    opts.open(&p)?.write_all(secret.as_bytes())?;
+    Ok(())
 }
 
 pub fn path() -> PathBuf {
@@ -67,6 +105,11 @@ pub const KEYS: &[(&str, &str)] = &[
     ("name", "name shown in the viewer"),
     ("accent", "viewer accent colour, e.g. #ff8800"),
     ("relay", "self-hosted remote-access server, e.g. https://glass.example.com"),
+    ("oidc-issuer", "single sign-on provider, e.g. https://accounts.google.com"),
+    ("oidc-client-id", "the OAuth client id registered with that provider"),
+    ("oidc-client-secret", "its client secret (stored separately, owner-only)"),
+    ("oidc-allow", "who may sign in: emails or @domain, comma-separated"),
+    ("oidc-scope", "full or view-only: what SSO users may do"),
 ];
 
 /// A relay must be HTTPS (browsers need a secure page for WebRTC and passkeys), except
@@ -122,6 +165,11 @@ impl Settings {
             "name" => self.name.clone().unwrap_or_default(),
             "accent" => self.accent.clone().unwrap_or_default(),
             "relay" => self.relay.clone().unwrap_or_default(),
+            "oidc-issuer" => self.oidc_issuer.clone().unwrap_or_default(),
+            "oidc-client-id" => self.oidc_client_id.clone().unwrap_or_default(),
+            "oidc-client-secret" => if oidc_secret().is_some() { "(set)" } else { "" }.into(),
+            "oidc-allow" => self.oidc_allow.join(","),
+            "oidc-scope" => if self.oidc_view_only { "view-only" } else { "full" }.into(),
             _ => anyhow::bail!("unknown setting {key}; see glass config"),
         })
     }
@@ -169,6 +217,43 @@ impl Settings {
                     None
                 } else {
                     Some(validate_relay(value)?)
+                }
+            }
+            "oidc-issuer" => {
+                self.oidc_issuer = if value.is_empty() {
+                    None
+                } else {
+                    Some(validate_relay(value)?)
+                }
+            }
+            "oidc-client-id" => {
+                anyhow::ensure!(
+                    value.len() <= 512 && !value.chars().any(|c| c.is_control() || c == ' '),
+                    "that doesn't look like a client id"
+                );
+                self.oidc_client_id = (!value.is_empty()).then(|| value.to_string());
+            }
+            "oidc-client-secret" => save_oidc_secret(value)?,
+            "oidc-allow" => {
+                self.oidc_allow = value
+                    .split([',', ' '])
+                    .filter(|e| !e.is_empty())
+                    .map(|e| {
+                        let e = e.to_ascii_lowercase();
+                        let ok = match e.strip_prefix('@') {
+                            Some(domain) => domain.contains('.') && !domain.contains('@'),
+                            None => e.split_once('@').is_some_and(|(u, d)| !u.is_empty() && d.contains('.')),
+                        };
+                        anyhow::ensure!(ok, "{e} isn't an email or @domain");
+                        Ok(e)
+                    })
+                    .collect::<Result<_>>()?
+            }
+            "oidc-scope" => {
+                self.oidc_view_only = match value {
+                    "full" | "" => false,
+                    "view-only" => true,
+                    _ => anyhow::bail!("expected full or view-only"),
                 }
             }
             _ => anyhow::bail!("unknown setting {key}; see glass config"),

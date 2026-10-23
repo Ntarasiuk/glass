@@ -103,6 +103,8 @@ glass chat "be right there"     # message everyone viewing
 glass privacy on|off     # blank this screen and block local input while viewed
 glass log                # connection history
 glass wake <name|mac>    # Wake-on-LAN
+glass config oidc-issuer https://accounts.google.com   # single sign-on (+ oidc-client-id,
+                         # oidc-client-secret, oidc-allow ana@x.com,@corp.com, oidc-scope)
 glass config             # settings: ask-guests, record, privacy, hevc, forward-ports, name, accent, relay…
 glass feedback "…"       # tell us what broke or what you want
 ```

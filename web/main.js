@@ -75,7 +75,10 @@ const remoteId = remoteKey && (await hostIdFor(remoteKey));
 const tokenKey = remoteId ? `${TOKEN_KEY}.${remoteId}` : TOKEN_KEY;
 const passKey = remoteId ? `${PASS_KEY}.${remoteId}` : PASS_KEY;
 if (hashToken) storage((s) => s.setItem(tokenKey, hashToken));
-if (hashToken || link) history.replaceState(null, '', location.pathname + location.search + (remoteKey ? `#r=${remoteKey}` : ''));
+// Back from single sign-on: the host handed this device a pass (like a link would).
+const ssoPass = hashParams.get('p');
+if (ssoPass) storage((s) => s.setItem(passKey, JSON.stringify({ pass: ssoPass, expires: Number(hashParams.get('e')) })));
+if (hashToken || link || ssoPass) history.replaceState(null, '', location.pathname + location.search + (remoteKey ? `#r=${remoteKey}` : ''));
 const token = hashToken ?? storage((s) => s.getItem(tokenKey));
 const savedPass = (() => {
   try {
@@ -475,6 +478,8 @@ worker.onmessage = ({ data }) => {
       log('warn', 'token rejected');
       hideStatus();
       ui.showAuth({ rejected: tokenTried });
+      // Single sign-on is this host's own web page, so not from a remote (WebRTC) viewer.
+      document.getElementById('sso').classList.toggle('hidden', !(config.sso && !remoteKey));
       break;
     case 'control':
       onControl(data.msg);

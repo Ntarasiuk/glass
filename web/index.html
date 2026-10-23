@@ -288,6 +288,8 @@
     #chat-panel .chat-form input { flex: 1; min-width: 0; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: rgb(0 0 0 / 0.35); color: var(--text); font: inherit; -webkit-user-select: text; user-select: text; }
     #chat-panel .chat-form button { width: auto; padding: 8px 12px; background: var(--accent); color: var(--accent-ink); font-weight: 650; justify-content: center; }
     #chat-panel .chat-form button:hover { background: var(--accent); filter: brightness(1.08); }
+    #auth .sso { display: block; padding: 11px; border-radius: var(--radius-sm); border: 1px solid var(--border); color: var(--text); text-align: center; text-decoration: none; font-weight: 600; }
+    #auth .sso:hover { background: var(--surface-hover); }
   </style>
 </head>
 <body>
@@ -371,6 +373,7 @@
       <p id="auth-error" class="error hidden" role="alert">That token didn't work. Check it and try again.</p>
       <input name="token" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Access token" aria-label="Access token" required>
       <button type="submit">Connect</button>
+      <a id="sso" class="sso hidden" href="sso/start">Sign in with your organization</a>
     </form>
   </div>
 

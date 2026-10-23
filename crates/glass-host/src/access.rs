@@ -197,6 +197,28 @@ pub fn create_link(path: &Path, grant: Duration, scope: Scope) -> Result<NewLink
     })
 }
 
+/// A guest pass issued directly (single sign-on), without a link.
+pub fn grant_pass(path: &Path, grant: Duration, scope: Scope, device: &str) -> Result<Granted> {
+    let grant = grant.clamp(MIN_GRANT, MAX_GRANT);
+    let pass = random_code()?;
+    let expires = now() + grant.as_secs();
+    update(path, |store| {
+        store.passes.push(Pass {
+            hash: fingerprint(&pass),
+            expires,
+            scope,
+            created: now(),
+            device: device.to_string(),
+            passkey: None,
+        });
+    })?;
+    Ok(Granted {
+        pass,
+        expires,
+        scope,
+    })
+}
+
 /// Uses up a link, if it's valid, and returns a new guest pass in its place.
 pub fn redeem_link(path: &Path, code: &str, device: &str) -> Result<Option<Granted>> {
     let hash = fingerprint(code);
