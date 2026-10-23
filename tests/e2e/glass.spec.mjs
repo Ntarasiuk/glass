@@ -185,7 +185,7 @@ test.describe('magic links', () => {
     await page.waitForTimeout(1500); // the host has written its status, which `glass link` reads
     const env = { ...process.env, GLASS_CONFIG_DIR: host.configDir };
     const made = JSON.parse(execFileSync(BINARY, ['link', '--json', '--for', '1h'], { env }).toString());
-    expect(made.summary).toBe('Works once, within 15 minutes. Gives that device 1 hour of access.');
+    expect(made.summary).toBe('Works once, within 15 minutes. Gives that device 1 hour of access (full control).');
     const code = made.url.match(/#l=([0-9a-f]{32})$/)[1];
     const link = `${host.base}/#l=${code}`;
 

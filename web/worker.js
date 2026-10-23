@@ -45,6 +45,7 @@ let transport;
 let lastRxMs = 0;
 let kill; // ends the current session's read loop even if the transport never reports closing
 let wake; // resolves the reconnect backoff early
+let denied = false; // the host's owner said no; don't knock again on our own
 let datagramWriter;
 let inputWriter;
 
@@ -109,6 +110,9 @@ self.onmessage = async ({ data }) => {
     audioOn = !audioOn;
     sendControl({ t: 'audio', on: audioOn });
     self.postMessage({ type: 'audio', on: audioOn });
+  } else if (data.type === 'askAgain') {
+    denied = false;
+    wake?.();
   } else if (data.type === 'wake') {
     // Tab became visible or network came back: skip the remaining backoff, and drop a
     // session that went quiet while suspended instead of waiting for the watchdog.
@@ -123,6 +127,11 @@ async function run() {
     // After a rejection, retrying would only be rejected again; wait for a new token.
     while (rejected) {
       self.postMessage({ type: 'status', text: 'waiting for access token' });
+      await new Promise((resolve) => { wake = resolve; });
+    }
+    // Turned away by the person at the computer: asking again is the user's call.
+    while (denied) {
+      self.postMessage({ type: 'status', text: 'not let in' });
       await new Promise((resolve) => { wake = resolve; });
     }
     try {
@@ -282,6 +291,7 @@ async function readControl(readable) {
       pass = msg.pass;
       link = undefined;
     }
+    if (msg.t === 'denied') denied = true;
     if (msg.t === 'error' && msg.msg === 'unauthorized') {
       rejected = true;
       link = undefined;

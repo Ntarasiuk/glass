@@ -7,6 +7,7 @@ import { createUI } from './ui.js';
 import { log, setLogSink } from './log.js';
 import { MAC_KEYCODES as K } from './keymap.js';
 import { hostIdFor, serveRtc } from './rtc.js';
+import { createChat } from './chat.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -124,7 +125,12 @@ const worker = new Worker('worker.js', { type: 'module' });
 worker.onerror = (e) => log('error', `worker: ${e.message}`, { src: `${e.filename}:${e.lineno}` });
 
 const control = (msg) => worker.postMessage({ type: 'control', msg });
-const send = (kind, fields) => worker.postMessage({ type: 'input', bytes: inputEvent(kind, fields) });
+// A view-only link sends no input (the host would drop it anyway).
+let inputAllowed = true;
+const send = (kind, fields) => inputAllowed && worker.postMessage({ type: 'input', bytes: inputEvent(kind, fields) });
+let session = 0; // this session's id, from welcome (chat from it is our own)
+let perms = { input: true, clipboard: true, files: true, owner: true };
+let features = {};
 
 // Resolves with the next clipboard text the Mac reports (used for Cmd+C / Cmd+X).
 let clipboardWaiters = [];
@@ -172,6 +178,7 @@ document.getElementById('zoom-reset').addEventListener('click', () => input.rese
 
 const ui = createUI({
   onOpenMachines: loadMachines,
+  onWakeMachine: (m) => control({ t: 'wake', dns: m.dns }),
   onSelectMachine: (m) => switchMachine(machineId(m), m.name),
   onSelectDisplay: (id) => control(id === 'all' ? { t: 'showAll' } : { t: 'selectDisplay', id }),
   shortcuts: SHORTCUTS,
@@ -214,6 +221,9 @@ const ui = createUI({
     worker.postMessage({ type: 'token', token: t });
   },
 });
+
+const chat = createChat({ onSend: (text) => control({ t: 'chat', text }), toast: (o) => ui.toast(o) });
+chat.setAvailable(false);
 
 // Launched from the home screen there's no browser UI to leave, so fullscreen is moot.
 const standalone = matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches || navigator.standalone;
@@ -431,6 +441,12 @@ function onControl(msg) {
       // Remote: other machines aren't reachable from here, so no machines menu either.
       ui.setGuest(guest || Boolean(remoteKey));
       ui.setCanFit(!guest);
+      session = msg.session ?? 0;
+      perms = msg.perms ?? perms;
+      features = msg.features ?? {};
+      inputAllowed = perms.input;
+      ui.setPerms(perms);
+      chat.setAvailable(true);
       if (guest && resolutionMode.startsWith('fit:')) setResolution('auto');
       onLayout(msg.streams);
       queueViewport(true);
@@ -440,6 +456,22 @@ function onControl(msg) {
       break;
     case 'layout':
       onLayout(msg.streams);
+      break;
+    case 'waiting':
+      showStatus('connecting', 'Waiting to be let in', msg.msg);
+      break;
+    case 'denied':
+      showStatus('error', 'Not let in', msg.msg);
+      ui.toast({ text: msg.msg, kind: 'error', timeout: 0, action: { label: 'Ask again', run: () => {
+        showStatus('connecting', 'Connecting', machineName(currentHost));
+        worker.postMessage({ type: 'askAgain' });
+      } } });
+      break;
+    case 'notice':
+      ui.toast({ text: msg.msg });
+      break;
+    case 'chat':
+      if (msg.sender !== session) chat.receive(msg);
       break;
     case 'pass':
       storage((s) => s.setItem(passKey, JSON.stringify({ pass: msg.pass, expires: msg.expires })));
@@ -512,6 +544,7 @@ function onConnectionStatus(text) {
   } else if (text.startsWith('connection failed'))
     showStatus('error', `Can't reach ${name}`, 'Retrying. Make sure Glass is running there and both devices are on Tailscale.');
   else if (text.startsWith('waiting for access token')) hideStatus();
+  else if (text === 'not let in') showStatus('error', 'Not let in', `The person at ${name} didn't let you in.`);
 }
 
 function hudLine(...parts) {

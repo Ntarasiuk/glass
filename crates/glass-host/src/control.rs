@@ -115,6 +115,10 @@ pub enum ServerMsg {
     },
     /// Waiting for the person at the computer to allow this connection.
     Waiting { msg: String },
+    /// Not let in; the client stops retrying until the user asks again.
+    Denied { msg: String },
+    /// Something worth a (non-error) toast.
+    Notice { msg: String },
     /// Asks the browser to create (`mode: create`) or use (`get`) a passkey.
     Passkey(crate::passkey::Challenge),
     Chat {

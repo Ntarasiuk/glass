@@ -81,7 +81,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_answer_lets_the_connection_through() {
-        crate::testmode::enable();
         let waiting = tokio::spawn(ask("Safari on iPad".into()));
         let id = loop {
             if let Some(r) = pending().into_iter().find(|r| r.who == "Safari on iPad") {

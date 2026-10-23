@@ -6,7 +6,7 @@ use std::time::Duration;
 
 /// A notification; fire and forget.
 pub fn notify(title: &str, body: &str) {
-    if crate::testmode::enabled() {
+    if cfg!(test) || crate::testmode::enabled() {
         crate::testmode::record_notification(title, body);
         return;
     }
@@ -32,7 +32,7 @@ pub fn notify(title: &str, body: &str) {
 /// Asks a yes/no question; `Some(true)` for `yes`, `Some(false)` for `no`, `None` if
 /// nobody answered within `timeout` or no prompt could be shown.
 pub async fn confirm(title: &str, body: &str, yes: &str, no: &str, timeout: Duration) -> Option<bool> {
-    if crate::testmode::enabled() {
+    if cfg!(test) || crate::testmode::enabled() {
         return None; // tests decide through the approval queue instead
     }
     let secs = timeout.as_secs().max(1);

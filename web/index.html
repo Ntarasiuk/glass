@@ -237,6 +237,19 @@
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
     }
+    /* Chat */
+    #btn-chat { position: relative; }
+    #btn-chat .dot { position: absolute; top: 8px; right: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+    #chat-panel { display: grid; gap: 8px; width: min(320px, calc(100vw - 20px)); box-sizing: border-box; }
+    #chat-panel .chat-log { list-style: none; margin: 0; padding: 4px 6px; max-height: 40vh; overflow-y: auto; display: grid; gap: 6px; -webkit-user-select: text; user-select: text; }
+    #chat-panel .chat-log li { display: grid; gap: 1px; }
+    #chat-panel .chat-log b { font-size: 12px; font-weight: 600; color: var(--text-dim); }
+    #chat-panel .chat-log li.mine b { color: var(--accent); }
+    #chat-panel .chat-log span { overflow-wrap: anywhere; }
+    #chat-panel .chat-form { display: flex; gap: 6px; }
+    #chat-panel .chat-form input { flex: 1; min-width: 0; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: rgb(0 0 0 / 0.35); color: var(--text); font: inherit; -webkit-user-select: text; user-select: text; }
+    #chat-panel .chat-form button { width: auto; padding: 8px 12px; background: var(--accent); color: var(--accent-ink); font-weight: 650; justify-content: center; }
+    #chat-panel .chat-form button:hover { background: var(--accent); filter: brightness(1.08); }
   </style>
 </head>
 <body>

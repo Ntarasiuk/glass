@@ -6,7 +6,7 @@ const TOOLBAR_IDLE_MS = 3000;
 // Matches the slide-in transition in index.html (420 ms), plus a beat.
 const TOOLBAR_WAKE_MS = 450;
 
-export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onFullscreen, onToggleStats, onToken, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -176,16 +176,19 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
       menus.machines.panel.replaceChildren(menuItem('Looking for machines…', '', { onSelect: () => {} }));
       return;
     }
-    const status = (m) => (m.id === current ? 'connected' : !m.online ? 'offline' : !m.glass ? 'Glass not running' : m.os);
+    // An offline machine whose network address Glass has seen can be woken up (Wake-on-LAN).
+    const wakeable = (m) => !m.online && m.macs?.length > 0;
+    const status = (m) => (m.id === current ? 'connected' : wakeable(m) ? 'offline · wake' : !m.online ? 'offline' : !m.glass ? 'Glass not running' : m.os);
     const items = machines.map((m) => {
       const item = menuItem(m.name, status(m), {
         checked: m.id === current,
         onSelect: () => {
           setMenuOpen('machines', false);
-          if (m.id !== current) onSelectMachine(m);
+          if (wakeable(m)) onWakeMachine(m);
+          else if (m.id !== current) onSelectMachine(m);
         },
       });
-      item.disabled = m.id !== current && (!m.online || !m.glass);
+      item.disabled = m.id !== current && !wakeable(m) && (!m.online || !m.glass);
       return item;
     });
     if (!items.length) items.push(menuItem('No machines found', 'needs Tailscale', { onSelect: () => {} }));
@@ -278,6 +281,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     error: '<path d="M12 8v4M12 16h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
     file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
     update: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
+    chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.6A8 8 0 1 1 21 12z"/>',
   };
   const svg = (paths, cls) =>
     `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
@@ -358,6 +362,13 @@ export function createUI({ onOpenMachines, onSelectMachine, onSelectDisplay, onS
     setGuest(guest) {
       $('btn-machines').classList.toggle('hidden', guest);
       if (guest) setMenuOpen('machines', false);
+    },
+    /** What this session may do: a link can be view only, or without files. */
+    setPerms({ input = true, files = true } = {}) {
+      $('btn-upload').classList.toggle('hidden', !files);
+      $('btn-download').classList.toggle('hidden', !files);
+      $('btn-keyboard').classList.toggle('hidden', !input);
+      if (!input) $('btn-shortcuts').classList.add('hidden');
     },
     /** Only the owner can reshape the host's display (guests get an error). */
     setCanFit(on) {

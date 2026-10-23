@@ -555,7 +555,7 @@ async fn control(
         if !crate::approval::ask(who).await {
             refused(&device, "not allowed");
             let msg = "The person at this computer didn't let you in.".into();
-            control::write_json(&mut send, &ServerMsg::Error { msg }).await?;
+            control::write_json(&mut send, &ServerMsg::Denied { msg }).await?;
             tokio::time::sleep(Duration::from_millis(200)).await;
             ctx.conn.close(1u32.into(), b"not allowed");
             return Ok(());
@@ -863,7 +863,7 @@ async fn control(
             ClientMsg::Wake { .. } if guest => refuse(OWNER_ONLY),
             ClientMsg::Wake { dns } => match crate::wol::wake_target(&dns) {
                 Ok(_) => {
-                    let _ = ctx.ctl_tx.send(ServerMsg::Error {
+                    let _ = ctx.ctl_tx.send(ServerMsg::Notice {
                         msg: format!("Sent a wake-up to {dns}. It can take a minute to come online."),
                     });
                 }
