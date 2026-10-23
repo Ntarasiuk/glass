@@ -1,6 +1,21 @@
 // Toolbar, panels, toasts and the token prompt. DOM writes only; no layout reads.
 
+import { CUSTOM_KEY, comboFromEvent, parseCustom, serializeCustom } from './shortcuts.js';
+
 const $ = (id) => document.getElementById(id);
+// localStorage can throw (private browsing, storage blocked).
+const storageGet = (key) => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+const storageSet = (key, value) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+};
 
 const TOOLBAR_IDLE_MS = 3000;
 // Matches the slide-in transition in index.html (420 ms), plus a beat.
@@ -91,7 +106,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   });
 
   addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
+    // While recording a shortcut, Escape cancels the recording instead.
+    if (e.key !== 'Escape' || recording) return;
     const open = Object.keys(menus).find((name) => !menus[name].panel.classList.contains('hidden'));
     if (!open) return;
     e.preventDefault();
@@ -160,21 +176,79 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   note.textContent = 'iPadOS keeps ⌘Tab, ⌘Space, ⌘H and ⌘⇧3–5. “Ctrl as ⌘” sends those combos when you press Ctrl instead. Alternatively swap Command and Option in iPad Settings › Keyboard › Hardware Keyboard › Modifier Keys and turn on “Swap ⌘ and ⌥”.';
   const divider = document.createElement('hr');
 
-  menus.shortcuts.panel.replaceChildren(
-    pcItem,
-    ctrlItem,
-    swapItem,
-    note,
-    divider,
-    ...shortcuts.map((sc) =>
-      menuItem(sc.label, sc.keysLabel, {
-        onSelect: () => {
-          setMenuOpen('shortcuts', false);
-          onShortcut(sc);
-        },
-      }),
-    ),
-  );
+  const shortcutItem = (sc) =>
+    menuItem(sc.label, sc.keysLabel, {
+      onSelect: () => {
+        setMenuOpen('shortcuts', false);
+        onShortcut(sc);
+      },
+    });
+  // Your own shortcuts: recorded from the next combo pressed, kept in localStorage.
+  let custom = parseCustom(storageGet(CUSTOM_KEY));
+  let recording = false;
+  function saveCustom() {
+    storageSet(CUSTOM_KEY, serializeCustom(custom));
+    renderShortcuts();
+  }
+  function customRow(sc, i) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:2px';
+    const item = shortcutItem(sc);
+    item.style.flex = '1';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = '×';
+    remove.title = `Remove ${sc.label}`;
+    remove.setAttribute('aria-label', `Remove ${sc.label}`);
+    remove.style.cssText = 'width:auto;flex:none;padding:10px 12px;color:var(--text-dim)';
+    remove.addEventListener('click', (e) => {
+      e.stopPropagation();
+      custom = custom.filter((_, j) => j !== i);
+      saveCustom();
+    });
+    row.append(item, remove);
+    return row;
+  }
+  function addShortcut() {
+    if (recording) return;
+    recording = true;
+    renderShortcuts();
+    // Capture phase on window: runs before the input handler, so the combo isn't sent.
+    const onKey = (e) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.code === 'Escape' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) return finish(null);
+      const combo = comboFromEvent(e);
+      if (combo) finish(combo);
+    };
+    const swallowUp = (e) => e.stopImmediatePropagation();
+    function finish(combo) {
+      removeEventListener('keydown', onKey, true);
+      setTimeout(() => removeEventListener('keyup', swallowUp, true), 300);
+      recording = false;
+      if (combo) {
+        const label = (prompt('Name this shortcut', combo.keysLabel) ?? '').trim();
+        if (label) custom = [...custom, ...parseCustom(serializeCustom([{ label, codes: combo.codes }]))];
+      }
+      saveCustom();
+    }
+    addEventListener('keydown', onKey, true);
+    addEventListener('keyup', swallowUp, true);
+  }
+  function renderShortcuts() {
+    const add = menuItem(recording ? 'Press a shortcut…' : 'Add shortcut…', recording ? 'Esc to cancel' : '', { onSelect: addShortcut });
+    menus.shortcuts.panel.replaceChildren(
+      pcItem,
+      ctrlItem,
+      swapItem,
+      note,
+      divider,
+      ...shortcuts.map(shortcutItem),
+      ...custom.map(customRow),
+      add,
+    );
+  }
+  renderShortcuts();
 
   /** `current` is the id ("host" or "host:port") of the machine this session is on. */
   function renderMachines(machines, current) {

@@ -168,8 +168,14 @@ pub fn set_enabled(on: bool) -> Result<()> {
     Ok(())
 }
 
-/// The introducer, e.g. https://glassdesk.dev (GLASS_BASE overrides it, as for updates).
+/// The introducer: a self-hosted one (`glass config relay`), else https://glassdesk.dev.
+/// GLASS_BASE overrides both, as for updates (tests use it).
 pub fn base() -> String {
+    if std::env::var_os("GLASS_BASE").is_none()
+        && let Some(relay) = crate::settings::load().relay
+    {
+        return relay;
+    }
     crate::update::base_url()
 }
 

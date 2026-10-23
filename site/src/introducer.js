@@ -117,8 +117,9 @@ async function verifyHost(hostId, nonce, keyB64, sigB64) {
   }
 }
 
-/** Short-lived TURN credentials (Cloudflare Realtime), when configured. */
+/** Short-lived TURN credentials: your own coturn (self-hosting), or Cloudflare Realtime. */
 async function turnServers(env) {
+  if (env.TURN_URLS && env.TURN_SECRET) return [await coturnCredentials(env.TURN_URLS, env.TURN_SECRET)];
   if (!env.TURN_KEY_ID || !env.TURN_KEY_API_TOKEN) return [];
   const res = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`, {
     method: 'POST',
@@ -131,6 +132,21 @@ async function turnServers(env) {
   return (Array.isArray(iceServers) ? iceServers : [iceServers])
     .map((s) => ({ ...s, urls: [].concat(s.urls).filter((u) => u.startsWith('turn')) }))
     .filter((s) => s.urls.length);
+}
+
+/**
+ * coturn's `use-auth-secret` scheme (TURN REST API): the username is an expiry time, the
+ * password its HMAC-SHA1 under the shared secret. `urls`: comma-separated turn: URLs.
+ */
+export async function coturnCredentials(urls, secret, now = Date.now()) {
+  const username = `${Math.floor(now / 1000) + 86400}:glass`;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(username)));
+  return {
+    urls: urls.split(',').map((u) => u.trim()).filter((u) => u.startsWith('turn')),
+    username,
+    credential: btoa(String.fromCharCode(...mac)),
+  };
 }
 
 function randomId(bytes) {

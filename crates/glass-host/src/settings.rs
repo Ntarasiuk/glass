@@ -29,6 +29,8 @@ pub struct Settings {
     pub name: Option<String>,
     /// Accent colour for the viewer, as #rrggbb (branding).
     pub accent: Option<String>,
+    /// A self-hosted introducer for remote access (site/selfhost), instead of glassdesk.dev.
+    pub relay: Option<String>,
 }
 
 pub fn path() -> PathBuf {
@@ -64,7 +66,31 @@ pub const KEYS: &[(&str, &str)] = &[
     ("forward-ports", "comma-separated ports owner devices may open, e.g. 3000,8888"),
     ("name", "name shown in the viewer"),
     ("accent", "viewer accent colour, e.g. #ff8800"),
+    ("relay", "self-hosted remote-access server, e.g. https://glass.example.com"),
 ];
+
+/// A relay must be HTTPS (browsers need a secure page for WebRTC and passkeys), except
+/// on localhost for testing. Returned without a trailing slash.
+pub fn validate_relay(url: &str) -> Result<String> {
+    let url = url.trim().trim_end_matches('/');
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| {
+            url.strip_prefix("http://")
+                .filter(|r| r.starts_with("localhost") || r.starts_with("127.0.0.1"))
+        })
+        .ok_or_else(|| anyhow::anyhow!("expected an https:// URL (or http://localhost)"))?;
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    anyhow::ensure!(
+        !host.is_empty()
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+            && !rest.contains(['?', '#', '@', ' ']),
+        "expected a URL like https://glass.example.com"
+    );
+    Ok(url.to_string())
+}
 
 fn on_off(v: &str) -> Result<bool> {
     match v.to_ascii_lowercase().as_str() {
@@ -95,6 +121,7 @@ impl Settings {
                 .join(","),
             "name" => self.name.clone().unwrap_or_default(),
             "accent" => self.accent.clone().unwrap_or_default(),
+            "relay" => self.relay.clone().unwrap_or_default(),
             _ => anyhow::bail!("unknown setting {key}; see glass config"),
         })
     }
@@ -137,6 +164,13 @@ impl Settings {
                 );
                 self.accent = (!value.is_empty()).then(|| value.to_ascii_lowercase());
             }
+            "relay" => {
+                self.relay = if value.is_empty() {
+                    None
+                } else {
+                    Some(validate_relay(value)?)
+                }
+            }
             _ => anyhow::bail!("unknown setting {key}; see glass config"),
         }
         Ok(())
@@ -178,5 +212,27 @@ mod tests {
         // Unknown and missing fields are fine.
         let old: Settings = serde_json::from_str(r#"{"ask_guests":true,"future":1}"#).unwrap();
         assert!(old.ask_guests && !old.record);
+    }
+
+    #[test]
+    fn relay_urls() {
+        assert_eq!(
+            validate_relay("https://glass.example.com/").unwrap(),
+            "https://glass.example.com"
+        );
+        assert_eq!(
+            validate_relay("http://localhost:8787").unwrap(),
+            "http://localhost:8787"
+        );
+        assert!(validate_relay("http://glass.example.com").is_err(), "plain http");
+        assert!(validate_relay("ftp://x").is_err());
+        assert!(validate_relay("https://").is_err());
+        assert!(validate_relay("https://a b.com").is_err());
+        assert!(validate_relay("https://user@evil.com").is_err());
+        let mut s = Settings::default();
+        s.set("relay", "https://glass.example.com").unwrap();
+        assert_eq!(s.get("relay").unwrap(), "https://glass.example.com");
+        s.set("relay", "").unwrap();
+        assert_eq!(s.relay, None);
     }
 }
