@@ -11,6 +11,7 @@ import { hostIdFor, serveRtc } from './rtc.js';
 import { createChat } from './chat.js';
 import { answerPasskey } from './passkey.js';
 import { createTerminal } from './terminal.js';
+import { createAnnotator } from './annotate.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -163,6 +164,8 @@ let statsVisible = storage((s) => s.getItem(STATS_KEY)) === '1';
 hud.classList.toggle('hidden', !statsVisible);
 let tokenTried = Boolean(token);
 let restarting; // 'Glass' or 'computer' after a restart request, until it's back
+// Above the input layer: in draw mode it takes the pointer, so nothing reaches the host.
+const annotator = createAnnotator({ screens, send: control });
 const input = attachInput({
   screens,
   keySink,
@@ -176,6 +179,7 @@ const input = attachInput({
   onZoom: (s) => {
     zoomScale = s;
     queueViewport();
+    annotator.invalidate();
     document.getElementById('zoom-pill').classList.toggle('hidden', s === 1);
     document.getElementById('zoom-level').textContent = `${s.toFixed(1)}×`;
   },
@@ -188,6 +192,29 @@ const gamepads = attachGamepads({
   log,
   onConnect: (g) => ui.toast({ text: `Controller connected: ${g.id.replace(/\s*\(.*$/, '') || 'gamepad'}`, timeout: 3000 }),
 });
+
+// Drawing on the screen (everyone connected sees it), and recording on the host.
+const drawButton = document.getElementById('btn-draw');
+const recordButton = document.getElementById('btn-record');
+let recording = false;
+annotator.onChange((on) => drawButton.setAttribute('aria-pressed', String(on)));
+drawButton.addEventListener('click', (e) => {
+  e.preventDefault();
+  annotator.toggle();
+});
+recordButton.addEventListener('click', (e) => {
+  e.preventDefault();
+  control({ t: 'record', on: !recording });
+});
+function onRecording({ on, path }) {
+  recording = on;
+  recordButton.setAttribute('aria-pressed', String(on));
+  recordButton.title = on ? 'Stop recording' : 'Record on the host';
+  const where = path?.replace(/^\/(Users|home)\/[^/]+/, '~');
+  if (on) ui.toast({ text: 'Recording on the host', timeout: 3000 });
+  else if (where) ui.toast({ text: `Recording saved on ${machineName(currentHost)}: ${where}`, icon: 'file', timeout: 8000 });
+  log('info', `recording ${on ? 'started' : 'stopped'}`, { path });
+}
 
 const ui = createUI({
   onOpenMachines: loadMachines,
@@ -429,6 +456,7 @@ worker.onmessage = ({ data }) => {
     case 'size':
       videoSizes[data.stream] = `${data.width}×${data.height}`;
       input.setVideoSize(data.stream, data.width, data.height);
+      annotator.invalidate();
       hideStatus();
       break;
     case 'stats':
@@ -504,6 +532,8 @@ function onControl(msg) {
       terminal.setAvailable(Boolean(msg.perms?.owner && msg.features?.terminal));
       // Forwarded ports are this page's host's, over plain HTTPS on the tailnet.
       ui.setPorts(msg.perms?.owner && !remoteKey && currentHost === homeHost ? msg.features?.forward_ports ?? [] : [], portUrl);
+      annotator.setSession(msg.session);
+      recordButton.classList.toggle('hidden', !(msg.features?.record && msg.perms?.owner));
       if (guest && resolutionMode.startsWith('fit:')) setResolution('auto');
       onLayout(msg.streams);
       queueViewport(true);
@@ -570,6 +600,13 @@ function onControl(msg) {
         else log('info', `passkey ${answer.mode} answered`);
         control({ t: 'passkey', ...answer });
       });
+      break;
+    case 'annotate':
+    case 'annotateClear':
+      annotator.onMessage(msg);
+      break;
+    case 'recording':
+      onRecording(msg);
       break;
     case 'error':
       if (msg.msg !== 'unauthorized') ui.toast({ text: msg.msg, kind: 'error', timeout: 6000 });
@@ -817,6 +854,7 @@ function fitSizes() {
 }
 
 function onLayout(streams) {
+  annotator.invalidate();
   for (const d of streams) if (!streamedWindows.has(d.id) && !displays.some((x) => x.id === d.id)) displays.push(d);
   // The host orders streams as arranged in macOS; lay them out the same way.
   screens.dataset.arrange = arrangement(streams);

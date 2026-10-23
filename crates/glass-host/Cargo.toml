@@ -40,7 +40,7 @@ rtc = { version = "0.21.1", default-features = false }
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard", "NSApplication", "NSResponder", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSColor", "NSGraphics", "NSCell", "NSActionCell", "NSButtonCell", "NSAccessibilityProtocols", "NSUserInterfaceItemIdentification", "NSAppearance", "NSRunningApplication", "objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard", "NSApplication", "NSResponder", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSColor", "NSGraphics", "NSCell", "NSActionCell", "NSButtonCell", "NSAccessibilityProtocols", "NSUserInterfaceItemIdentification", "NSAppearance", "NSRunningApplication", "NSWindow", "NSScreen", "NSBezierPath", "objc2-core-foundation"] }
 objc2-core-audio-types = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
