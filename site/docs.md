@@ -129,7 +129,7 @@ More in the toolbar:
 - **Displays › Apps:** show one app's window on its own (macOS).
 - **Draw on the screen:** annotate; the drawing also shows on the computer's screen.
 - **Chat:** messages with the person at the computer (`glass chat "…"` from there).
-- **Terminal:** a shell on the computer, in the viewer.
+- **Terminal:** a shell on the computer, in the viewer. Drag its top edge to resize it, or use **Full screen** (or double-click its title bar); both are remembered.
 - **Forwarded ports:** open the computer's local web servers (only ports allowed with `glass config forward-ports 3000,8888`, and only for your own devices).
 - **Record on the host:** records this session to `~/Movies/Glass` (`~/Videos/Glass` on Linux). `glass config record on` records every session.
 - **Microphone:** sends your microphone to the computer (Linux hosts).

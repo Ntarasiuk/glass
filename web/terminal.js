@@ -16,6 +16,17 @@ function fromBase64(text) {
   return out;
 }
 
+const HEIGHT_KEY = 'glass.terminalHeight';
+const FULL_KEY = 'glass.terminalFull';
+const MIN_HEIGHT = 160;
+
+function stored(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function store(key, value) {
+  try { localStorage.setItem(key, value); } catch {}
+}
+
 export function createTerminal({ control, log = () => {} }) {
   const panel = $('terminal');
   const mount = $('terminal-screen');
@@ -90,6 +101,69 @@ export function createTerminal({ control, log = () => {} }) {
     term?.reset();
     close();
   });
+  // Size: drag the top edge; full screen from the header button (or a double-click on it).
+  const fullButton = $('terminal-full');
+  const maxHeight = () => innerHeight - 20;
+  function setHeight(px) {
+    panel.style.setProperty('--term-height', `${Math.round(Math.max(MIN_HEIGHT, Math.min(px, maxHeight())))}px`);
+  }
+  function setFull(on) {
+    panel.classList.toggle('full', on);
+    fullButton.setAttribute('aria-pressed', String(on));
+    fullButton.textContent = on ? 'Exit full screen' : 'Full screen';
+    store(FULL_KEY, on ? '1' : '0');
+  }
+  const savedHeight = Number(stored(HEIGHT_KEY));
+  if (savedHeight) setHeight(savedHeight);
+  setFull(stored(FULL_KEY) === '1');
+  fullButton.addEventListener('click', (e) => {
+    e.preventDefault();
+    setFull(!panel.classList.contains('full'));
+    term?.focus();
+  });
+  panel.querySelector('header').addEventListener('dblclick', (e) => {
+    if (e.target.closest('button')) return;
+    setFull(!panel.classList.contains('full'));
+  });
+  const grip = $('terminal-grip');
+  grip.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    panel.classList.add('resizing');
+    // The panel is anchored at the bottom, so its height is the distance to the pointer.
+    const bottom = panel.getBoundingClientRect().bottom;
+    let frame = 0;
+    let y = e.clientY;
+    const move = (ev) => {
+      y = ev.clientY;
+      frame ||= requestAnimationFrame(() => {
+        frame = 0;
+        setHeight(bottom - y);
+      });
+    };
+    const end = () => {
+      cancelAnimationFrame(frame);
+      setHeight(bottom - y);
+      panel.classList.remove('resizing');
+      store(HEIGHT_KEY, String(Math.round(panel.getBoundingClientRect().height)));
+      grip.removeEventListener('pointermove', move);
+    };
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', end, { once: true });
+    grip.addEventListener('pointercancel', end, { once: true });
+  });
+  // Keyboard resizing for the separator.
+  grip.tabIndex = 0;
+  grip.addEventListener('keydown', (e) => {
+    const step = e.shiftKey ? 80 : 20;
+    const h = panel.getBoundingClientRect().height;
+    if (e.key === 'ArrowUp') setHeight(h + step);
+    else if (e.key === 'ArrowDown') setHeight(h - step);
+    else return;
+    e.preventDefault();
+    store(HEIGHT_KEY, String(Math.round(panel.getBoundingClientRect().height)));
+  });
+
   // Escape belongs to the shell (vim and friends); the close button ends the panel.
   panel.addEventListener('keydown', (e) => e.stopPropagation());
   panel.addEventListener('keyup', (e) => e.stopPropagation());
