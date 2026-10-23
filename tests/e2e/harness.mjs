@@ -18,18 +18,24 @@ const PORTS_PER_WORKER = 400;
 const firstPort = 21000 + Number(process.env.TEST_PARALLEL_INDEX ?? 0) * PORTS_PER_WORKER;
 let nextOffset = 0;
 
-function isFree(port, kind) {
+// Free on both IPv4 and IPv6: the host binds 0.0.0.0, which an IPv6-only check misses.
+function isFreeOn(port, kind, family) {
   return new Promise((resolve) => {
+    const address = family === 6 ? '::' : '0.0.0.0';
     if (kind === 'udp') {
-      const sock = createSocket({ type: 'udp6' });
+      const sock = createSocket({ type: family === 6 ? 'udp6' : 'udp4', ipv6Only: family === 6 });
       sock.once('error', () => resolve(false));
-      sock.bind(port, '::', () => sock.close(() => resolve(true)));
+      sock.bind(port, address, () => sock.close(() => resolve(true)));
     } else {
       const server = createServer();
       server.once('error', () => resolve(false));
-      server.listen(port, '::', () => server.close(() => resolve(true)));
+      server.listen({ port, host: address, ipv6Only: family === 6 }, () => server.close(() => resolve(true)));
     }
   });
+}
+
+async function isFree(port, kind) {
+  return (await isFreeOn(port, kind, 4)) && (await isFreeOn(port, kind, 6));
 }
 
 /** The next port in this worker's block that's free for `kind` (tcp or udp). */
@@ -78,7 +84,8 @@ export class Host {
     for (let i = 0; i < 100; i++) {
       try {
         const r = await fetch(`${this.base}/config.json`);
-        if (r.ok) return this;
+        // Ready once it has also written its status, which `glass link` and friends read.
+        if (r.ok && existsSync(join(this.configDir, 'status.json'))) return this;
       } catch {}
       await new Promise((r) => setTimeout(r, 100));
     }

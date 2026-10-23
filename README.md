@@ -53,6 +53,11 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Links that work once.** Let a phone or a friend's laptop in without sharing a password. Each device gets its own pass; `glass link --revoke` cuts them all off.
 - **Steady on bad Wi-Fi.** Adapts bitrate, reconnects after sleep or tab suspension, and never shows a corrupted frame.
 - **Private by default.** On your tailnet, your devices get in and nothing else does. Runs as your user, never root.
+- **Links with limits.** `--view-only`, `--no-files`, `--no-clipboard`, `--for 1h`, `--ask` (the person at the computer allows each connection) and `--passkey` (the device must use Face ID, Touch ID or a security key every time). List and revoke devices one at a time.
+- **For helping someone.** Chat, drawing on the screen (they see it on their Mac too), a privacy screen that blanks the Mac and blocks its keyboard and mouse while you work, and a connection history.
+- **Beyond the desktop.** Stream a single app's window, a terminal in the viewer, open the computer's local web ports (`/fwd/3000/`) from your tailnet, record sessions to MP4, game controllers and your microphone (Linux), HEVC when every viewer can decode it.
+- **Power.** Wake a sleeping machine (Wake-on-LAN) from the machines menu, restart Glass or the whole computer and reconnect.
+- **Self-hostable relay.** Run the WebRTC introducer and TURN yourself ([site/selfhost](site/selfhost)) and point Glass at it with `glass config relay`.
 - **Agent-ready.** Ask Claude Code to "set up Glass on my Mac mini" and it does it over SSH ([skill](#set-up-with-an-ai-agent)).
 
 ## How it compares
@@ -87,8 +92,18 @@ glass setup              # guided setup: Tailscale, background service, permissi
 glass status             # running? capturing? permissions? connect URL
 glass link               # one-time link + QR code for another device
 glass link --anywhere    # the same, from any network (WebRTC, end-to-end encrypted)
-glass link --revoke      # cut off every device let in by a link
+glass link --view-only --no-files --for 1h   # limited access
+glass link --ask --passkey                   # asks you first; needs a passkey every time
+glass link --list        # devices let in by links (with ids)
+glass link --revoke [id] # cut off one device, or every device let in by a link
 glass remote off         # turn off access from outside your tailnet
+glass viewers / kick     # who's connected now; end a session
+glass requests / allow / deny   # answer connection requests (glass config ask-guests on)
+glass chat "be right there"     # message everyone viewing
+glass privacy on|off     # blank this screen and block local input while viewed
+glass log                # connection history
+glass wake <name|mac>    # Wake-on-LAN
+glass config             # settings: ask-guests, record, privacy, hevc, forward-ports, name, accent, relay…
 glass feedback "…"       # tell us what broke or what you want
 ```
 

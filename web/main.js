@@ -8,6 +8,7 @@ import { log, setLogSink } from './log.js';
 import { MAC_KEYCODES as K } from './keymap.js';
 import { hostIdFor, serveRtc } from './rtc.js';
 import { createChat } from './chat.js';
+import { answerPasskey } from './passkey.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -131,6 +132,7 @@ const send = (kind, fields) => inputAllowed && worker.postMessage({ type: 'input
 let session = 0; // this session's id, from welcome (chat from it is our own)
 let perms = { input: true, clipboard: true, files: true, owner: true };
 let features = {};
+let deniedMsg; // why the host last turned us away
 
 // Resolves with the next clipboard text the Mac reports (used for Cmd+C / Cmd+X).
 let clipboardWaiters = [];
@@ -472,6 +474,7 @@ function onControl(msg) {
       showStatus('connecting', 'Waiting to be let in', msg.msg);
       break;
     case 'denied':
+      deniedMsg = msg.msg;
       showStatus('error', 'Not let in', msg.msg);
       ui.toast({ text: msg.msg, kind: 'error', timeout: 0, action: { label: 'Ask again', run: () => {
         showStatus('connecting', 'Connecting', machineName(currentHost));
@@ -507,6 +510,15 @@ function onControl(msg) {
       break;
     case 'fileSaved':
       ui.toast({ text: `Saved on ${machineName(currentHost)}: ${msg.path.replace(/^\/(Users|home)\/[^/]+/, '~')}`, icon: 'file' });
+      break;
+    case 'passkey':
+      // A --passkey link: create one now, or prove this is the device that did.
+      showStatus('connecting', 'Confirm with your passkey…', msg.mode === 'create' ? 'This link asks this device to save a passkey for Glass.' : machineName(currentHost));
+      answerPasskey(msg).then((answer) => {
+        if (answer.mode === 'error') log('warn', `passkey: ${answer.error}`);
+        else log('info', `passkey ${answer.mode} answered`);
+        control({ t: 'passkey', ...answer });
+      });
       break;
     case 'error':
       if (msg.msg !== 'unauthorized') ui.toast({ text: msg.msg, kind: 'error', timeout: 6000 });
@@ -564,7 +576,7 @@ function onConnectionStatus(text) {
   } else if (text.startsWith('connection failed'))
     showStatus('error', `Can't reach ${name}`, 'Retrying. Make sure Glass is running there and both devices are on Tailscale.');
   else if (text.startsWith('waiting for access token')) hideStatus();
-  else if (text === 'not let in') showStatus('error', 'Not let in', `The person at ${name} didn't let you in.`);
+  else if (text === 'not let in') showStatus('error', 'Not let in', deniedMsg ?? `The person at ${name} didn't let you in.`);
 }
 
 function hudLine(...parts) {

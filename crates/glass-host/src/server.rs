@@ -506,8 +506,9 @@ async fn control(
             }
             record_auth_failure(shared, peer);
             refused(&device, "passkey check failed");
+            // Denied, not an error: retrying on its own would only prompt again (and again).
             let msg = "This link needs a passkey, and it didn't check out. Try again, or ask for a new link.".into();
-            control::write_json(&mut send, &ServerMsg::Error { msg }).await?;
+            control::write_json(&mut send, &ServerMsg::Denied { msg }).await?;
             tokio::time::sleep(Duration::from_millis(200)).await;
             ctx.conn.close(1u32.into(), b"passkey required");
             return Ok(());
