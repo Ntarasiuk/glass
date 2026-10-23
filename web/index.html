@@ -104,6 +104,8 @@
     #toolbar {
       position: fixed; top: var(--top); right: var(--right);
       display: flex; gap: 2px; padding: 4px; border-radius: var(--radius);
+      /* Many tools on a phone: wrap onto a second row rather than run off screen. */
+      flex-wrap: wrap; justify-content: flex-end; max-width: calc(100vw - var(--right) - 10px); box-sizing: border-box;
       transition: transform 420ms var(--ease-out), opacity 420ms var(--ease-out);
     }
     /* Idle: tuck up under the top edge, leaving a lip to reach for. */
