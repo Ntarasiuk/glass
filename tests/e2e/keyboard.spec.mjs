@@ -1,19 +1,18 @@
 // Keyboard remaps remembered per machine, and the shortcut bar.
 
-import { test, expect } from '@playwright/test';
-import { Host, expectVideo } from './harness.mjs';
+import { Host, expectVideo, test, expect, toolbarClick } from './harness.mjs';
 
 const K = { Tab: 0x30, Cmd: 0x37 };
 
 async function checked(page, label) {
-  await page.locator('#btn-shortcuts').click();
+  await toolbarClick(page, 'btn-shortcuts');
   const v = await page.locator('#shortcuts-panel button', { hasText: label }).first().getAttribute('aria-checked');
   await page.keyboard.press('Escape');
   return v;
 }
 
 async function toggle(page, label) {
-  await page.locator('#btn-shortcuts').click();
+  await toolbarClick(page, 'btn-shortcuts');
   await page.locator('#shortcuts-panel button', { hasText: label }).first().click();
   await page.keyboard.press('Escape');
 }

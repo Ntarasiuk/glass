@@ -1,8 +1,7 @@
 // Single-app streaming: the displays menu lists the host's windows; picking one streams
 // just that window (the test host's fake windows are 480×320) and input maps onto it.
 
-import { test, expect } from '@playwright/test';
-import { Host, expectVideo, hudText, pickMenuItem } from './harness.mjs';
+import { Host, expectVideo, hudText, pickMenuItem, test, expect, toolbarClick } from './harness.mjs';
 
 const it = test.extend({
   host: async ({}, use) => {
@@ -22,7 +21,7 @@ test.describe('apps', () => {
     await page.goto(host.url());
     await expectVideo(page);
 
-    await page.locator('#btn-displays').click();
+    await toolbarClick(page, 'btn-displays');
     const panel = page.locator('#displays-panel');
     await expect(panel).toContainText('Apps');
     await expect(panel.locator('button', { hasText: 'Notes' })).toContainText('Notes — todo.txt');
@@ -33,7 +32,7 @@ test.describe('apps', () => {
     await expect.poll(() => streamsAt(page, '640×360')).toBe(0);
 
     // The window is checked, and not listed as a display.
-    await page.locator('#btn-displays').click();
+    await toolbarClick(page, 'btn-displays');
     await expect(panel.locator('button[aria-checked="true"]', { hasText: 'Notes' })).toBeVisible();
     await expect(panel.locator('button', { hasText: 'display' })).toHaveCount(3); // Left, Right, All
     await page.keyboard.press('Escape');

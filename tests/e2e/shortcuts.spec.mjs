@@ -1,7 +1,6 @@
 // Custom shortcuts in the ⌘ menu, and viewer branding from `glass config name/accent`.
 
-import { test, expect } from '@playwright/test';
-import { Host, expectVideo, pickMenuItem } from './harness.mjs';
+import { Host, expectVideo, pickMenuItem, test, expect, toolbarClick } from './harness.mjs';
 
 const it = test.extend({
   host: async ({}, use) => {
@@ -32,7 +31,7 @@ it('records a shortcut, sends it from the menu, and removes it', async ({ page, 
   // Kept across reloads, and removable.
   await page.reload();
   await expectVideo(page);
-  await page.locator('#btn-shortcuts').click();
+  await toolbarClick(page, 'btn-shortcuts');
   await page.getByRole('button', { name: 'Remove My grab' }).click();
   await expect(page.locator('#shortcuts-panel button', { hasText: 'My grab' })).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('glass.customShortcuts'))).toBe('[]');

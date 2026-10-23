@@ -1,8 +1,7 @@
 // The host's shell in the viewer, and forwarded ports (/fwd/<port>/).
 
-import { test, expect } from '@playwright/test';
 import { createServer } from 'node:http';
-import { Host, expectVideo, freePort } from './harness.mjs';
+import { Host, expectVideo, freePort, test, expect, toolbarClick } from './harness.mjs';
 
 /** A plain /bin/sh, so the test doesn't depend on the user's shell setup. */
 const it = test.extend({
@@ -32,7 +31,7 @@ test.describe('terminal', () => {
   it('opens a shell on the host and runs a command', async ({ page, host }) => {
     await page.goto(host.url());
     await expectVideo(page);
-    await page.locator('#btn-terminal').click();
+    await toolbarClick(page, 'btn-terminal');
     await expect(page.locator('#terminal')).toBeVisible();
     await expect(page.locator('#terminal .xterm')).toBeVisible();
     await page.locator('#terminal .xterm-helper-textarea').focus();
@@ -89,7 +88,7 @@ test.describe('port forwarding', () => {
       // The viewer offers the port and opens it through /fwd/auth.
       await page.goto(host.url());
       await expectVideo(page);
-      await page.locator('#btn-ports').click();
+      await toolbarClick(page, 'btn-ports');
       const [tab] = await Promise.all([
         page.context().waitForEvent('page'),
         page.locator('#ports-panel button', { hasText: `localhost:${web.port}` }).click(),

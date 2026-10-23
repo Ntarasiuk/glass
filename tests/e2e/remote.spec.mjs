@@ -2,10 +2,9 @@
 // test host with remote access on, and a browser opening a `glass link --anywhere` link
 // from the site's /app/ like it would from glassdesk.dev.
 
-import { test, expect } from '@playwright/test';
 import { spawn, execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
-import { Host, expectVideo, freePort } from './harness.mjs';
+import { Host, expectVideo, freePort, test, expect, toolbarClick } from './harness.mjs';
 
 const SITE = resolve(import.meta.dirname, '../../site');
 
@@ -70,7 +69,7 @@ test('a link from anywhere connects over WebRTC: video, input and files', async 
     const files = async () => Object.fromEntries((await host.get('/test/downloads')).files.map((f) => [f.name, f.size]));
     await expect.poll(files, { timeout: 20_000 }).toEqual({ 'remote.bin': body.length });
     await page.mouse.move(640, 8); // bring back the tucked toolbar, as a mouse heading up does
-    await page.locator('#btn-download').click();
+    await toolbarClick(page, 'btn-download');
     await expect(page.locator('.toast', { hasText: 'glass-test-pick', has: page.locator('.action') })).toBeVisible({ timeout: 10_000 });
 
     // Its logs reach the host over the connection (there's no web server to post them to).

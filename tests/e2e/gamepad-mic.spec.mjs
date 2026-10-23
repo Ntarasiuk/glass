@@ -1,7 +1,6 @@
 // Game controllers and the viewer's microphone, against a `glass --test` host.
 
-import { test, expect } from '@playwright/test';
-import { Host, expectVideo } from './harness.mjs';
+import { Host, expectVideo, test, expect } from './harness.mjs';
 
 const it = test.extend({
   host: async ({}, use) => {

@@ -1,7 +1,6 @@
 // The owner's console at /admin/, and device posture, against real `glass --test` hosts.
 
-import { test, expect } from '@playwright/test';
-import { Host, expectVideo } from './harness.mjs';
+import { Host, expectVideo, test, expect, toolbarClick } from './harness.mjs';
 
 const it = test.extend({
   host: async ({}, use) => {
@@ -68,7 +67,7 @@ test.describe('console', () => {
   it('the viewer links the owner to the console', async ({ page, host }) => {
     await page.goto(host.url());
     await expectVideo(page);
-    await page.locator('#btn-more').click();
+    await toolbarClick(page, 'btn-more');
     const [consolePage] = await Promise.all([
       page.context().waitForEvent('page'),
       page.locator('#more-panel button', { hasText: 'Console' }).click(),

@@ -1,8 +1,7 @@
 // Sharp text's lossless refresh: once the screen is still, a viewer with sharp text on gets
 // the exact picture (PNG, full colour) on top of the video, until the screen changes.
 
-import { test, expect } from '@playwright/test';
-import { Host, expectVideo, hudText, pickMenuItem } from './harness.mjs';
+import { Host, expectVideo, hudText, pickMenuItem, test, expect } from './harness.mjs';
 
 const it = test.extend({
   host: async ({}, use) => {

@@ -1,7 +1,6 @@
 // The computer menu: privacy screen and restarts, owner only.
 
-import { test, expect } from '@playwright/test';
-import { Host, expectVideo, pickMenuItem } from './harness.mjs';
+import { Host, expectVideo, pickMenuItem, test, expect, toolbarClick } from './harness.mjs';
 
 const it = test.extend({
   host: async ({}, use) => {
@@ -19,7 +18,7 @@ it('turns the privacy screen on and off from the viewer', async ({ page, host })
   await pickMenuItem(page, 'btn-more', 'Privacy screen');
   await expect.poll(() => records(host, 'privacy')).toEqual([true]);
   // The host confirms, and the menu shows it.
-  await page.locator('#btn-more').click();
+  await toolbarClick(page, 'btn-more');
   await expect(page.locator('#more-panel button', { hasText: 'Privacy screen' })).toHaveAttribute('aria-checked', 'true');
   await page.locator('#more-panel button', { hasText: 'Privacy screen' }).click();
   await expect.poll(() => records(host, 'privacy')).toEqual([true, false]);

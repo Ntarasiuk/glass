@@ -2,9 +2,8 @@
 // deprovisioning cutting sessions off, and LDAP sign-in (against a real OpenLDAP in
 // Docker, skipped without Docker).
 
-import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { Host, expectVideo, freePort } from './harness.mjs';
+import { Host, expectVideo, freePort, test, expect } from './harness.mjs';
 import { fakeProvider, CLIENT_SECRET } from './oidc-provider.mjs';
 
 const SCIM_TOKEN = 'scim-test-token-0123456789';

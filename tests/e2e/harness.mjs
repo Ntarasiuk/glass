@@ -7,7 +7,21 @@ import { createSocket } from 'node:dgram';
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { expect } from '@playwright/test';
+import { test as base, expect } from '@playwright/test';
+
+// Every spec's `test`: closes the browser contexts a test opened, even when it fails, so
+// pages left behind don't keep reconnecting to stopped hosts and slow the run.
+export const test = base.extend({
+  _closeContexts: [
+    async ({ browser }, use) => {
+      const before = new Set(browser.contexts());
+      await use();
+      await Promise.all(browser.contexts().filter((c) => !before.has(c)).map((c) => c.close().catch(() => {})));
+    },
+    { auto: true },
+  ],
+});
+export { expect };
 
 const ROOT = resolve(import.meta.dirname, '../..');
 export const BINARY = process.env.GLASS_BIN ?? join(ROOT, 'target/release/glass-host');
@@ -174,9 +188,16 @@ export async function stats(page) {
   };
 }
 
+/** Clicks a toolbar button, waking the tucked toolbar first (a real pointer would). */
+export async function toolbarClick(page, id) {
+  await page.locator('#toolbar').hover();
+  await expect(page.locator('#toolbar')).not.toHaveClass(/idle|waking/);
+  await page.locator(`#${id}`).click();
+}
+
 /** Opens a toolbar menu and clicks the item whose label starts with `label`. */
 export async function pickMenuItem(page, button, label) {
-  await page.locator(`#${button}`).click();
+  await toolbarClick(page, button);
   await page.locator('.panel:not(.hidden) button', { hasText: label }).first().click();
 }
 

@@ -1,8 +1,7 @@
 // Single sign-on (OpenID Connect) against a fake provider run by the test
 // (oidc-provider.mjs).
 
-import { test, expect } from '@playwright/test';
-import { Host, expectVideo } from './harness.mjs';
+import { Host, expectVideo, test, expect } from './harness.mjs';
 import { fakeProvider } from './oidc-provider.mjs';
 
 async function ssoHost(provider) {

@@ -1,10 +1,9 @@
 // Drawing on the screen (seen by every viewer) and recording sessions on the host.
 
-import { test, expect } from '@playwright/test';
 import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Host, expectVideo } from './harness.mjs';
+import { Host, expectVideo, test, expect, toolbarClick } from './harness.mjs';
 
 const it = test.extend({
   host: async ({}, use) => {
@@ -28,13 +27,6 @@ function inkOn(page) {
     for (let i = 3; i < data.length; i += 4) if (data[i] > 0) n++;
     return n;
   });
-}
-
-/** Clicks a toolbar button, waking the tucked toolbar first (a real pointer would). */
-async function toolbarClick(page, id) {
-  await page.locator('#toolbar').hover();
-  await expect(page.locator('#toolbar')).not.toHaveClass(/idle|waking/);
-  await page.locator(`#${id}`).click();
 }
 
 /** Drags across the middle of the first screen. */

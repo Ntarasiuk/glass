@@ -1,8 +1,7 @@
 // Sharp text: the viewer asks for detail over motion; the host encodes its displays at
 // full size with the stricter text policy, until it's turned off again.
 
-import { test, expect } from '@playwright/test';
-import { Host, expectVideo, hudText, pickMenuItem } from './harness.mjs';
+import { Host, expectVideo, hudText, pickMenuItem, test, expect, toolbarClick } from './harness.mjs';
 
 const it = test.extend({
   host: async ({}, use) => {
@@ -53,7 +52,7 @@ it('a view-only guest cannot turn it on', async ({ browser, host }) => {
   const page = await (await browser.newContext()).newPage();
   await page.goto(`${host.base}/#l=${code}`);
   await expectVideo(page);
-  await page.locator('#btn-displays').click();
+  await toolbarClick(page, 'btn-displays');
   await expect(page.locator('.panel:not(.hidden) button', { hasText: 'Sharp text' })).toHaveCount(0);
   expect(await records(host)).toEqual([]);
 });

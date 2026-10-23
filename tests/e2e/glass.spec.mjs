@@ -1,9 +1,8 @@
 // End-to-end tests against real `glass --test` hosts in Google Chrome.
 // The host streams a test pattern on two fake 640×360 displays and records input.
 
-import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { BINARY, Host, expectVideo, hudText, pickMenuItem, stats, touch } from './harness.mjs';
+import { BINARY, Host, expectVideo, hudText, pickMenuItem, stats, touch, test, expect, toolbarClick } from './harness.mjs';
 
 /** One host per test, stopped afterwards. */
 const it = test.extend({
@@ -284,7 +283,7 @@ test.describe('displays', () => {
 
   it('lists displays and switches between one and all', async ({ page, host }) => {
     await open(page, host);
-    await page.locator('#btn-displays').click();
+    await toolbarClick(page, 'btn-displays');
     const items = page.locator('#displays-panel button');
     // Two displays, "All displays", the resolution choices (Auto, This Mac), Sharp text,
     // then the test host's two windows (Apps).
@@ -540,7 +539,7 @@ test.describe('clipboard and files', () => {
 
   it('downloads files picked on the host', async ({ page, host }) => {
     await open(page, host);
-    await page.locator('#btn-download').click();
+    await toolbarClick(page, 'btn-download');
     // The finished transfer's toast has the Save action (the progress toast doesn't).
     const toast = page.locator('.toast', { hasText: 'glass-test-pick', has: page.locator('.action') });
     await expect(toast).toBeVisible({ timeout: 10_000 });
@@ -552,7 +551,7 @@ test.describe('audio', () => {
   it('streams audio once turned on', async ({ page, host }) => {
     await open(page, host);
     await expect(page.locator('#btn-audio')).toBeVisible();
-    await page.locator('#btn-audio').click();
+    await toolbarClick(page, 'btn-audio');
     await expect.poll(async () => (await stats(page)).audioPackets, { timeout: 10_000 }).toBeGreaterThan(150);
   });
 });

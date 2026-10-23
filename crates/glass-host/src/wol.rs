@@ -2,7 +2,7 @@
 //! ones it sees on other tailnet machines, so it can wake them later from its own LAN.
 
 use std::collections::HashMap;
-use std::net::UdpSocket;
+use std::net::{Ipv4Addr, UdpSocket};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -41,12 +41,64 @@ pub fn wake(mac: [u8; 6]) -> Result<()> {
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.set_broadcast(true)?;
     let packet = magic_packet(mac);
-    for port in [9, 7] {
-        sock.send_to(&packet, ("255.255.255.255", port))
-            .context("send the wake-up packet")?;
+    // Every network's own broadcast address as well as 255.255.255.255: with several
+    // interfaces (or none routing the limited broadcast) one of them still reaches the LAN.
+    let mut targets = broadcast_addrs();
+    targets.push(Ipv4Addr::BROADCAST);
+    let mut sent = 0;
+    let mut last_err = None;
+    for addr in targets {
+        for port in [9, 7] {
+            match sock.send_to(&packet, (addr, port)) {
+                Ok(_) => sent += 1,
+                Err(e) => last_err = Some(e),
+            }
+        }
+    }
+    if sent == 0 {
+        return Err(last_err.map_or_else(|| anyhow::anyhow!("no network"), Into::into))
+            .context("send the wake-up packet");
     }
     tracing::info!("sent Wake-on-LAN to {}", format_mac(mac));
     Ok(())
+}
+
+/// The broadcast address of each IPv4 network this computer is on (up, not loopback).
+fn broadcast_addrs() -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `list` with a linked list freed below with freeifaddrs; each
+    // sockaddr is read only after checking its family.
+    unsafe {
+        if libc::getifaddrs(&mut list) != 0 {
+            return out;
+        }
+        let mut cur = list;
+        while let Some(ifa) = cur.as_ref() {
+            cur = ifa.ifa_next;
+            let flags = ifa.ifa_flags as libc::c_int;
+            if flags & libc::IFF_UP == 0
+                || flags & libc::IFF_LOOPBACK != 0
+                || flags & libc::IFF_BROADCAST == 0
+            {
+                continue;
+            }
+            #[cfg(target_os = "linux")]
+            let broad = ifa.ifa_ifu;
+            #[cfg(not(target_os = "linux"))]
+            let broad = ifa.ifa_dstaddr;
+            if broad.is_null() || (*broad).sa_family as libc::c_int != libc::AF_INET {
+                continue;
+            }
+            let sin = &*(broad as *const libc::sockaddr_in);
+            let addr = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            if !addr.is_unspecified() && !out.contains(&addr) {
+                out.push(addr);
+            }
+        }
+        libc::freeifaddrs(list);
+    }
+    out
 }
 
 /// This computer's wired and Wi-Fi MAC addresses (not virtual or tunnel interfaces).

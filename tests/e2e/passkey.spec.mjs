@@ -2,8 +2,7 @@
 // and its guest pass only works together with that passkey from then on.
 // Chrome's virtual authenticator (over CDP) stands in for Touch ID or a security key.
 
-import { test, expect } from '@playwright/test';
-import { Host, expectVideo, hudText } from './harness.mjs';
+import { Host, expectVideo, hudText, test, expect } from './harness.mjs';
 
 const it = test.extend({
   host: async ({}, use) => {

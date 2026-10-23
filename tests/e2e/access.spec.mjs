@@ -1,8 +1,7 @@
 // Scoped links, asking before letting someone in, chat, the connection log and the CLI
 // socket, against real `glass --test` hosts.
 
-import { test, expect } from '@playwright/test';
-import { Host, expectVideo } from './harness.mjs';
+import { Host, expectVideo, test, expect, toolbarClick } from './harness.mjs';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
@@ -114,7 +113,7 @@ test.describe('chat', () => {
     await b.goto(host.url());
     await expectVideo(a);
     await expectVideo(b);
-    await a.locator('#btn-chat').click();
+    await toolbarClick(a, 'btn-chat');
     await a.locator('#chat-panel input').fill('hello from a');
     await a.locator('#chat-panel input').press('Enter');
     await expect(a.locator('#chat-panel li.mine')).toHaveText(/hello from a/);
