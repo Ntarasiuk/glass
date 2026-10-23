@@ -620,6 +620,8 @@ async fn control(
         codecs.iter().any(|c| c == "hevc"),
         ctx.relayed.as_ref().is_some_and(|r| r.rtp_video),
     );
+    let _sharp = crate::sharp::joined(session_id, codecs.iter().any(|c| c == "hevc-rext"));
+    let mut sharp_on = false;
     // Shown on the host (menu bar / notification) for as long as this session lasts.
     let _viewing = crate::viewers::joined(viewer, ctx.conn.clone());
     // Recording every session (glass config record on), or when an owner asks.
@@ -787,6 +789,19 @@ async fn control(
                 refuse("Only this computer's owner can change its display shape.")
             }
             ClientMsg::Fit { size } => fit(&ctx, viewport_id, size).await?,
+            // Sharp text keeps this viewer at native size, whatever its screen.
+            ClientMsg::Viewport { .. } if sharp_on => {}
+            ClientMsg::Sharp { .. } if !perms.input => refuse("This link is view only."),
+            ClientMsg::Sharp { on } => {
+                sharp_on = on;
+                if on {
+                    // An empty request: every stream at full resolution.
+                    crate::resolution::set(viewport_id, Some(Vec::new()));
+                }
+                // Turning it off: the viewer sends its viewport again.
+                crate::sharp::set(session_id, on);
+                info!("{peer}: sharp text {}", if on { "on" } else { "off" });
+            }
             ClientMsg::Viewport { streams } => {
                 let streams = streams
                     .into_iter()
@@ -1501,6 +1516,17 @@ fn apply_bitrate(shared: &Shared) {
     }
     shared.video.set_bitrate(bps);
     let _ = shared.events.send(ServerMsg::Bitrate { bps });
+}
+
+/// Re-applies the current bitrate, so encoders pick up a changed policy (sharp text).
+pub fn reapply_policy() {
+    if let Some(shared) = SHARED.get() {
+        let bps = match APPLIED_BPS.load(Ordering::Relaxed) {
+            0 => shared.rate.lock().unwrap().target(),
+            b => b,
+        };
+        shared.video.set_bitrate(bps);
+    }
 }
 
 pub fn shared() -> Option<Arc<Shared>> {

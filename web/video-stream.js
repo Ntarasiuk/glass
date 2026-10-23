@@ -35,6 +35,8 @@ export async function probeDecoders(log, codec = 'avc1.640033') {
 
 // HEVC Main, level 4.1: if this decodes in hardware, the host may send HEVC.
 const HEVC_PROBE = 'hvc1.1.6.L123.B0';
+// HEVC Range Extensions, Main 4:2:2 10 (profile 4; max 12/10-bit, max 4:2:2, lower bit rate).
+export const HEVC_REXT_PROBE = 'hvc1.4.10.L123.9D.08';
 
 /** The codecs to offer the host in hello: always H.264, HEVC where it's hardware-decoded. */
 export async function probeCodecs() {
@@ -42,6 +44,11 @@ export async function probeCodecs() {
   if (typeof VideoDecoder === 'undefined') return codecs;
   const { supported } = await VideoDecoder.isConfigSupported({ codec: HEVC_PROBE, hardwareAcceleration: 'prefer-hardware' }).catch(() => ({}));
   if (supported) codecs.push('hevc');
+  // HEVC Main 4:2:2 10 (Range Extensions), what the host sends for sharp text.
+  if (supported) {
+    const rext = await VideoDecoder.isConfigSupported({ codec: HEVC_REXT_PROBE, hardwareAcceleration: 'prefer-hardware' }).catch(() => ({}));
+    if (rext.supported) codecs.push('hevc-rext');
+  }
   return codecs;
 }
 

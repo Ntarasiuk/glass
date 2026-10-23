@@ -27,7 +27,7 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_MaxAllowedFrameQP, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
     kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
-    kVTProfileLevel_HEVC_Main_AutoLevel,
+    kVTProfileLevel_HEVC_Main_AutoLevel, kVTProfileLevel_HEVC_Main42210_AutoLevel,
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
@@ -89,6 +89,8 @@ pub use crate::media::EncodedFrame;
 pub struct Encoder {
     session: CFRetained<VTCompressionSession>,
     hevc: bool,
+    /// HEVC 4:2:2 (sharp text): fed BGRA, so colour isn't subsampled before encoding.
+    rext: bool,
     force_keyframe: Arc<AtomicBool>,
     on_frame: Arc<dyn Fn(EncodedFrame) + Send + Sync>,
     /// The sharpness cap in force (MaxAllowedFrameQP; 0 = none), from `apply_policy`.
@@ -112,9 +114,13 @@ impl Encoder {
         fps: i32,
         bitrate: i32,
         hevc: bool,
+        rext: bool,
         force_keyframe: Arc<AtomicBool>,
         on_frame: Arc<dyn Fn(EncodedFrame) + Send + Sync>,
     ) -> Result<Self> {
+        // Sharp text: HEVC Main 4:2:2 10 (Range Extensions) keeps full horizontal colour
+        // detail, which 4:2:0 halves. VideoToolbox has no public 4:4:4 profile.
+        let rext = rext && hevc;
         let yes = CFBoolean::new(true);
         let spec_keys = unsafe {
             [
@@ -153,6 +159,7 @@ impl Encoder {
             if status != 0 {
                 tracing::warn!("VTSessionSetProperty({key}) failed: {status}");
             }
+            status
         };
         unsafe {
             set(kVTCompressionPropertyKey_RealTime, yes);
@@ -160,14 +167,20 @@ impl Encoder {
                 kVTCompressionPropertyKey_AllowFrameReordering,
                 CFBoolean::new(false),
             );
-            set(
+            let profile_status = set(
                 kVTCompressionPropertyKey_ProfileLevel,
-                if hevc {
+                if rext {
+                    kVTProfileLevel_HEVC_Main42210_AutoLevel
+                } else if hevc {
                     kVTProfileLevel_HEVC_Main_AutoLevel
                 } else {
                     kVTProfileLevel_H264_High_AutoLevel
                 },
             );
+            if rext && profile_status != 0 {
+                session.invalidate();
+                bail!("this encoder has no HEVC 4:2:2 profile ({profile_status})");
+            }
 
             set(
                 kVTCompressionPropertyKey_ExpectedFrameRate,
@@ -186,6 +199,7 @@ impl Encoder {
         Ok(Self {
             session,
             hevc,
+            rext,
             force_keyframe,
             on_frame,
             qp_cap: AtomicU32::new(0),
@@ -215,6 +229,11 @@ impl Encoder {
             );
         }
         fps
+    }
+
+    /// Capture should deliver BGRA (full colour) rather than 4:2:0, for HEVC 4:2:2.
+    pub fn wants_bgra(&self) -> bool {
+        self.rext
     }
 
     fn set(&self, key: &CFString, value: i32, what: &str) {
@@ -312,6 +331,30 @@ impl Drop for Encoder {
     }
 }
 
+/// True when HEVC 4:2:2 (Range Extensions) hardware encoding works here (probed once).
+pub fn supports_rext() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        let ok = supports_hevc()
+            && Encoder::new(
+                640,
+                360,
+                30,
+                1_000_000,
+                true,
+                true,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(|_| {}),
+            )
+            .is_ok();
+        tracing::info!(
+            "HEVC 4:2:2 hardware encoding: {}",
+            if ok { "available" } else { "unavailable" }
+        );
+        ok
+    })
+}
+
 /// True when HEVC hardware encoding works here (probed once, with a tiny session).
 pub fn supports_hevc() -> bool {
     static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -322,6 +365,7 @@ pub fn supports_hevc() -> bool {
             30,
             1_000_000,
             true,
+            false,
             Arc::new(AtomicBool::new(false)),
             Arc::new(|_| {}),
         )

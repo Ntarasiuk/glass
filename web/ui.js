@@ -21,7 +21,7 @@ const TOOLBAR_IDLE_MS = 3000;
 // Matches the slide-in transition in index.html (420 ms), plus a beat.
 const TOOLBAR_WAKE_MS = 450;
 
-export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -354,6 +354,16 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
         onSelect: () => { setMenuOpen('displays', false); onResolution?.('native'); },
       }),
     );
+    // Sharp text: full size, fewer but finer frames (and 4:2:2 colour where it can).
+    if (sharpAvailable) {
+      items.push(
+        document.createElement('hr'),
+        menuItem('Sharp text', sharpMode === 'off' ? 'for reading' : sharpMode === '4:2:2' ? 'on · 4:2:2' : 'on', {
+          checked: sharpOn,
+          onSelect: () => { setMenuOpen('displays', false); onSharp?.(!sharpOn); },
+        }),
+      );
+    }
     // Fit this device: the Mac's desktop in this screen's shape, no black bars.
     const fits = canFit ? fitSizes() : [];
     if (fits.length) {
@@ -428,6 +438,9 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     menus.more.panel.replaceChildren(...items);
   }
   let canFit = true;
+  let sharpAvailable = false;
+  let sharpOn = false;
+  let sharpMode = 'off';
   let windowsAvailable = false;
   let windowList = null;
 
@@ -550,6 +563,13 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     /** Only the owner can reshape the host's display (guests get an error). */
     setCanFit(on) {
       canFit = on;
+      if (lastDisplays) renderDisplays(...lastDisplays);
+    },
+    /** Sharp text: `available` (may this viewer turn it on), `on` (its choice), `mode` (the host's). */
+    setSharp({ available = sharpAvailable, on = sharpOn, mode = sharpMode } = {}) {
+      sharpAvailable = available;
+      sharpOn = on;
+      sharpMode = mode;
       if (lastDisplays) renderDisplays(...lastDisplays);
     },
     /** The host can stream single windows (an Apps section in the displays menu). */

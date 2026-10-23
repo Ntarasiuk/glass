@@ -16,6 +16,7 @@ mod power;
 mod privacy;
 mod recording;
 mod settings;
+mod sharp;
 mod terminal;
 mod wol;
 mod rate;

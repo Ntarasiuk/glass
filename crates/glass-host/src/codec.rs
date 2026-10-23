@@ -88,6 +88,8 @@ fn reapply() {
         tracing::info!("viewers' codec: {}", name(now));
         let _ = shared.events.send(crate::control::ServerMsg::Codec { codec: name(now) });
         shared.video.request_keyframe(None);
+        // Sharp text's 4:2:2 depends on HEVC.
+        crate::sharp::recompute();
     });
 }
 
