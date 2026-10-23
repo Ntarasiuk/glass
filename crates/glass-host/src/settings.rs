@@ -161,7 +161,6 @@ pub const KEYS: &[(&str, &str)] = &[
     ("oidc-client-id", "the OAuth client id registered with that provider"),
     ("oidc-client-secret", "its client secret (stored separately, owner-only)"),
     ("oidc-allow", "who may sign in: emails or @domain, comma-separated"),
-    ("oidc-scope", "full or view-only: what SSO users may do"),
     ("posture-tailnet-tags", "tailnet devices must carry one of these tags, e.g. tag:trusted"),
     ("posture-os", "allowed operating systems, e.g. macos,ios,windows"),
     ("posture-min-browser", "oldest browser major version let in, e.g. 120 (0: any)"),

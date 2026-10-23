@@ -121,7 +121,7 @@ glass config             # settings: ask-guests, record, privacy, hevc, forward-
 glass feedback "…"       # tell us what broke or what you want
 ```
 
-On your tailnet, open `https://<computer>.<tailnet>.ts.net` on the iPad. Full CLI reference, keyboard tips for iPad and troubleshooting: [glassdesk.dev/docs](https://glassdesk.dev/docs).
+On your tailnet, open `https://<computer>.<tailnet>.ts.net` on the iPad. Full CLI reference, Sharp text, the console, team sign-in, keyboard tips for iPad and troubleshooting: [glassdesk.dev/docs](https://glassdesk.dev/docs).
 
 ## Set up with an AI agent
 
@@ -162,6 +162,7 @@ NSPasteboard, files ◀─▶ control + file streams ◀────────
 
 - Everything is encrypted: TLS 1.3 over QUIC on your tailnet, end-to-end encrypted WebRTC from anywhere.
 - A device gets in only if Tailscale says it's yours, or it has the access token or a one-time pass. Nothing is sent until then.
+- Narrow it further: limited or passkey-bound links, ask-first, single sign-on or LDAP with access rules, SCIM deprovisioning and device posture checks. Secrets are stored owner-only.
 - Remote access from outside your tailnet is off until you make a link or run `glass remote on`.
 - Glass runs as your user, never as root. The app sends nothing to glassdesk.dev except feedback you choose to send.
 
