@@ -224,6 +224,7 @@ header.site nav a:hover, footer.site a:hover { color: var(--text); }
 .pillars div { padding: 22px 24px 24px; border-radius: 22px; }
 .pillars h2 { margin: 0; font-size: 20px; letter-spacing: -0.015em; line-height: 1.2; }
 .pillars p { margin: 6px 0 0; font-size: 16px; }
+.new { grid-column: 1 / -1; justify-self: center; margin: 4px 0 0; max-width: 62ch; text-align: center; color: var(--text-dim); font-size: 15px; }
 .more { grid-column: 1 / -1; justify-self: center; margin-top: 8px; font-weight: 600; text-decoration: none; }
 .more span { display: inline-block; transition: transform 160ms var(--ease-out); }
 .more:hover span { transform: translateX(3px); }
