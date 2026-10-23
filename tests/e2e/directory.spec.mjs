@@ -150,8 +150,23 @@ async function openldap() {
       await new Promise((r) => setTimeout(r, 1000));
     }
   }
-  execFileSync('docker', ['exec', '-i', name, 'ldapadd', ...admin], { input: SEED, stdio: ['pipe', 'ignore', 'inherit'] });
-  return { url: `ldap://localhost:${port}`, stop: () => execFileSync('docker', ['rm', '-f', name], { stdio: 'ignore' }) };
+  const stop = () => execFileSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
+  // The image restarts slapd once after its first-boot setup, so the first search can
+  // succeed and the seed still land on a server going down: retry, and never leak it.
+  for (let i = 0; ; i++) {
+    try {
+      execFileSync('docker', ['exec', '-i', name, 'ldapadd', '-c', ...admin], { input: SEED, stdio: ['pipe', 'ignore', 'ignore'] });
+      break;
+    } catch (e) {
+      if (e.status === 68) break; // already there: an earlier try got through
+      if (i > 20) {
+        stop();
+        throw e;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  return { url: `ldap://localhost:${port}`, stop };
 }
 
 test('signs in with a directory (LDAP) account', async ({ browser }) => {
