@@ -186,9 +186,26 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
 
   if ('PressureObserver' in window) {
     try {
+      // Each change resizes the stream (a new encoder), so only act on a lasting state:
+      // smaller after 10 s under pressure, back up after 30 s of calm, one step at a time.
+      const STEPS = [1, 0.75, 0.5];
+      let step = 0;
+      let wanted = 0;
+      let since = 0;
       const observer = new PressureObserver((records) => {
         const state = records.at(-1)?.state;
-        onPressure(state === 'critical' ? 0.5 : state === 'serious' ? 0.75 : 1);
+        const want = state === 'critical' ? 2 : state === 'serious' ? 1 : 0;
+        const now = performance.now();
+        if (want !== wanted) {
+          wanted = want;
+          since = now;
+        }
+        const held = now - since;
+        if (wanted > step && held >= 10_000) step += 1;
+        else if (wanted < step && held >= 30_000) step -= 1;
+        else return;
+        since = now; // the next step waits its turn too
+        onPressure(STEPS[step]);
       });
       observer.observe('cpu', { sampleInterval: 2000 }).catch(() => {});
     } catch {}
