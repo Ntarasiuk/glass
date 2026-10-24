@@ -19,10 +19,13 @@ Features:
 - **Works in the browser.** Open a URL on the iPad; there's no app to install. Add it to the Home Screen for a true fullscreen app.
 - **Full control.** Mouse, trackpad, keyboard, and touch (tap to click, drag, long-press to right-click, two-finger scroll), plus an on-screen keyboard button.
 - **Unlocks a locked Mac.** Type the password at the lock screen from the remote device.
+- **Apple Pencil.** Pressure and tilt reach the Mac as tablet input, so drawing apps (Photoshop, Affinity, Krita) respond as they do to a drawing tablet.
 - **Multiple displays.** Show one display, switch between them, or show all of them side by side in their macOS arrangement.
+- **A second display.** Your iPad, a laptop or any browser becomes one more display that extends the Mac's desktop (Displays › Use as a second display), Retina where the screen is.
 - **Audio.** Streams Mac system audio to the browser.
 - **Clipboard sync.** Copy on the Mac, paste on the iPad, and the reverse: text, rich text and images.
 - **File transfer.** Send files from the iPad to the Mac's Downloads folder, or pick files on the Mac and save them on the iPad. Transfers are direct and peer-to-peer.
+- **A file browser.** The owner browses the computer's folders in the viewer (Files): previews, download, upload into any folder, new folder, rename, move to the Trash.
 - **Auto-reconnect.** Survives iPad tab suspension, network changes, and host restarts.
 - **Notifications.** On your phone, iPad or laptop, even with Glass closed: an agent needs you, someone asks to connect (Allow or Deny right from the notification), or a message. End-to-end encrypted, per device, and off until you turn them on.
 - **A real app on every device.** Install it from the browser (Add to Home Screen on iPhone and iPad): its own icon with a badge, a shortcut to each of your machines, sharing photos and files to the Mac from any app, and it opens even when the computer is asleep to say so.
@@ -40,6 +43,7 @@ Features:
 - **Microphone and controllers.** Your microphone reaches the computer, so its apps hear you (on a Mac through Glass Microphone, a small audio driver Glass installs with one password prompt). Game controllers reach Linux hosts.
 - **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps are remembered for each computer; an optional shortcut bar puts Mac shortcuts one tap away.
 - **Power.** Wake a sleeping machine (Wake-on-LAN), restart Glass or the whole computer and reconnect.
+- **AI agents, supervised.** `glass mcp` lets Claude Code, Claude Desktop, Cursor or any MCP client use the computer (and your other computers running Glass) while you watch each step, pause or stop it, and approve anything risky, from the viewer, the Mac app or a notification.
 - **The Glass app (macOS).** A native window for everything the command line does: setup, who's connected, links with QR codes, machines, history, AI agents, settings and teams. In Applications, Spotlight and the menu bar (**Open Glass…**).
 - **A console.** `https://<computer>/admin/`: who's connected, requests to allow, links with QR codes, devices, history, settings, access rules and an address book of your machines.
 - **For teams.** Single sign-on (any OpenID Connect provider), LDAP, SCIM provisioning, access rules per email, domain or group, and device posture checks.

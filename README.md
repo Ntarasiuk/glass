@@ -43,33 +43,53 @@ And the viewer is just a web page. No app to install, no account to create.
 
 ## Features
 
-- **Feels local.** Hardware encode and decode, WebTransport datagrams, no buffering.
-- **Just a browser.** iPad, iPhone, Mac, Windows or Linux. Add it to the Home Screen for a fullscreen app.
-- **Full control.** Mouse, trackpad, keyboard, touch and pinch to zoom. ⌘Tab works on iPad. Unlock a locked Mac from the lock screen.
+### Picture and speed
+- **Feels local.** Hardware encode and decode, WebTransport datagrams, no buffering: about 20 ms.
+- **Up to 120 fps and true colour.** ProMotion iPads and fast monitors get up to 120 fps; Display P3 from a wide-colour Mac display stays P3.
+- **Sharp text.** A per-viewer mode for code and documents: native size, HEVC 4:2:2 while things move, and a lossless full-colour (4:4:4) picture once the screen is still.
 - **Every display.** Switch screens from live previews along the bottom, or show them all side by side, arranged like your desk.
-- **A toolbar that stays put.** Hide it from its last button for an unobstructed screen; a small tab brings it back.
-- **Every machine.** All your computers in one menu; switch without leaving the page.
-- **Sound, clipboard, files.** System audio, copy and paste both ways (text, rich text and images), and direct file transfer.
-- **From anywhere.** `glass link --anywhere` makes a one-time link that connects any browser straight to your computer over WebRTC: end-to-end encrypted, no ports opened, no Tailscale needed on the viewer.
-- **Links that work once.** Let a phone or a friend's laptop in without sharing a password. Each device gets its own pass; `glass link --revoke` cuts them all off.
-- **Steady on bad Wi-Fi.** Adapts bitrate, reconnects after sleep or tab suspension, and never shows a corrupted frame.
-- **Private by default.** On your tailnet, your devices get in and nothing else does. Runs as your user, never root.
-- **Links with limits.** `--view-only`, `--no-files`, `--no-clipboard`, `--for 1h`, `--ask` (the person at the computer allows each connection) and `--passkey` (the device must use Face ID, Touch ID or a security key every time). List and revoke devices one at a time.
-- **For helping someone.** Chat, drawing on the screen (they see it on their Mac too), a privacy screen that blanks the Mac and blocks its keyboard and mouse while you work, and a connection history.
+- **Your device as a second display.** Turn an iPad or laptop into one more display beside the Mac, Retina and all, like Sidecar with nothing to install. Or reshape the Mac's desktop to fit your screen.
+- **Steady on bad Wi-Fi.** Adapts bitrate, reconnects after sleep or tab suspension, never shows a corrupted frame, and asks for a smaller picture when your device struggles.
+
+### Control
+- **Full control.** Mouse, trackpad, keyboard, touch and pinch to zoom. ⌘Tab works on iPad. Unlock a locked Mac from the lock screen.
+- **Apple Pencil.** Pressure and tilt reach the Mac as tablet input, so drawing apps respond as they do to a drawing tablet.
+- **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps remembered for each computer, and a shortcut bar for touch screens.
+- **Games.** Capture the mouse (relative motion) for games and 3D apps; game controllers reach Linux hosts.
+- **Every machine.** All your computers in one menu; wake sleeping ones (Wake-on-LAN), restart Glass or the whole computer and reconnect.
+
+### Between your devices
+- **Your microphone on the computer.** Talk into its apps from your iPad or phone. On a Mac it comes in as Glass Microphone, our own small audio driver (`glass mic install`, one password); on Linux through PipeWire or PulseAudio, nothing to install.
+- **Sound, clipboard, files.** System audio, copy and paste both ways (text, rich text and images), and direct transfer of files and whole folders.
+- **A file browser.** Browse the computer's folders with previews, download, upload into any folder, rename and move to the Trash (owner only).
+- **Share to your computer.** Share photos, files or links to Glass from other apps.
+
+### On every device
+- **Just a browser.** iPad, iPhone, Android, Mac, Windows or Linux. Nothing to install on the device in your hands.
+- **An app when you want one.** Install it from the browser or the Home Screen: full screen, a badge, a shortcut to each machine, picture in picture, the toolbar in the title bar on desktops, and it opens even when the computer is asleep.
+- **Notifications.** When an agent needs you, someone asks to connect (allow or deny from the notification), or a message comes, even with Glass closed. Encrypted end to end (`glass notifications`).
+
+### Helping someone
 - **Quick support.** Someone without Glass runs `curl -fsSL glassdesk.dev/help | sh` and reads you a code; you type it at glassdesk.dev/help and connect once they allow it. Nothing stays installed when they stop.
-- **Beyond the desktop.** Stream a single app's window, a resizable full-screen terminal in the viewer, open the computer's local web ports (`/fwd/3000/`) from your tailnet, record sessions to MP4, your microphone (Mac and Linux), game controllers (Linux), HEVC when every viewer can decode it.
-- **Sharp text.** A per-viewer mode for code and documents: native size, finer frames, HEVC 4:2:2 while things move, and a lossless full-colour (4:4:4) picture once the screen is still.
-- **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps are remembered for each computer; an optional shortcut bar puts Mac shortcuts one tap away on a touch screen.
-- **A second display from any browser.** Turn an iPad or laptop into one more display beside the Mac, Retina and all, like Sidecar with nothing to install.
-- **Notifications and a real app on every device.** Get notified when an agent needs you or someone asks to connect (answer from the notification), install Glass from the browser with a badge, per-machine shortcuts and sharing to the Mac, and it opens even when the computer is asleep.
-- **A real Mac app.** Glass.app does everything the CLI does in a native, GPU-drawn window: setup in a few clicks, who's connected, links with QR codes, machines, history, AI agents (added to Claude in one click), settings and teams.
-- **A console.** `https://<computer>/admin/` (or Computer › Console in the viewer): who's connected, requests to allow, links with QR codes, revoking devices, history, settings, access rules, and an address book of your machines in your own groups.
-- **Device posture.** Require tailnet devices to carry a Tailscale tag, allow only certain operating systems, a minimum browser version, or passkeys with Face ID / Touch ID / a PIN (`glass config posture-*`).
-- **Single sign-on.** Point `glass config oidc-issuer` at Google, Entra, Okta or any OpenID Connect provider, or `glass config ldap-url` at your directory, and accounts sign in without a token. Access rules (`glass acl`) pick what each email, domain or group may do; SCIM provisioning keeps users and groups in sync and cuts off deactivated accounts.
-- **Power.** Wake a sleeping machine (Wake-on-LAN) from the machines menu, restart Glass or the whole computer and reconnect.
+- **Links that work once.** Let a phone or a friend's laptop in without sharing a password. Each device gets its own pass; `glass link --revoke` cuts them all off.
+- **Links with limits.** `--view-only`, `--no-files`, `--no-clipboard`, `--for 1h`, `--ask` (the person at the computer allows each connection) and `--passkey` (Face ID, Touch ID or a security key every time).
+- **Chat, drawing and a privacy screen.** Message everyone connected (the conversation is in the Mac app too), draw on the screen, and blank the computer's own screen while you work.
+- **From anywhere.** `glass link --anywhere` connects any browser straight to your computer over WebRTC: end-to-end encrypted, no ports opened, no Tailscale needed on the viewer.
+
+### AI agents
+- **Let an agent drive, supervised.** `glass mcp` gives Claude Code (or any MCP client) the screens, pointer and keyboard of every computer on your tailnet running Glass. Add it to Claude Code, Claude Desktop or Cursor in one click from the Mac app. You watch every step, pause or stop it, approve anything risky from your phone, and hand it a 2FA code when it's stuck.
+- **Agent-ready setup.** Ask Claude Code to "set up Glass on my Mac mini" and it does it over SSH ([skill](#set-up-with-an-ai-agent)).
+
+### The Mac app, the console and the command line
+- **A real Mac app.** Glass.app does everything the CLI does in a native, GPU-drawn window: setup in a few clicks, who's connected and chat, links with QR codes, machines, history, AI agents, settings and teams, and a one-click update.
+- **A console.** `https://<computer>/admin/`: who's connected, requests to allow, links, devices, history, settings, access rules, and an address book of your machines.
+- **Beyond the desktop.** Stream a single app's window, a resizable full-screen terminal in the viewer, local web ports (`/fwd/3000/`) from your tailnet, and recording to MP4.
+
+### Teams and security
+- **Private by default.** On your tailnet, your devices get in and nothing else does. Runs as your user, never root.
+- **Single sign-on.** Google, Entra, Okta or any OpenID Connect provider, or LDAP. Access rules (`glass acl`) per email, domain or group; SCIM provisioning cuts off deactivated accounts.
+- **Device posture.** Require a Tailscale tag, certain operating systems, a minimum browser version, or passkeys with Face ID / Touch ID / a PIN.
 - **Self-hostable relay.** Run the WebRTC introducer and TURN yourself ([site/selfhost](site/selfhost)) and point Glass at it with `glass config relay`.
-- **Let an AI agent drive.** `glass mcp` gives Claude Code (or any MCP client) the screens, pointer and keyboard of every computer on your tailnet running Glass ("on the Mac mini, …"). You watch every step from your phone, pause or stop it, approve anything risky, and hand it a 2FA code when it's stuck.
-- **Agent-ready.** Ask Claude Code to "set up Glass on my Mac mini" and it does it over SSH ([skill](#set-up-with-an-ai-agent)).
 
 ## How it compares
 

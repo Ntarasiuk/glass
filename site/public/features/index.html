@@ -13,7 +13,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Glass features: remote desktop for iPad, Mac and Linux</title>
-  <meta name="description" content="Everything Glass does: about 20 ms latency, every display, sharp text, sound, clipboard and files, links with limits, chat and drawing, a terminal, single sign-on and access from anywhere.">
+  <meta name="description" content="Everything Glass does: about 20 ms latency at up to 120 fps, every display or your device as a second one, Apple Pencil, your mic, files and clipboard, quick support, AI agents you supervise, notifications, a Mac app, single sign-on and access from anywhere.">
   <link rel="canonical" href="https://glassdesk.dev/features">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icon-512.png">
@@ -27,7 +27,7 @@
   <meta property="og:site_name" content="Glass">
   <meta property="og:url" content="https://glassdesk.dev/features">
   <meta property="og:title" content="Glass features: remote desktop for iPad, Mac and Linux">
-  <meta property="og:description" content="Everything Glass does: about 20 ms latency, every display, sharp text, sound, clipboard and files, links with limits, chat and drawing, a terminal, single sign-on and access from anywhere.">
+  <meta property="og:description" content="Everything Glass does: about 20 ms latency at up to 120 fps, every display or your device as a second one, Apple Pencil, your mic, files and clipboard, quick support, AI agents you supervise, notifications, a Mac app, single sign-on and access from anywhere.">
   <meta property="og:image" content="https://glassdesk.dev/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -39,7 +39,7 @@
   <meta property="og:video:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Glass features: remote desktop for iPad, Mac and Linux">
-  <meta name="twitter:description" content="Everything Glass does: about 20 ms latency, every display, sharp text, sound, clipboard and files, links with limits, chat and drawing, a terminal, single sign-on and access from anywhere.">
+  <meta name="twitter:description" content="Everything Glass does: about 20 ms latency at up to 120 fps, every display or your device as a second one, Apple Pencil, your mic, files and clipboard, quick support, AI agents you supervise, notifications, a Mac app, single sign-on and access from anywhere.">
   <meta name="twitter:image" content="https://glassdesk.dev/og.png">
   <meta name="twitter:image:alt" content="Glass: your computer, in any browser. About 20 ms from your Mac or Linux screen to an iPad, phone or laptop.">
   <script type="application/ld+json">
@@ -51,7 +51,7 @@
       "@id": "https://glassdesk.dev/features#webpage",
       "url": "https://glassdesk.dev/features",
       "name": "Glass features: remote desktop for iPad, Mac and Linux",
-      "description": "Everything Glass does: about 20 ms latency, every display, sharp text, sound, clipboard and files, links with limits, chat and drawing, a terminal, single sign-on and access from anywhere.",
+      "description": "Everything Glass does: about 20 ms latency at up to 120 fps, every display or your device as a second one, Apple Pencil, your mic, files and clipboard, quick support, AI agents you supervise, notifications, a Mac app, single sign-on and access from anywhere.",
       "isPartOf": {
         "@id": "https://glassdesk.dev/#website"
       },
@@ -78,39 +78,140 @@
   <main>
     <section class="page-head wrap">
       <h1>Everything Glass does.</h1>
-      <p>Most remote desktops ride the same pipeline as video calls, which buffers to look smooth. Glass hands frames from the hardware encoder straight to your browser's decoder and never waits.</p>
+      <p>Most remote desktops ride the same pipeline as video calls, which buffers to look smooth. Glass hands frames from the hardware encoder straight to your browser's decoder and never waits. Around that sits everything you need to work, help someone, or let an AI agent work while you watch.</p>
+      <nav class="jump" aria-label="Feature groups">
+        <a href="#picture">Picture and speed</a>
+        <a href="#control">Control</a>
+        <a href="#between">Between your devices</a>
+        <a href="#every-device">On every device</a>
+        <a href="#helping">Helping someone</a>
+        <a href="#agents">AI agents</a>
+        <a href="#mac-app">Mac app and console</a>
+        <a href="#teams">Teams and security</a>
+        <a href="#beyond">Beyond the desktop</a>
+        <a href="#platforms">Mac and Linux</a>
+      </nav>
     </section>
 
-    <section class="all-features wrap" aria-label="Features">
+    <section class="all-features wrap" aria-labelledby="picture">
+      <h2 id="picture">Picture and speed</h2>
       <dl class="features">
-        <div><dt>Feels local</dt><dd>Hardware H.264 over WebTransport, decoded off the main thread. A live meter shows the real latency.</dd></div>
-        <div><dt>Just a browser</dt><dd>Open a link on your iPad. Add it to the Home Screen for a fullscreen app with your shortcuts intact.</dd></div>
-        <div><dt>Every display</dt><dd>Live previews of every screen along the bottom: tap one to switch, or see them all side by side, arranged like your desk.</dd></div>
-        <div><dt>Every machine</dt><dd>All your computers in one menu. Switch between them without leaving the page.</dd></div>
-        <div><dt>Full control</dt><dd>Trackpad, keyboard, touch and pinch to zoom. Apple Pencil draws with pressure and tilt. Unlock a locked Mac. ⌘Tab works.</dd></div>
-        <div><dt>Sound, clipboard, files</dt><dd>System audio, copy and paste both ways, and files sent directly between your devices.</dd></div>
-        <div><dt>Your files, browsable</dt><dd>Browse the computer's folders with previews, download or drag a file out, upload straight into any folder, rename and move to the Trash.</dd></div>
-        <div><dt>Steady on bad Wi-Fi</dt><dd>Adapts its bitrate to the network, reconnects by itself, and never shows a corrupted frame.</dd></div>
-        <div><dt>From anywhere</dt><dd>Away from home, <code>glass link --anywhere</code> connects any browser straight to your computer: end-to-end encrypted, no ports opened.</dd></div>
-        <div><dt>Links that work once</dt><dd>Let a phone or a friend's laptop in with a one-time link. Each device gets its own pass; revoke them all with one command.</dd></div>
-        <div><dt>Links with limits</dt><dd>View-only, no files, no clipboard, an hour and done. Ask first, or require Face ID or Touch ID every time.</dd></div>
+        <div><dt>Feels local</dt><dd>Hardware H.264 or HEVC over WebTransport, decoded off the main thread: about 20 ms from the computer's screen to yours. A live meter shows the real latency.</dd></div>
+        <div><dt>Up to 120 fps <span class="tag">New</span></dt><dd>On ProMotion iPads and fast monitors, motion runs at up to 120 frames a second, and drops back to 60 for anyone who can't show more.</dd></div>
+        <div><dt>True colour <span class="tag">New</span></dt><dd>Display P3 from a wide-colour Mac display stays P3 in your browser, so photos and designs look as they should.</dd></div>
         <div><dt>Sharp text</dt><dd>For code and documents: native size, 4:2:2 colour while things move, and a lossless 4:4:4 picture once the screen is still.</dd></div>
-        <div><dt>Helping someone</dt><dd>Chat, draw on their screen, blank it and block its keyboard and mouse while you work, and see who connected when.</dd></div>
-        <div><dt>Quick support</dt><dd>No Glass on their side? They paste one line and read you a code; you type it at <a href="/help">glassdesk.dev/help</a>. Nothing stays installed when they stop.</dd></div>
-        <div><dt>Beyond the desktop</dt><dd>One app's window on its own, a terminal you can resize or make full screen, local web ports from your tailnet, and session recording.</dd></div>
-        <div><dt>Your keyboard, per machine</dt><dd>⌘ and Ctrl swaps remembered for each computer, and a shortcut bar for touch screens.</dd></div>
-        <div><dt>Controllers and mic</dt><dd>Your microphone reaches the computer, so its apps hear you (on a Mac through Glass Microphone, set up with one password prompt). Game controllers reach a Linux computer as if plugged in.</dd></div>
-        <div><dt>Wake and restart</dt><dd>Wake a sleeping machine from the menu, or restart Glass or the whole computer and reconnect.</dd></div>
-        <div><dt>A second display</dt><dd>Make your iPad, or any screen with a browser, one more display beside your Mac's. Like Sidecar, with nothing to install.</dd></div>
-        <div><dt>A real Mac app</dt><dd>Setup in a few clicks, then everything the command line does in a native, GPU-drawn window: who's connected, links with QR codes, machines, history and settings.</dd></div>
-        <div><dt>AI agents, supervised</dt><dd>Add Glass to Claude or Cursor in one click. You see every step, and pause, stop or approve it before it sends, buys or deletes.</dd></div>
-        <div><dt>Notifications</dt><dd>On your phone, iPad or laptop, even with Glass closed: an agent needs you, someone asks to connect (allow it from the notification), or a message. End-to-end encrypted.</dd></div>
-        <div><dt>An app on every device</dt><dd>Install Glass from the browser: a badge, a shortcut to each of your machines, share photos and files to the Mac, picture in picture, and it opens even when the computer is asleep.</dd></div>
-        <div><dt>A console</dt><dd>Who's connected, requests to allow, links with QR codes, history, access rules and an address book of your machines.</dd></div>
-        <div><dt>For teams</dt><dd>Sign in with Google, Entra, Okta or LDAP. Access rules per group, SCIM provisioning and device posture checks.</dd></div>
-        <div><dt>Self-hostable</dt><dd>Run the remote-access relay yourself and keep glassdesk.dev out of the path entirely.</dd></div>
-        <div><dt>Private by default</dt><dd>On your own Tailscale network, your devices get in and nothing else does. Remote access stays off until you turn it on.</dd></div>
+        <div><dt>Every display</dt><dd>Live previews of every screen along the bottom: tap one to switch, or see them all side by side, arranged like your desk.</dd></div>
+        <div><dt>Your device as a second display <span class="tag">New</span></dt><dd>Your iPad, a laptop or any browser becomes an extra display for the Mac, extending its desktop like Sidecar, in Retina where the screen is.</dd></div>
+        <div><dt>Fit this device</dt><dd>Reshape the Mac's desktop to your screen while you're connected: no black bars on an iPad or an ultrawide.</dd></div>
+        <div><dt>Steady on bad Wi-Fi</dt><dd>Adapts its bitrate to the network, reconnects by itself, never shows a corrupted frame, and asks for a smaller picture when your device is struggling.</dd></div>
       </dl>
+    </section>
+
+    <section class="all-features wrap" aria-labelledby="control">
+      <h2 id="control">Control</h2>
+      <dl class="features">
+        <div><dt>Full control</dt><dd>Trackpad, mouse, keyboard, touch and pinch to zoom. Unlock a locked Mac. ⌘Tab, ⌘Space and the other shortcuts iPadOS keeps for itself still work.</dd></div>
+        <div><dt>Apple Pencil <span class="tag">New</span></dt><dd>Pressure and tilt reach the Mac as tablet input, so Photoshop, Affinity and Krita draw the way they do with a drawing tablet.</dd></div>
+        <div><dt>Your keyboard, per machine</dt><dd>⌘ and Ctrl swaps remembered for each computer, a PC-keyboard mode, and a shortcut bar for touch screens.</dd></div>
+        <div><dt>Games</dt><dd>Capture the mouse for games and 3D apps (relative motion, Esc to release), and game controllers that reach a Linux computer as if plugged in.</dd></div>
+        <div><dt>Every machine</dt><dd>All your computers in one menu, with Wake-on-LAN for sleeping ones. Switch between them without leaving the page.</dd></div>
+        <div><dt>Restart, from anywhere</dt><dd>Restart Glass or the whole computer and reconnect when it's back, or wake it first.</dd></div>
+      </dl>
+    </section>
+
+    <section class="all-features wrap" aria-labelledby="between">
+      <h2 id="between">Between your devices</h2>
+      <dl class="features">
+        <div><dt>Your microphone on the computer <span class="tag">New</span></dt><dd>Talk into the Mac's apps from your iPad or phone: calls, dictation, recordings. On a Mac it comes in as Glass Microphone, a small driver Glass installs with one password; on Linux nothing to install.</dd></div>
+        <div><dt>Sound</dt><dd>The computer's audio plays on your device, low latency, even with an iPhone or iPad on silent.</dd></div>
+        <div><dt>Clipboard with images <span class="tag">New</span></dt><dd>Copy and paste both ways: text, rich text with its formatting, and images.</dd></div>
+        <div><dt>A file browser <span class="tag">New</span></dt><dd>Browse the computer's folders with previews, download, upload into any folder, make folders, rename and move to the Trash. For the owner only.</dd></div>
+        <div><dt>Send and receive files</dt><dd>Drop files or whole folders on the screen to send them, or pick files on the computer to get them, directly between your devices.</dd></div>
+        <div><dt>Share to your computer</dt><dd>Share photos, files or a link to Glass from another app, and they land on the computer (Android, ChromeOS and desktop browsers).</dd></div>
+      </dl>
+    </section>
+
+    <section class="all-features wrap" aria-labelledby="every-device">
+      <h2 id="every-device">On every device</h2>
+      <dl class="features">
+        <div><dt>Just a browser</dt><dd>Open a link on your iPad, phone or laptop: Safari, Chrome, Edge or Firefox. Nothing to install on the device in your hands.</dd></div>
+        <div><dt>An app when you want one</dt><dd>Install Glass from the browser or add it to the Home Screen: full screen, its own icon with a badge, a shortcut to each of your machines, and on a desktop the toolbar moves into the title bar.</dd></div>
+        <div><dt>Notifications</dt><dd>On your phone, iPad or laptop, even with Glass closed: an agent needs you, someone asks to connect (allow it right from the notification), or a message. End-to-end encrypted.</dd></div>
+        <div><dt>Picture in picture</dt><dd>Keep an eye on the computer, or an agent at work, in a floating window while you do something else.</dd></div>
+        <div><dt>All your screens</dt><dd>With several monitors here and several displays there, one display on each, full screen.</dd></div>
+        <div><dt>Thoughtful details</dt><dd>Keeps your screen awake while connected, sends your clipboard when you switch back, pauses while you're away, and opens even when the computer is asleep to say so.</dd></div>
+      </dl>
+    </section>
+
+    <section class="all-features wrap" aria-labelledby="helping">
+      <h2 id="helping">Helping someone</h2>
+      <dl class="features">
+        <div><dt>Quick support <span class="tag">New</span></dt><dd>Someone without Glass runs one line, <code>curl -fsSL glassdesk.dev/help | sh</code>, and reads you a code. You type it at <a href="/help">glassdesk.dev/help</a> and connect once they allow you. Nothing stays installed when they stop.</dd></div>
+        <div><dt>Links that work once</dt><dd>Let a phone or a friend's laptop in with a one-time link or QR code. Each device gets its own pass; revoke one or all with a click.</dd></div>
+        <div><dt>Links with limits</dt><dd>View-only, no files, no clipboard, an hour and done. Ask first, or require Face ID or Touch ID every time.</dd></div>
+        <div><dt>Chat and drawing</dt><dd>Message everyone connected and see the conversation in the Mac app, or draw on the screen so the other person sees exactly where to click.</dd></div>
+        <div><dt>A privacy screen</dt><dd>Blank the computer's own screen and block its keyboard and mouse while you work on it.</dd></div>
+        <div><dt>From anywhere</dt><dd><code>glass link --anywhere</code> connects any browser straight to the computer over WebRTC: end-to-end encrypted, no ports opened.</dd></div>
+      </dl>
+    </section>
+
+    <section class="all-features wrap" aria-labelledby="agents">
+      <h2 id="agents">AI agents, supervised</h2>
+      <dl class="features">
+        <div><dt>One click to add</dt><dd>Add Glass to Claude Code, Claude Desktop or Cursor from the Mac app, or paste the MCP config into any other client.</dd></div>
+        <div><dt>You see every step</dt><dd>A banner in the viewer shows what the agent is doing, with a marker where it clicks. Pause or stop it any time.</dd></div>
+        <div><dt>It asks first</dt><dd>Before sending, buying or deleting it asks you, in the viewer, the Mac app or a notification on your phone, and it hands over when it needs your password or a code.</dd></div>
+        <div><dt>Any of your computers</dt><dd>An agent can work on any machine on your tailnet that runs Glass, not just the one it runs on.</dd></div>
+      </dl>
+    </section>
+
+    <section class="all-features wrap" aria-labelledby="mac-app">
+      <h2 id="mac-app">The Mac app and the console</h2>
+      <dl class="features">
+        <div><dt>A real Mac app</dt><dd>Setup in a few clicks, then everything the command line does in a native, GPU-drawn window: who's connected, chat, links with QR codes, machines, history, agents, settings and teams. Updates with one click.</dd></div>
+        <div><dt>A console in the browser</dt><dd>At <code>/admin/</code> on the computer: who's connected, requests to allow, links, history, access rules and an address book of your machines.</dd></div>
+        <div><dt>A command line too</dt><dd>Every feature has a <code>glass</code> command, for scripts, SSH and agents.</dd></div>
+        <div><dt>Keeps itself current</dt><dd>Glass checks for updates, and open viewers reload into new versions on their own.</dd></div>
+      </dl>
+    </section>
+
+    <section class="all-features wrap" aria-labelledby="teams">
+      <h2 id="teams">Teams and security</h2>
+      <dl class="features">
+        <div><dt>Private by default</dt><dd>On your own Tailscale network your devices get in and nothing else does. Remote access stays off until you turn it on.</dd></div>
+        <div><dt>Encrypted end to end</dt><dd>TLS 1.3 over QUIC on your tailnet, DTLS over WebRTC from anywhere, and notifications encrypted so the push service can't read them.</dd></div>
+        <div><dt>For teams</dt><dd>Sign in with Google, Entra, Okta or LDAP. Access rules per person, domain or group, SCIM provisioning and device posture checks.</dd></div>
+        <div><dt>Self-hostable</dt><dd>Run the remote-access relay yourself and keep glassdesk.dev out of the path entirely.</dd></div>
+      </dl>
+    </section>
+
+    <section class="all-features wrap" aria-labelledby="beyond">
+      <h2 id="beyond">Beyond the desktop</h2>
+      <dl class="features">
+        <div><dt>One app's window</dt><dd>Stream a single window on its own, sized to your screen.</dd></div>
+        <div><dt>A terminal</dt><dd>A shell on the computer inside the viewer: resize it or make it full screen.</dd></div>
+        <div><dt>Local web apps</dt><dd>Open the computer's local web servers (<code>localhost:3000</code>) from your tailnet.</dd></div>
+        <div><dt>Recording</dt><dd>Record sessions to MP4 on the computer, one at a time or every session.</dd></div>
+      </dl>
+    </section>
+
+    <section class="all-features wrap" aria-labelledby="platforms">
+      <h2 id="platforms">On a Mac or Linux</h2>
+      <p>Glass runs on the computer you control: macOS 13 or later (Apple Silicon or Intel), or Linux x86_64 on Wayland (beta). You view from any modern browser.</p>
+      <div class="platforms">
+        <table>
+          <thead><tr><th scope="col">On the computer</th><th scope="col">Mac</th><th scope="col">Linux</th></tr></thead>
+          <tbody>
+            <tr><td>Screen, input, sound, clipboard, files, links, chat, notifications, agents</td><td>Yes</td><td>Yes</td></tr>
+            <tr><td>Your microphone</td><td>Yes (Glass Microphone)</td><td>Yes</td></tr>
+            <tr><td>Apple Pencil pressure</td><td>Yes</td><td>As a mouse</td></tr>
+            <tr><td>Second display, fit this device, one app's window</td><td>Yes</td><td>No</td></tr>
+            <tr><td>120 fps, Display P3</td><td>Yes</td><td>60 fps</td></tr>
+            <tr><td>Game controllers</td><td>No</td><td>Yes</td></tr>
+            <tr><td>The Glass app</td><td>Yes</td><td>Command line and console</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <section class="setup wrap" aria-labelledby="setup">
