@@ -18,7 +18,7 @@ gpui_kit::assets::icon_assets!(
         EyeOff, QrCode, Globe, Lock, KeyRound, Plus, Trash, X, Pause, Play, Square, Send, Folder, Sparkles,
         RotateCw, SquareTerminal, MessageSquare, FingerprintPattern, Hand, Users, Zap, Clipboard, FileText,
         ChevronRight, LogOut, CircleX, MousePointerClick, LoaderCircle, RadioTower, Monitor, Laptop, Server,
-        Mail, Ban, Video, Palette, Wifi, Moon, CircleDot, ArrowRight, Bell, Smartphone
+        Mail, Ban, Video, Palette, Wifi, Moon, CircleDot, ArrowRight, Bell, Smartphone, Mic
     ]
 );
 

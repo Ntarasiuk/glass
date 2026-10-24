@@ -267,6 +267,22 @@ impl GlassApp {
                 cx,
             ),
         ];
+        // Until it's installed: your devices' microphones on this Mac need BlackHole.
+        let mut quick = quick;
+        if snap.mic.is_none() {
+            quick.push(ui::icon_row(
+                I::Mic,
+                theme.primary,
+                "Microphone from your devices",
+                "Talk through your iPad or phone into this Mac's apps. Needs BlackHole, a free audio driver; installing asks for your password once.",
+                Button::new("home-install-mic")
+                    .small()
+                    .icon(I::Download)
+                    .label("Install BlackHole…")
+                    .on_click(|_, window, cx| act(window, cx, crate::mic::install)),
+                cx,
+            ));
+        }
 
         let recent: Vec<AnyElement> = snap.log.iter().take(4).map(|e| super::history::entry_row(e, cx)).collect();
 
