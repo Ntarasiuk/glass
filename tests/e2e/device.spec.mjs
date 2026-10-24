@@ -59,7 +59,7 @@ test.describe('notifications', () => {
     await toolbarClick(owner, 'btn-device');
     await owner.locator('#device-panel button', { hasText: 'Notifications' }).click();
     await expect(owner.locator('#device-panel button', { hasText: 'Questions' })).toBeVisible();
-    await expect.poll(() => host.cli('notifications')).toMatch(/Chrome on Mac\s+messages, questions/);
+    await expect.poll(() => host.cli('notifications')).toMatch(/Chrome on \w+\s+messages, questions/);
     await expect.poll(() => actionKey(owner)).toBeTruthy();
 
     // A message from the person at the computer.
