@@ -166,6 +166,8 @@ The toolbar (top right) has:
 
 Touch gestures: tap = click, drag = drag, long-press = right-click, two fingers = scroll.
 
+Apple Pencil and other styluses draw with pressure and tilt: the Mac sees a pen tablet, so Photoshop, Affinity, Krita and other drawing apps vary the stroke. Hovering (Pencil hover on newer iPads) moves the pointer without clicking.
+
 More in the toolbar:
 
 - **Displays › Sharp text:** for code and documents. See *Sharp text* below.

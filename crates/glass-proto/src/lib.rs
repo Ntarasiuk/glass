@@ -187,6 +187,10 @@ pub enum InputEvent {
     Gamepad { pad: u8, kind: u8, index: u16, value: f32 },
     /// Relative motion in display points (pointer lock: games, 3D apps).
     MouseMoveBy { dx: f32, dy: f32 },
+    /// A pen (Apple Pencil, stylus): its state for the mouse events that follow. `near`:
+    /// in proximity (hovering or touching); false when it leaves. `pressure` 0..1, tilt in
+    /// degrees (-90..90) toward +x / +y, `twist` the barrel rotation in degrees (0..359).
+    Pen { near: bool, pressure: f32, tilt_x: i8, tilt_y: i8, twist: f32 },
 }
 
 pub const GAMEPAD_BUTTON: u8 = 0;
@@ -213,6 +217,13 @@ impl InputEvent {
                 value: a,
             },
             10 => Self::MouseMoveBy { dx: a, dy: b },
+            11 => Self::Pen {
+                near: button != 0,
+                pressure: a.clamp(0.0, 1.0),
+                tilt_x: keycode as u8 as i8,
+                tilt_y: (keycode >> 8) as u8 as i8,
+                twist: b,
+            },
             _ => return None,
         })
     }
@@ -232,6 +243,9 @@ impl InputEvent {
                 value,
             } => (7 + kind.min(2), pad, index, value, 0.0),
             Self::MouseMoveBy { dx, dy } => (10, 0, 0, dx, dy),
+            Self::Pen { near, pressure, tilt_x, tilt_y, twist } => {
+                (11, near as u8, u16::from_le_bytes([tilt_x as u8, tilt_y as u8]), pressure, twist)
+            }
         };
         let mut out = [0u8; INPUT_EVENT_LEN];
         out[0] = kind;
@@ -286,9 +300,21 @@ mod tests {
             InputEvent::KeyUp { keycode: 0x31 },
             InputEvent::Gamepad { pad: 1, kind: GAMEPAD_AXIS, index: 3, value: -0.5 },
             InputEvent::Gamepad { pad: 0, kind: GAMEPAD_CONNECTED, index: 0, value: 1.0 },
+            InputEvent::MouseMoveBy { dx: 7.0, dy: -3.0 },
+            InputEvent::Pen { near: true, pressure: 0.5, tilt_x: -45, tilt_y: 30, twist: 270.0 },
+            InputEvent::Pen { near: false, pressure: 0.0, tilt_x: 0, tilt_y: 0, twist: 0.0 },
         ] {
             assert_eq!(InputEvent::read(&ev.write()), Some(ev));
         }
+    }
+
+    #[test]
+    fn pen_wire_layout() {
+        // Same bytes as web/proto.js's penEvent (tests/unit/proto.test.mjs).
+        let b = InputEvent::Pen { near: true, pressure: 0.5, tilt_x: -45, tilt_y: 30, twist: 270.0 }.write();
+        assert_eq!(&b[..4], &[11, 1, 0xd3, 0x1e]);
+        assert_eq!(f32::from_le_bytes(b[4..8].try_into().unwrap()), 0.5);
+        assert_eq!(f32::from_le_bytes(b[8..12].try_into().unwrap()), 270.0);
     }
 
     #[test]

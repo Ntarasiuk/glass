@@ -13,7 +13,7 @@ export const FLAG_REFRESH = 4;
 export const VIDEO_HEADER_LEN = 20;
 export const INPUT_EVENT_LEN = 12;
 
-export const Input = { MOVE: 1, DOWN: 2, UP: 3, SCROLL: 4, KEY_DOWN: 5, KEY_UP: 6, PAD_BUTTON: 7, PAD_AXIS: 8, PAD_CONNECTED: 9, MOVE_BY: 10 };
+export const Input = { MOVE: 1, DOWN: 2, UP: 3, SCROLL: 4, KEY_DOWN: 5, KEY_UP: 6, PAD_BUTTON: 7, PAD_AXIS: 8, PAD_CONNECTED: 9, MOVE_BY: 10, PEN: 11 };
 
 /** One mic packet: same layout as host audio (kind, channels, seq, capture time, s16 PCM). */
 export function micPacket(seq, captureUs, channels, pcm) {
@@ -63,6 +63,20 @@ export function inputEvent(kind, { button = 0, keycode = 0, a = 0, b = 0 } = {})
   view.setFloat32(4, a, true);
   view.setFloat32(8, b, true);
   return new Uint8Array(buf);
+}
+
+/**
+ * A pen's state (Apple Pencil, stylus) for the mouse events that follow: `near` false when
+ * it leaves; pressure 0..1, tilt in degrees (-90..90), twist (barrel rotation) in degrees.
+ */
+export function penEvent(pen) {
+  return inputEvent(Input.PEN, penFields(pen));
+}
+
+/** The fields of a pen event, for `inputEvent(Input.PEN, …)`. */
+export function penFields({ near, pressure = 0, tiltX = 0, tiltY = 0, twist = 0 }) {
+  const t = (v) => Math.max(-90, Math.min(90, Math.round(v))) & 0xff;
+  return { button: near ? 1 : 0, keycode: t(tiltX) | (t(tiltY) << 8), a: Math.max(0, Math.min(1, pressure)), b: twist };
 }
 
 /** Fletcher-16 (mod 255); mirrors glass_proto::fletcher16. */
