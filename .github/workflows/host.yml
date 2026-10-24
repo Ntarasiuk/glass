@@ -27,6 +27,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace --profile ci
       - run: cargo build --profile ci -p glass-host
+      # Glass Microphone (native/glass-mic): builds, and loads as an audio plug-in.
+      - if: runner.os == 'macOS'
+        run: |
+          cmake -S native/glass-mic -B target/glass-mic -DCMAKE_BUILD_TYPE=Release
+          cmake --build target/glass-mic
+          clang++ -std=c++17 native/glass-mic/check.cpp -framework CoreFoundation -framework CoreAudio -o target/glass-mic/check
+          target/glass-mic/check target/glass-mic/GlassMicrophone.driver/Contents/MacOS/GlassMicrophone
       - if: runner.os == 'Linux'
         uses: actions/setup-node@v4
         with: { node-version: 24 }

@@ -36,7 +36,7 @@ Features:
 - **One window.** Stream a single app's window instead of the whole display (macOS).
 - **Terminal and ports.** A shell on the computer inside the viewer, and its local web servers (`/fwd/3000/`) opened from your tailnet.
 - **Recording.** Record sessions to MP4 on the computer, per session or always.
-- **Microphone and controllers.** Your microphone reaches the computer, so its apps hear you (on a Mac through the free BlackHole driver). Game controllers reach Linux hosts.
+- **Microphone and controllers.** Your microphone reaches the computer, so its apps hear you (on a Mac through Glass Microphone, a small audio driver Glass installs with one password prompt). Game controllers reach Linux hosts.
 - **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps are remembered for each computer; an optional shortcut bar puts Mac shortcuts one tap away.
 - **Power.** Wake a sleeping machine (Wake-on-LAN), restart Glass or the whole computer and reconnect.
 - **The Glass app (macOS).** A native window for everything the command line does: setup, who's connected, links with QR codes, machines, history, AI agents, settings and teams. In Applications, Spotlight and the menu bar (**Open Glass…**).
@@ -180,7 +180,9 @@ More in the toolbar:
 - **Terminal:** a shell on the computer, in the viewer. Drag its top edge to resize it, or use **Full screen** (or double-click its title bar); both are remembered.
 - **Forwarded ports:** open the computer's local web servers (only ports allowed with `glass config forward-ports 3000,8888`, and only for your own devices).
 - **Record on the host:** records this session to `~/Movies/Glass` (`~/Videos/Glass` on Linux). `glass config record on` records every session.
-- **Microphone:** sends your microphone to the computer. On Linux it appears as a "Glass microphone" input. On a Mac it needs BlackHole, a free audio driver: install it with `glass mic install` or from the Glass app (Settings › Microphone from your devices); it asks for the Mac's password once. While your mic is on, BlackHole is the Mac's default input, so apps hear you without changing settings; the previous input comes back when you turn it off.
+- **Microphone:** sends your microphone to the computer, where apps pick it like any other mic.
+  - **Mac:** it comes in as **Glass Microphone**, a small audio driver included with Glass, made the Mac's default input while your mic is on and put back after. Install it once: tap the mic in the viewer (owner), the Glass app (Home or Settings › Microphone from your devices), or `glass mic install`; it asks for the Mac's password. BlackHole works too if it's already installed. `glass mic uninstall` removes the driver.
+  - **Linux:** it comes in as a "Glass microphone" input while your mic is on, through PipeWire or PulseAudio. It needs `pactl`; `glass mic install` adds it with your package manager if it's missing.
 - **Computer:** **Privacy screen** (blanks the computer's screen and ignores its keyboard and mouse while you're connected; `glass privacy on|off` from there), **Restart Glass**, **Restart computer** (Glass reconnects once someone is logged in) and **Console**.
 - **Machines:** sleeping machines Glass has seen before can be woken with Wake-on-LAN (also `glass wake <name|mac>`).
 - **This device** (the bell): what this browser does for Glass.
@@ -285,7 +287,7 @@ glass kick [id]          End one session, or every one
 glass requests / allow [id] / deny [id]   Connection requests waiting for an answer
 glass chat "…"           Message everyone viewing
 glass notifications      Devices that get notifications (test, off <id>)
-glass mic [install]      Viewers' microphones on this Mac: status, or install BlackHole
+glass mic [install|uninstall]  Viewers' microphones here: status, set up, or remove the driver
 glass privacy on|off     Blank this screen and block local input while viewed
 glass log [-n 20] [--json]   Connection history
 glass wake <name|mac>    Wake a machine with Wake-on-LAN
@@ -386,8 +388,8 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 - **iPad leaves fullscreen when swiping down:** a Safari fullscreen rule; use Add to Home Screen instead.
 - **⌘Tab or ⌘Space doesn't reach the Mac:** iPadOS reserves them; use Ctrl+Tab / Ctrl+Space (Ctrl as ⌘) or the ⌘ menu.
 - **"connecting…" forever:** both devices must be on Tailscale, and the URL must use the Mac's `.ts.net` name (not an IP), because the certificate is issued for that name.
-- **No microphone button in the viewer (Mac):** BlackHole isn't installed; run `glass mic` to check and `glass mic install` to install it, then reconnect. Another loopback driver works too: set `GLASS_MIC_DEVICE` to part of its name in the service's environment.
-- **The Mac's microphone is still BlackHole:** Glass puts your previous input back when the mic turns off, and at its next start if it stopped while a mic was on. Or pick it in System Settings › Sound › Input.
+- **The mic needs setting up:** run `glass mic` to check and `glass mic install` to set it up (Glass Microphone on a Mac, `pactl` on Linux). Another loopback driver works too on a Mac: set `GLASS_MIC_DEVICE` to part of its name in the service's environment.
+- **The Mac's input is still Glass Microphone (or BlackHole):** Glass puts your previous input back when the mic turns off, and at its next start if it stopped while a mic was on. Or pick it in System Settings › Sound › Input.
 - **Displays missing:** sleeping displays aren't capturable; Glass keeps displays awake while running and wakes them on start.
 
 ## FAQ

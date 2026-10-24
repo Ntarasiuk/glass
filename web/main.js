@@ -1350,13 +1350,13 @@ async function toggleMic() {
   if (micStream) return stopMic();
   if (!micReady) {
     ui.toast({
-      text: `Your microphone on ${machineName(currentHost)} needs BlackHole, a free audio driver. Its installer opens on that Mac's screen and asks for its password.`,
+      text: `Your microphone on ${machineName(currentHost)} needs a small audio driver. Installing it asks for that computer's password, on its screen.`,
       timeout: 0,
       action: {
         label: 'Install',
         run: () => {
           control({ t: 'micInstall' });
-          ui.toast({ text: 'Opening the installer on the Mac. Follow it there; the mic is ready when it finishes.', timeout: 8000 });
+          ui.toast({ text: 'Asking for the password on the computer\'s screen. The mic is ready once it\'s typed.', timeout: 8000 });
         },
       },
     });

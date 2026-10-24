@@ -266,7 +266,7 @@ enum Command {
     /// Viewers' microphones on this Mac (through BlackHole): status, or install BlackHole.
     #[cfg(target_os = "macos")]
     Mic {
-        #[arg(value_parser = ["status", "install"], default_value = "status")]
+        #[arg(value_parser = ["status", "install", "uninstall"], default_value = "status")]
         action: String,
     },
     /// Devices that get notifications (turned on in each device's viewer): list, test, or
@@ -734,17 +734,19 @@ async fn async_main(args: Args) -> Result<()> {
         Some(Command::Deny { id }) => decide_cli(*id, false),
         #[cfg(target_os = "macos")]
         Some(Command::Mic { action }) => {
-            if action == "install" {
-                if let Some(name) = mic::device_name() {
-                    println!("{name} is already installed.");
-                } else {
-                    println!("{}", mic::install()?);
-                }
-                return Ok(());
-            }
-            match mic::device_name() {
-                Some(name) => println!("Ready: a viewer's microphone plays into {name}, which is the Mac's default input while it's on."),
-                None => println!("Not set up: viewers' microphones need BlackHole, a free audio driver. Install it: glass mic install"),
+            match action.as_str() {
+                "install" => println!("{}", mic::install(mic::Ask::Terminal)?),
+                "uninstall" => println!("{}", mic::uninstall(mic::Ask::Terminal)?),
+                _ => match mic::device_name() {
+                    Some(name) if cfg!(target_os = "macos") => {
+                        println!("Ready: a viewer's microphone plays into {name}, which is the Mac's default input while it's on.")
+                    }
+                    Some(name) => println!("Ready: while a viewer's mic is on, apps here can pick \"{name}\"."),
+                    None if cfg!(target_os = "macos") => {
+                        println!("Not set up: a viewer's microphone needs Glass Microphone, a small audio driver. Install it: glass mic install")
+                    }
+                    None => println!("Not set up: a viewer's microphone needs pactl and PipeWire or PulseAudio. Set it up: glass mic install"),
+                },
             }
             Ok(())
         }

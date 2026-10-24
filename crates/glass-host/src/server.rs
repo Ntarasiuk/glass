@@ -728,7 +728,7 @@ async fn control(
         privacy: crate::privacy::supported(),
         gamepad: crate::gamepad::supported(),
         mic: crate::mic::supported(),
-        mic_install: cfg!(target_os = "macos") && perms.owner && !crate::mic::supported(),
+        mic_install: perms.owner && !crate::mic::supported(),
         windows: shared.video.supports_windows(),
         terminal: crate::terminal::SUPPORTED,
         restart: true,
@@ -1144,31 +1144,27 @@ async fn control(
             }
             ClientMsg::MicInstall if guest => refuse(OWNER_ONLY),
             ClientMsg::MicInstall => {
-                #[cfg(target_os = "macos")]
-                {
-                    let tx = ctx.ctl_tx.clone();
-                    tokio::spawn(async move {
-                        let msg = match tokio::task::spawn_blocking(crate::mic::install).await {
-                            Ok(Ok(m)) => ServerMsg::Notice { msg: m },
-                            Ok(Err(e)) => ServerMsg::Error { msg: format!("Couldn't install the microphone driver: {e:#}") },
-                            Err(_) => return,
-                        };
-                        let _ = tx.send(msg);
-                        // Tell this viewer as soon as the driver shows up (Installer can take a while).
-                        for _ in 0..300 {
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                            if tokio::task::spawn_blocking(crate::mic::supported).await.unwrap_or(false) {
-                                let _ = tx.send(ServerMsg::MicReady);
-                                return;
-                            }
-                            if tx.is_closed() {
-                                return;
-                            }
+                let tx = ctx.ctl_tx.clone();
+                tokio::spawn(async move {
+                    // The password dialog shows on this computer's screen (seen in the stream).
+                    let msg = match tokio::task::spawn_blocking(|| crate::mic::install(crate::mic::Ask::Dialog)).await {
+                        Ok(Ok(m)) => ServerMsg::Notice { msg: m },
+                        Ok(Err(e)) => ServerMsg::Error { msg: format!("Couldn't set up the microphone: {e:#}") },
+                        Err(_) => return,
+                    };
+                    let _ = tx.send(msg);
+                    // Tell this viewer as soon as it works (an installer can take a while).
+                    for _ in 0..300 {
+                        if tokio::task::spawn_blocking(crate::mic::supported).await.unwrap_or(false) {
+                            let _ = tx.send(ServerMsg::MicReady);
+                            return;
                         }
-                    });
-                }
-                #[cfg(not(target_os = "macos"))]
-                refuse("The microphone needs nothing installed here.");
+                        if tx.is_closed() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                });
             }
             ClientMsg::Mic { .. } if !perms.input => refuse("This link is view only."),
             ClientMsg::Mic { on } => {
