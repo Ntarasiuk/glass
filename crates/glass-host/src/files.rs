@@ -37,7 +37,7 @@ pub async fn pick() -> Result<Vec<PathBuf>> {
 
 /// Receives one uploaded file (tag already consumed) into ~/Downloads.
 /// Writes to a temporary name first so a cancelled upload never looks complete.
-pub async fn receive(stream: &mut RecvStream) -> Result<(String, PathBuf)> {
+pub async fn receive(stream: &mut RecvStream, owner: bool) -> Result<(String, PathBuf)> {
     let mut len = [0u8; 4];
     stream.read_exact(&mut len).await?;
     let len = u32::from_le_bytes(len) as usize;
@@ -49,7 +49,13 @@ pub async fn receive(stream: &mut RecvStream) -> Result<(String, PathBuf)> {
     let header: FileHeader = serde_json::from_slice(&header)?;
 
     // A file from a dropped folder keeps its place in it ("Photos/2024/a.jpg").
-    let (dir, name) = place(&downloads_dir(), &header.name);
+    // The file browser uploads into the folder it shows (owners only, inside home).
+    let base = match header.dir.as_deref() {
+        Some(dir) if owner => crate::browse::resolve(&crate::browse::root(), dir)?,
+        Some(_) => anyhow::bail!("uploading into a folder is for the computer's owner"),
+        None => downloads_dir(),
+    };
+    let (dir, name) = place(&base, &header.name);
     tokio::fs::create_dir_all(&dir).await?;
     let dest = unique_path(&dir, &name);
     let partial = dest.with_extension(format!(
@@ -203,7 +209,7 @@ pub async fn send(conn: &Connection, path: &Path) -> Result<()> {
         .context("no file name")?
         .to_string_lossy()
         .into_owned();
-    let header = serde_json::to_vec(&FileHeader { name, size })?;
+    let header = serde_json::to_vec(&FileHeader { name, size, dir: None })?;
 
     let mut stream = conn.open_uni().await?.await?;
     let mut prefix = vec![STREAM_FILE];

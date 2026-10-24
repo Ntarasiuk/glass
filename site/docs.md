@@ -158,6 +158,7 @@ The toolbar (top right) has:
 - **Keyboard:** brings up the iPad's on-screen keyboard.
 - **Send files to Mac:** uploads to `~/Downloads` (drag and drop also works, folders included).
 - **Get files from Mac:** opens a file chooser on the Mac's screen; chosen files arrive with a Save button.
+- **Files** (the computer's owner only): browse the home folder from the viewer, with previews of images, PDFs and videos. Filter as you type, download (or drag a file onto your desktop in Chrome), upload into the folder you're in (button, or drop files and folders on it), make folders, rename (F2) and move to the Trash (Delete). Arrow keys, Enter to open, Backspace to go up.
 - **Audio:** turns Mac system audio on or off for this device.
 - **Fullscreen** (hidden when running as a Home Screen app) and **Stats**.
 - **Hide toolbar** (last button): slides it away for an unobstructed screen; the small tab at the top brings it back. Remembered.
@@ -356,6 +357,7 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 - With Tailscale, traffic stays on your private tailnet and goes directly between devices when possible.
 - Access control: a device is let in if Tailscale reports it belongs to the same user as the Mac, or if it presents the access token. Glass sends nothing to a session (video, audio, clipboard, input) until it is authenticated. Links, single sign-on, LDAP, access rules, posture checks and passkeys can narrow that further; see above.
 - Glass runs as your user (a LaunchAgent on macOS, a systemd user service on Linux), never as root.
+- The file browser is for the computer's owner only (not links or guests), sees only the home folder (no `..`, no symlinks out), and moves to the Trash rather than deleting.
 - Notifications are the one thing that leaves your network: the computer sends them through your browser's push service (Apple, Google, Mozilla or Microsoft), encrypted end to end (RFC 8291), so the push service can't read them. Only devices you turn them on for get them; guests only ever get messages.
 - The glassdesk.dev website uses Google Analytics on its pages (not on the remote viewer at glassdesk.dev/app), counts downloads using a salted hash of the IP address (no raw IPs stored) and stores feedback you choose to send. The Glass app itself sends nothing to glassdesk.dev except feedback you submit.
 

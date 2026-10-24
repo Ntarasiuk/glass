@@ -5,6 +5,7 @@ mod computer;
 mod admin;
 mod acl;
 mod approval;
+mod browse;
 mod codec;
 mod connlog;
 mod control;

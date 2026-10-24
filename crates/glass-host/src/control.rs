@@ -116,6 +116,20 @@ pub enum ClientMsg {
     PushUnsubscribe { endpoint: String },
     /// This device's viewer is open: clear its badge.
     PushSeen { endpoint: String },
+    /// The file browser (owner only): a folder's contents, relative to the home folder.
+    FilesList {
+        path: String,
+        #[serde(default)]
+        hidden: bool,
+    },
+    /// Send this file (as a file stream, like picked files).
+    FilesFetch { path: String },
+    FilesMkdir { path: String, name: String },
+    FilesRename { path: String, name: String },
+    /// Move to the Trash.
+    FilesTrash { path: String },
+    /// A small preview of an image or PDF (answered with `filesThumb`).
+    FilesThumb { path: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,6 +159,16 @@ pub enum ServerMsg {
     Denied { msg: String },
     /// Something worth a (non-error) toast.
     Notice { msg: String },
+    /// A folder in the file browser (`error` instead when it can't be read). `ticket`
+    /// downloads by URL (`/files/raw`, for dragging a file out).
+    Files {
+        path: String,
+        entries: Vec<crate::browse::Entry>,
+        truncated: bool,
+        ticket: String,
+        error: Option<String>,
+    },
+    FilesThumb { path: String, data: Option<String> },
     /// Notifications are on for this device: `key` lets its service worker answer from a
     /// notification (owner only). `None`: subscribing failed.
     Push { key: Option<String>, owner: bool },
@@ -260,6 +284,8 @@ pub struct Features {
     pub lossless: bool,
     /// The key browsers subscribe to notifications with (VAPID, base64url).
     pub push: Option<String>,
+    /// The file browser (owners with files allowed).
+    pub browse: bool,
 }
 
 /// Header that follows the `STREAM_FILE` tag in either direction.
@@ -267,6 +293,10 @@ pub struct Features {
 pub struct FileHeader {
     pub name: String,
     pub size: u64,
+    /// Upload into this folder (relative to the home folder; owner only) instead of
+    /// Downloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 pub async fn read_json<T: for<'de> Deserialize<'de>>(stream: &mut RecvStream) -> Result<Option<T>> {

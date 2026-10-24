@@ -93,7 +93,7 @@ self.onmessage = async ({ data }) => {
   } else if (data.type === 'control') {
     sendControl(data.msg);
   } else if (data.type === 'sendFile') {
-    sendFile(data.file).catch((e) => log('error', `send file failed: ${e.message ?? e}`));
+    sendFile(data.file, data.dir).catch((e) => log('error', `send file failed: ${e.message ?? e}`));
   } else if (data.type === 'switchHost') {
     url = data.url;
     rejected = false;
@@ -338,10 +338,11 @@ async function readControl(readable) {
   }
 }
 
-async function sendFile(file) {
+async function sendFile(file, dir) {
   if (!transport) throw new Error('not connected');
   const id = `${Date.now()}-${file.name}`;
-  const header = encoder.encode(JSON.stringify({ name: file.name, size: file.size }));
+  // `dir`: the file browser's folder (relative to the home folder) instead of Downloads.
+  const header = encoder.encode(JSON.stringify({ name: file.name, size: file.size, ...(dir != null && { dir }) }));
   const prefix = new Uint8Array(5 + header.length);
   prefix[0] = STREAM_FILE;
   new DataView(prefix.buffer).setUint32(1, header.length, true);
