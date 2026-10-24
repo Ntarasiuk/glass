@@ -674,6 +674,12 @@ function onControl(msg) {
       clearTimeout(machineTimer);
       displays = msg.displays;
       applyBranding(msg);
+      // Quick support (`glass support`): this viewer is someone helping.
+      if (msg.features?.support) {
+        const who = msg.name ?? 'them';
+        document.title = `Helping ${who}`;
+        ui.toast({ text: `You're helping ${who}. They can end this any time.`, timeout: 6000 });
+      }
       // Nothing being streamed (e.g. capture failed): fall back to the first display.
       if (!msg.streams.length && displays.length) control({ t: 'selectDisplay', id: displays[0].id });
       ui.setAudioAvailable(msg.audio);

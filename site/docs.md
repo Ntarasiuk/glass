@@ -31,6 +31,7 @@ Features:
 - **One-time links.** Let another device in without sharing the token: each link works once and gives that device its own pass, revocable with `glass link --revoke`.
 - **Links with limits.** View-only, no files, no clipboard, a time limit, ask the person at the computer first, or require a passkey (Face ID, Touch ID or a security key) every time.
 - **Helping someone.** Chat, drawing on the screen (shown on the computer too), a privacy screen that blanks the computer and blocks its own keyboard and mouse, and a connection history.
+- **Quick support.** Someone without Glass pastes one line (`curl -fsSL glassdesk.dev/help | sh`) and reads you a code; you type it at glassdesk.dev/help and connect once they allow it. Nothing stays installed afterwards.
 - **Sharp text.** A per-viewer mode for code and documents: native size, finer frames, HEVC 4:2:2 colour while things move and a lossless full-colour (4:4:4) picture once the screen is still.
 - **One window.** Stream a single app's window instead of the whole display (macOS).
 - **Terminal and ports.** A shell on the computer inside the viewer, and its local web servers (`/fwd/3000/`) opened from your tailnet.
@@ -136,6 +137,17 @@ Devices that aren't on your tailnet, or belong to another tailnet user, are aske
 **Magic links.** To let in a device without handing out the token, run `glass link` on the host; it prints the link and a QR code. The link works once, within 15 minutes, and gives that device its own access for 24 hours by default (`glass link --for 7d` to change it). Guests can use the computer but can't switch machines or update Glass. `glass link --revoke` cuts every guest off within seconds and voids unused links; your token and tailnet devices are unaffected. Only fingerprints of links and passes are stored, in `~/.config/glass/access.json`. On your tailnet, the guest's device must be on the tailnet too; for anywhere else, see the next paragraph.
 
 **From anywhere (no Tailscale on the device).** `glass link --anywhere` makes a link like `https://glassdesk.dev/app/#r=…&l=…` that works from any network. The browser and your computer connect directly over WebRTC: UDP, end-to-end encrypted, about as fast as on the tailnet. When a direct path is impossible (some cellular and corporate networks), traffic goes through Cloudflare's TURN relay, still end-to-end encrypted. glassdesk.dev only introduces the two sides; your computer keeps one outgoing connection to it and opens no ports. The link carries your computer's public key and the computer signs every connection answer, so the browser refuses anyone else, glassdesk.dev included. Remote access is off until you make such a link (or run `glass remote on`); `glass remote off` turns it off. One thing to know: in this mode the viewer page itself comes from glassdesk.dev, whereas on your tailnet it comes from your own computer.
+
+## Help someone (quick support)
+
+For helping a parent or a friend who doesn't have Glass, and shouldn't have to install anything:
+
+1. They open Terminal (on a Mac: Spotlight, type Terminal) and paste `curl -fsSL glassdesk.dev/help | sh`. If they already have Glass, `glass support` does the same.
+2. A Glass window shows a nine-digit code (in the terminal on Linux or over SSH). The first time, macOS asks them to allow Screen Recording and Accessibility for Glass; the window has buttons for both.
+3. You type the code at [glassdesk.dev/help](https://glassdesk.dev/help). They're asked before you can see anything, and your viewer says "You're helping …".
+4. They click **Stop sharing** (or press Ctrl+C, or close the window) when you're done.
+
+Nothing stays on their computer: Glass runs from a temporary folder with its own temporary settings, token and keys, not as a background service and not at login, and stopping deletes all of it. The connection is the same as `glass link --anywhere`: direct, end-to-end encrypted, no ports opened. Each code works once, for an hour; glassdesk.dev keeps only a salted hash of it, and a code typed wrong too often is locked out for that browser. **New code** in the window (or `n` in the terminal) replaces it. A downloadable app for the same thing needs Apple notarization and is coming; for now it's the one line.
 
 ## Links with limits
 
@@ -277,6 +289,7 @@ glass kick [id]          End one session, or every one
 glass requests / allow [id] / deny [id]   Connection requests waiting for an answer
 glass chat "…"           Message everyone viewing
 glass notifications      Devices that get notifications (test, off <id>)
+glass support            Get help: a code for someone at glassdesk.dev/help (nothing stays afterwards)
 glass privacy on|off     Blank this screen and block local input while viewed
 glass log [-n 20] [--json]   Connection history
 glass wake <name|mac>    Wake a machine with Wake-on-LAN

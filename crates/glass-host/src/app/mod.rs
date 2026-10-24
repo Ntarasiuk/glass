@@ -16,6 +16,7 @@ mod machines;
 mod prefs;
 mod sessions;
 mod setup;
+mod support;
 mod teams;
 mod ui;
 
@@ -104,6 +105,11 @@ pub fn run(rt: tokio::runtime::Runtime) -> anyhow::Result<()> {
 }
 
 actions!(glass, [Quit, Close]);
+
+/// The quick-support window (`glass support`).
+pub fn run_support(rt: tokio::runtime::Runtime, session: crate::support::Session) -> anyhow::Result<()> {
+    support::run(rt, session)
+}
 
 /// Glass's look on top of the component theme: near-black glass in dark mode, paper in
 /// light, one cool accent.

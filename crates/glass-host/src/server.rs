@@ -735,6 +735,7 @@ async fn control(
         lossless: shared.video.supports_lossless()
             && !ctx.relayed.as_ref().is_some_and(|r| r.rtp_video),
         push: crate::push::public_key(),
+        support: crate::support::is_host(),
     };
     // Someone other than the owner is in: worth a notification on the owner's devices.
     if !perms.owner {

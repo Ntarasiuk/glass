@@ -260,6 +260,8 @@ pub struct Features {
     pub lossless: bool,
     /// The key browsers subscribe to notifications with (VAPID, base64url).
     pub push: Option<String>,
+    /// A quick-support session (`glass support`): the viewer is someone helping.
+    pub support: bool,
 }
 
 /// Header that follows the `STREAM_FILE` tag in either direction.
