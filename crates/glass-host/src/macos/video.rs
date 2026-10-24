@@ -40,6 +40,10 @@ struct Stream {
     width: usize,
     /// A single window rather than a display (`display` then describes the window).
     window: bool,
+    /// The most frames its display can show (its refresh rate, capped by `--fps`).
+    refresh: u32,
+    /// Captured in Display P3 (a wide-colour display).
+    p3: bool,
 }
 
 /// What a stream captures.
@@ -80,6 +84,8 @@ pub struct Video {
     rext: AtomicBool,
     /// Capture in BGRA for lossless refreshes (sharp text).
     full_colour: AtomicBool,
+    /// The frame rate viewers want (crate::refresh): 60, or up to 120 for fast screens.
+    max_fps: std::sync::atomic::AtomicU32,
 }
 
 impl Video {
@@ -100,7 +106,27 @@ impl Video {
             hevc: AtomicBool::new(false),
             rext: AtomicBool::new(false),
             full_colour: AtomicBool::new(false),
+            max_fps: std::sync::atomic::AtomicU32::new(crate::refresh::DEFAULT),
         }
+    }
+
+    /// Frames per second for a stream now: what its display and its viewers can show.
+    fn fps_for(&self, refresh: u32) -> u32 {
+        refresh.min(self.max_fps.load(Ordering::Relaxed)).max(1)
+    }
+
+    /// Viewers' frame rate changed: each capture delivers up to the new rate and each
+    /// encoder's policy follows.
+    pub fn set_max_fps(&self, fps: u32) {
+        if self.max_fps.swap(fps, Ordering::Relaxed) == fps {
+            return;
+        }
+        for (i, s) in self.streams.lock().unwrap().iter().enumerate() {
+            let now = self.fps_for(s.refresh);
+            s.capture.set_max_fps(now);
+            info!("stream {i}: up to {now} fps");
+        }
+        self.rebalance();
     }
 
     /// The displays being streamed; index = stream number.
@@ -201,15 +227,26 @@ impl Video {
         let width = ((w * scale) as usize) & !1;
         let height = ((h * scale) as usize) & !1;
 
+        // The display's own refresh (120 Hz ProMotion, a 144 Hz monitor…), within --fps; a
+        // window follows the main display.
+        let display_id = match target {
+            Target::Display(d) => d.info.id,
+            Target::Window(_) => objc2_core_graphics::CGMainDisplayID(),
+        };
+        let refresh = capture::refresh_rate(display_id).min(self.config.fps.max(1) as u32);
+        let fps = self.fps_for(refresh);
+        let p3 = capture::wide_colour(display_id);
+
         let keyframe = Arc::new(AtomicBool::new(true));
         let frames = self.frames.clone();
         let encoder = Encoder::new(
             width as i32,
             height as i32,
-            self.config.fps,
+            fps as i32,
             self.config.bitrate,
             hevc,
             rext,
+            p3,
             keyframe.clone(),
             Arc::new(move |frame| {
                 let _ = frames.send(Arc::new(EncodedFrame {
@@ -219,25 +256,26 @@ impl Video {
             }),
         )?;
         let encoder = Arc::new(encoder);
-        let fps = Arc::new(std::sync::atomic::AtomicU32::new(
-            encoder.apply_policy(self.bitrate.load(Ordering::Relaxed)),
+        let fps_cap = Arc::new(std::sync::atomic::AtomicU32::new(
+            encoder.apply_policy(self.bitrate.load(Ordering::Relaxed), fps),
         ));
         let capture = capture::start(
             target.source(),
             width,
             height,
-            self.config.fps,
+            fps as i32,
             encoder.clone(),
-            fps.clone(),
+            fps_cap.clone(),
             audio,
             self.full_colour.load(Ordering::Relaxed),
+            p3,
         )?;
         let id = info.id;
         let window = matches!(target, Target::Window(_));
         info!(
-            "stream {index}: {} {id} at {width}x{height} @ {}fps ({})",
+            "stream {index}: {} {id} at {width}x{height} @ {fps}fps (display {refresh} Hz{}, {})",
             if window { "window" } else { "display" },
-            self.config.fps,
+            if p3 { ", Display P3" } else { "" },
             if rext {
                 "HEVC 4:2:2"
             } else if hevc {
@@ -251,10 +289,12 @@ impl Video {
             encoder,
             display: info,
             keyframe,
-            fps,
+            fps: fps_cap,
             activity: Default::default(),
             width,
             window,
+            refresh,
+            p3,
         })
     }
 
@@ -352,6 +392,14 @@ impl VideoSource for Video {
     fn frame_generation(&self, stream: u8) -> Option<u64> {
         let streams = self.streams.lock().unwrap();
         streams.get(stream as usize).map(|s| s.capture.generation())
+    }
+    fn set_max_fps(&self, fps: u32) {
+        Video::set_max_fps(self, fps)
+    }
+    fn icc(&self, stream: u8) -> Option<Arc<Vec<u8>>> {
+        static P3: std::sync::OnceLock<Option<Arc<Vec<u8>>>> = std::sync::OnceLock::new();
+        let p3 = self.streams.lock().unwrap().get(stream as usize).is_some_and(|s| s.p3);
+        p3.then(|| P3.get_or_init(|| capture::p3_icc().map(Arc::new)).clone()).flatten()
     }
     fn raw_frame(&self, stream: u8) -> Option<Arc<crate::lossless::RawFrame>> {
         let streams = self.streams.lock().unwrap();
@@ -458,7 +506,7 @@ impl VideoSource for Video {
             .collect();
         let shares = crate::rate::split(self.bitrate.load(Ordering::Relaxed), &activity);
         for (s, bps) in streams.iter().zip(shares) {
-            let fps = s.encoder.apply_policy(bps);
+            let fps = s.encoder.apply_policy(bps, self.fps_for(s.refresh));
             s.fps.store(fps, Ordering::Relaxed);
         }
     }

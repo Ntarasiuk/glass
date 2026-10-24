@@ -15,6 +15,7 @@ Glass streams a Mac's screen to a web browser and sends mouse, keyboard, and tou
 Features:
 
 - **Low latency.** About 15–30 ms capture-to-display on a home network or Tailscale, measured live in the stats overlay.
+- **120 fps and wide colour.** A viewer on a fast screen (120 Hz and up) gets up to 120 frames a second from a Mac whose display refreshes that fast; a wide-colour (Display P3) Mac display arrives in P3 instead of being clipped to sRGB.
 - **Works in the browser.** Open a URL on the iPad; there's no app to install. Add it to the Home Screen for a true fullscreen app.
 - **Full control.** Mouse, trackpad, keyboard, and touch (tap to click, drag, long-press to right-click, two-finger scroll), plus an on-screen keyboard button.
 - **Unlocks a locked Mac.** Type the password at the lock screen from the remote device.
@@ -180,6 +181,7 @@ More in the toolbar:
 - **Machines:** sleeping machines Glass has seen before can be woken with Wake-on-LAN (also `glass wake <name|mac>`).
 - **This device** (the bell): what this browser does for Glass.
   - **Notifications:** messages, questions (an agent asking before it acts or needing your help, someone asking to connect) and activity (someone joined, an update is ready), even with Glass closed. On iPhone and iPad, add Glass to the Home Screen first. `glass notifications` lists the devices that get them (`test`, `off <id>`), as does the Glass app's Settings.
+  - **Smooth motion:** on a screen faster than 60 Hz, up to 120 frames a second (on by default there; macOS hosts, when the Mac's display is that fast too). Every viewer shares the stream, so with a 60 Hz viewer connected everyone gets 60. The stats overlay shows the frame rate. Browsers that hold pages to 60 Hz (Safari, by default) stay at 60.
   - **Keep screen awake** while connected (on by default).
   - **Picture in picture:** the screen in a floating window while you do something else.
   - **Use all my screens:** with several monitors here and several displays there, one display on each (Chrome and Edge).

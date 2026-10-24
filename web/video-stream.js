@@ -76,8 +76,15 @@ export class VideoStream {
     this.lastKeyframeRequest = 0;
   }
 
-  setCanvas(canvas) {
-    this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  /** `wide`: this screen shows Display P3, so draw in it (a P3 stream isn't clipped). */
+  setCanvas(canvas, wide = false) {
+    this.colorSpace = wide ? 'display-p3' : 'srgb';
+    try {
+      this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: true, colorSpace: this.colorSpace });
+    } catch {
+      this.colorSpace = 'srgb';
+      this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    }
   }
 
   /** New session: frame ids restart, so forget reassembly state. */
@@ -105,7 +112,7 @@ export class VideoStream {
       bitmap.close();
       return false;
     }
-    if (!base) this.backing = new OffscreenCanvas(h.fw, h.fh).getContext('2d', { alpha: false });
+    if (!base) this.backing = new OffscreenCanvas(h.fw, h.fh).getContext('2d', { alpha: false, colorSpace: this.colorSpace ?? 'srgb' });
     this.backing.drawImage(bitmap, h.x, h.y);
     bitmap.close();
     this.holding = true;
@@ -256,6 +263,9 @@ export class VideoStream {
     if (ctx) {
       const { displayWidth: w, displayHeight: h } = videoFrame;
       if (ctx.canvas.width !== w || ctx.canvas.height !== h) {
+        // What colour the stream says it's in (Display P3 from a wide-colour display).
+        const c = videoFrame.colorSpace;
+        this.env.log('info', 'video colour', { stream: this.index, primaries: c?.primaries, transfer: c?.transfer, matrix: c?.matrix, canvas: this.colorSpace });
         ctx.canvas.width = w;
         ctx.canvas.height = h;
         this.env.post({ type: 'size', stream: this.index, width: w, height: h });
