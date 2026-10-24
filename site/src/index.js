@@ -82,11 +82,28 @@ export default {
     if (url.pathname.endsWith('.mp4')) return ranged(await env.ASSETS.fetch(request), request);
 
     if (url.pathname.startsWith('/releases/') && url.pathname.endsWith('.tar.gz')) {
-      ctx.waitUntil(recordDownload(env, request, 'release', url.pathname.slice('/releases/'.length)));
+      const name = url.pathname.slice('/releases/'.length);
+      ctx.waitUntil(recordDownload(env, request, 'release', name));
+      const res = await env.ASSETS.fetch(request);
+      if (res.status !== 404) return res;
+      // Too big to be an asset (over 25 MiB): the same file from the GitHub release.
+      return releaseRedirect(env, url, name);
     }
     return env.ASSETS.fetch(request);
   },
 };
+
+/** A tarball kept only on GitHub: `glass-latest-*` means the version in version.json. */
+export async function releaseRedirect(env, url, name) {
+  let file = name;
+  if (file.startsWith('glass-latest-')) {
+    const { version } = await (await env.ASSETS.fetch(new URL('/version.json', url))).json();
+    file = file.replace('glass-latest-', `glass-${version}-`);
+  }
+  const version = file.match(/^glass-(\d+\.\d+\.\d+)-[\w.-]+\.tar\.gz$/)?.[1];
+  if (!version) return new Response('Not found', { status: 404 });
+  return Response.redirect(`https://github.com/Ntarasiuk/glass/releases/download/v${version}/${file}`, 302);
+}
 
 /** Answers `Range: bytes=…` from a whole (small) asset: static assets ignore Range. */
 export async function ranged(res, request) {

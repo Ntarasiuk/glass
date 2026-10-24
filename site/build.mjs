@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 // Generates the docs in every format from docs.md (the single source), and copies the
 // latest release into public/. Run before `wrangler deploy` (npm run deploy does).
 
-import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { marked } from 'marked';
 
 const SITE = 'https://glassdesk.dev';
@@ -190,20 +190,25 @@ if (missing()) {
 const why = `no ${version} release in ${dist}: run scripts/package.sh, or wait for the v${version} release workflow`;
 if (missing() && process.env.GLASS_DEPLOY) throw new Error(why);
 if (missing()) console.warn(`warning: ${why}`);
+// Cloudflare serves assets up to 25 MiB; bigger tarballs stay on the GitHub release, and the
+// Worker redirects to them (src/index.js). Their checksums are still served from here.
+const ASSET_LIMIT = 25 * 1024 * 1024;
+const small = (f) => statSync(f).size < ASSET_LIMIT;
 if (existsSync(dist)) {
   for (const f of readdirSync(dist, { withFileTypes: true }).filter((e) => e.isFile() && !e.name.startsWith('glass-latest-')).map((e) => e.name)) {
-    copyFileSync(`${dist}/${f}`, `public/releases/${f}`);
+    if (small(`${dist}/${f}`)) copyFileSync(`${dist}/${f}`, `public/releases/${f}`);
+    else rmSync(`public/releases/${f}`, { force: true });
   }
 }
+// The installer verifies each platform's "latest" tarball against this checksum.
 for (const p of PLATFORMS) {
   const release = `${dist}/glass-${version}-${p}.tar.gz`;
-  if (existsSync(release)) copyFileSync(release, `public/releases/glass-latest-${p}.tar.gz`);
-}
-// The installer verifies each platform's "latest" tarball against this checksum.
-const latest = PLATFORMS.map((p) => `glass-latest-${p}.tar.gz`).filter((f) => existsSync(`public/releases/${f}`));
-for (const f of latest) {
+  const f = `glass-latest-${p}.tar.gz`;
+  if (!existsSync(release)) continue;
+  if (small(release)) copyFileSync(release, `public/releases/${f}`);
+  else rmSync(`public/releases/${f}`, { force: true });
   // Hash the file itself: with several versions around, any lookup by name can pick a stale one.
-  const sum = createHash('sha256').update(readFileSync(`public/releases/${f}`)).digest('hex');
+  const sum = createHash('sha256').update(readFileSync(release)).digest('hex');
   writeFileSync(`public/releases/${f}.sha256`, `${sum}  ${f}\n`);
 }
 
