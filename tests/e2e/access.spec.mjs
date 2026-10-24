@@ -154,12 +154,15 @@ test.describe('the host CLI', () => {
     test.setTimeout(120_000);
     await page.goto(host.url());
     await expectVideo(page);
-    const viewers = () => JSON.parse(host.cli('viewers', '--json')).viewers.length;
+    const list = () => JSON.parse(host.cli('viewers', '--json')).viewers;
+    const viewers = () => list().length;
     expect(viewers()).toBe(1);
+    const first = list()[0].id;
     // The host stops hearing the page's pings while the connection itself stays up, as
-    // when Safari keeps a reloaded page's connection open.
+    // when Safari keeps a reloaded page's connection open. It ends that session (the page
+    // may already be back with a new one by the time we look).
     await host.post('/test/deaf?on=true');
-    await expect.poll(viewers, { timeout: 30_000, intervals: [1000] }).toBe(0);
+    await expect.poll(() => list().every((v) => v.id !== first), { timeout: 30_000, intervals: [500] }).toBe(true);
     await host.post('/test/deaf?on=false');
     // The page reconnects by itself (after its backoff).
     await expect.poll(viewers, { timeout: 60_000, intervals: [1000] }).toBe(1);
