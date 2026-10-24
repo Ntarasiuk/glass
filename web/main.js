@@ -17,6 +17,7 @@ import { createThumbs } from './thumbs.js';
 import { createAgent } from './agent.js';
 import { createPush } from './push.js';
 import { createDevice } from './device.js';
+import { createFiles } from './files.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -471,6 +472,24 @@ function applyKeyboard(hostOs) {
 const chat = createChat({ onSend: (text) => control({ t: 'chat', text }), toast: (o) => ui.toast(o) });
 chat.setAvailable(false);
 
+const files = createFiles({
+  control,
+  log,
+  toast: (o) => ui.toast(o),
+  upload: (list, dir) => uploadFiles(list, dir),
+  // A plain browser download, from this page's own host (not over remote access).
+  download: (url, name) => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+  },
+  rawUrl: (ticket, path) =>
+    ticket && !remoteKey && currentHost === homeHost
+      ? `${location.origin}/files/raw?t=${encodeURIComponent(ticket)}&path=${encodeURIComponent(path)}`
+      : undefined,
+});
+
 const push = createPush({
   control,
   log,
@@ -754,6 +773,7 @@ function onControl(msg) {
       inputAllowed = perms.input;
       ui.setPerms(perms);
       chat.setAvailable(true);
+      files.setAvailable(Boolean(msg.features?.browse));
       restarting = undefined;
       push.connected({ key: msg.features?.push, isOwner: Boolean(msg.perms ? msg.perms.owner : !guest) }).then(() => {
         // Point out the new menu until it's been opened once (notifications are off).
@@ -818,6 +838,10 @@ function onControl(msg) {
     case 'push':
       push.onMessage(msg);
       break;
+    case 'files':
+    case 'filesThumb':
+      files.onMessage(msg);
+      break;
     case 'chat':
       if (msg.sender !== session) chat.receive(msg);
       break;
@@ -864,6 +888,7 @@ function onControl(msg) {
       terminal.onMessage(msg);
       break;
     case 'fileSaved':
+      files.onFileSaved();
       ui.toast({ text: `Saved on ${machineName(currentHost)}: ${msg.path.replace(/^\/(Users|home)\/[^/]+/, '~')}`, icon: 'file' });
       break;
     case 'passkey':
@@ -1189,8 +1214,9 @@ function offerUpdate({ current, version }) {
   });
 }
 
-function uploadFiles(files) {
-  for (const file of files) worker.postMessage({ type: 'sendFile', file });
+/** Sends files to the computer: into Downloads, or `dir` (the file browser's folder). */
+function uploadFiles(list, dir) {
+  for (const file of list) worker.postMessage({ type: 'sendFile', file, dir });
 }
 
 function onFileProgress({ id, name, done, total, direction }) {

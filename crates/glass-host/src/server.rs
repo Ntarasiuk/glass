@@ -137,6 +137,7 @@ pub async fn run(
         .merge(crate::acl::routes())
         .merge(crate::computer::routes())
         .merge(crate::push::routes())
+        .merge(crate::browse::routes())
         .route("/config.json", get(client_config))
         .route(
             "/manifest.webmanifest",
@@ -737,6 +738,7 @@ async fn control(
         lossless: shared.video.supports_lossless()
             && !ctx.relayed.as_ref().is_some_and(|r| r.rtp_video),
         push: crate::push::public_key(),
+        browse: perms.owner && perms.files,
     };
     // Someone other than the owner is in: worth a notification on the owner's devices.
     if !perms.owner {
@@ -947,6 +949,68 @@ async fn control(
                 ctx.audio_on.store(on, Ordering::Relaxed);
                 info!("{peer}: audio {}", if on { "on" } else { "off" });
             }
+            ClientMsg::FilesList { .. }
+            | ClientMsg::FilesFetch { .. }
+            | ClientMsg::FilesMkdir { .. }
+            | ClientMsg::FilesRename { .. }
+            | ClientMsg::FilesTrash { .. }
+            | ClientMsg::FilesThumb { .. }
+                if !(perms.owner && perms.files) =>
+            {
+                refuse("The file browser is for the computer's owner.")
+            }
+            ClientMsg::FilesList { path, hidden } => {
+                let tx = ctx.ctl_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _ = tx.send(files_listing(&path, hidden));
+                });
+            }
+            ClientMsg::FilesFetch { path } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let result = match crate::browse::resolve(&crate::browse::root(), &path) {
+                        Ok(p) if p.is_dir() => Err(anyhow::anyhow!("folders can't be downloaded; open it and pick files")),
+                        Ok(p) => files::send(&ctx.conn, &p).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = result {
+                        let _ = ctx.ctl_tx.send(ServerMsg::Error { msg: format!("{e:#}") });
+                    }
+                });
+            }
+            ClientMsg::FilesMkdir { path, name } => {
+                let tx = ctx.ctl_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let r = crate::browse::mkdir(&crate::browse::root(), &path, &name).map(|_| ());
+                    files_changed(&tx, &path, r);
+                });
+            }
+            ClientMsg::FilesRename { path, name } => {
+                let tx = ctx.ctl_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let parent = parent_of(&path);
+                    let r = crate::browse::rename(&crate::browse::root(), &path, &name).map(|_| ());
+                    files_changed(&tx, &parent, r);
+                });
+            }
+            ClientMsg::FilesTrash { path } => {
+                let tx = ctx.ctl_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let parent = parent_of(&path);
+                    let r = crate::browse::trash(&crate::browse::root(), &path);
+                    if r.is_ok() {
+                        info!("file browser: moved {path} to the Trash");
+                    }
+                    files_changed(&tx, &parent, r);
+                });
+            }
+            ClientMsg::FilesThumb { path } => {
+                let tx = ctx.ctl_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let data = crate::browse::thumbnail(&crate::browse::root(), &path).ok().flatten();
+                    let _ = tx.send(ServerMsg::FilesThumb { path, data });
+                });
+            }
             ClientMsg::PickFiles if !perms.files => refuse("Files are turned off for this link."),
             ClientMsg::PickFiles => {
                 let ctx = ctx.clone();
@@ -1125,6 +1189,26 @@ pub fn host_chat(text: &str) -> Result<usize> {
         text,
     });
     Ok(n)
+}
+
+/// A folder for the file browser, or why it can't be shown.
+fn files_listing(path: &str, hidden: bool) -> ServerMsg {
+    match crate::browse::list(&crate::browse::root(), path, hidden) {
+        Ok(l) => ServerMsg::Files { path: l.path, entries: l.entries, truncated: l.truncated, ticket: crate::browse::ticket(), error: None },
+        Err(e) => ServerMsg::Files { path: path.into(), entries: Vec::new(), truncated: false, ticket: String::new(), error: Some(format!("{e:#}")) },
+    }
+}
+
+/// After a change in the file browser: the folder again, or the error.
+fn files_changed(tx: &mpsc::UnboundedSender<ServerMsg>, folder: &str, result: Result<()>) {
+    if let Err(e) = result {
+        let _ = tx.send(ServerMsg::Error { msg: format!("{e:#}") });
+    }
+    let _ = tx.send(files_listing(folder, false));
+}
+
+fn parent_of(path: &str) -> String {
+    path.trim_matches('/').rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default()
 }
 
 /// One chat message, kept (in memory only) so the app can show the conversation.
@@ -1460,7 +1544,7 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
             });
         }
         STREAM_FILE => {
-            let (name, path) = files::receive(&mut stream).await?;
+            let (name, path) = files::receive(&mut stream, perms.owner).await?;
             let _ = ctx.ctl_tx.send(ServerMsg::FileSaved {
                 name,
                 path: path.display().to_string(),
