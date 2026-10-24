@@ -483,6 +483,9 @@ impl InputSink for FakeInput {
             }
             InputEvent::KeyUp { keycode } => serde_json::json!({"t": "keyup", "keycode": keycode}),
             InputEvent::MouseMoveBy { dx, dy } => serde_json::json!({"t": "moveBy", "dx": dx, "dy": dy}),
+            InputEvent::Pen { near, pressure, tilt_x, tilt_y, twist } => {
+                serde_json::json!({"t": "pen", "near": near, "pressure": pressure, "tiltX": tilt_x, "tiltY": tilt_y, "twist": twist})
+            }
             InputEvent::Gamepad { pad, kind, index, value } => {
                 serde_json::json!({"t": "gamepad", "pad": pad, "kind": kind, "index": index, "value": value})
             }

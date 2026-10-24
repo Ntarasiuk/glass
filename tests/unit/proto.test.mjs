@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  fletcher16, inputEvent, Input, INPUT_EVENT_LEN, ping, readPong, readVideoHeader, KIND_PING, KIND_PONG, VIDEO_HEADER_LEN,
+  fletcher16, inputEvent, penEvent, Input, INPUT_EVENT_LEN, ping, readPong, readVideoHeader, KIND_PING, KIND_PONG, VIDEO_HEADER_LEN,
 } from '../../web/proto.js';
 
 test('fletcher16 matches the Rust implementation', () => {
@@ -71,4 +71,17 @@ test('gamepad events carry pad, index and value', () => {
   const e = inputEvent(Input.PAD_AXIS, { button: 2, keycode: 3, a: -0.5 });
   const v = new DataView(e.buffer);
   assert.deepEqual([v.getUint8(0), v.getUint8(1), v.getUint16(2, true), v.getFloat32(4, true)], [8, 2, 3, -0.5]);
+});
+
+test('pen events match glass_proto::InputEvent::Pen byte for byte', () => {
+  const e = penEvent({ near: true, pressure: 0.5, tiltX: -45, tiltY: 30, twist: 270 });
+  // Same bytes as the Rust test pen_wire_layout.
+  assert.deepEqual([...e.slice(0, 4)], [11, 1, 0xd3, 0x1e]);
+  const v = new DataView(e.buffer);
+  assert.equal(v.getFloat32(4, true), 0.5);
+  assert.equal(v.getFloat32(8, true), 270);
+  // Out of range is clamped, not wrapped.
+  const c = penEvent({ near: false, pressure: 3, tiltX: 200, tiltY: -200 });
+  assert.deepEqual([...c.slice(0, 4)], [11, 0, 90, 0xa6]);
+  assert.equal(new DataView(c.buffer).getFloat32(4, true), 1);
 });

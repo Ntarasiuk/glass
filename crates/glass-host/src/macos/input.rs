@@ -4,7 +4,8 @@ use glass_proto::InputEvent;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventSource,
-    CGEventSourceStateID, CGEventTapLocation, CGEventType, CGMouseButton, CGScrollEventUnit,
+    CGEventMouseSubtype, CGEventSourceStateID, CGEventTapLocation, CGEventType, CGMouseButton,
+    CGScrollEventUnit,
 };
 
 const KVK_V: u16 = 0x09;
@@ -49,7 +50,25 @@ pub struct Injector {
     click_count: i64,
     /// Relative motion for the next move event (games read these, not the position).
     delta: (i64, i64),
+    /// A pen in proximity (Apple Pencil): mouse events carry its tablet data.
+    pen: Option<Pen>,
 }
+
+/// The pen's latest state, from `InputEvent::Pen`.
+#[derive(Clone, Copy)]
+struct Pen {
+    pressure: f32,
+    tilt: (i8, i8),
+    twist: f32,
+}
+
+/// Ours, so apps see one consistent tablet pointer.
+const PEN_DEVICE_ID: i64 = 0x6c61;
+/// NX_TABLET_POINTER_PEN.
+const POINTER_TYPE_PEN: i64 = 1;
+/// NX_TABLET_CAPABILITY_* (IOLLEvent.h): device id, absolute x and y, buttons, tilt x and
+/// y, pressure, rotation.
+const PEN_CAPABILITIES: i64 = 0x0001 | 0x0002 | 0x0004 | 0x0040 | 0x0080 | 0x0100 | 0x0400 | 0x2000;
 
 // CGEventSource and CGEventPost are safe to use from any thread; access is serialized by a Mutex.
 unsafe impl Send for Injector {}
@@ -66,6 +85,7 @@ impl Injector {
             last_click: None,
             click_count: 1,
             delta: (0, 0),
+            pen: None,
         }
     }
 
@@ -93,6 +113,18 @@ impl Injector {
                     self.click_count = self.next_click_count(button);
                 }
                 self.mouse(ty, cg_button);
+            }
+            InputEvent::Pen { near, pressure, tilt_x, tilt_y, twist } => {
+                let was_near = self.pen.is_some();
+                if near {
+                    self.pen = Some(Pen { pressure, tilt: (tilt_x, tilt_y), twist });
+                    if !was_near {
+                        self.proximity(true);
+                    }
+                } else if was_near {
+                    self.pen = None;
+                    self.proximity(false);
+                }
             }
             InputEvent::MouseMoveBy { dx, dy } => {
                 // Stay on the display the pointer is on (or the first streamed one).
@@ -223,6 +255,35 @@ impl Injector {
             CGEvent::set_integer_value_field(ev.as_deref(), DELTA_X, self.delta.0);
             CGEvent::set_integer_value_field(ev.as_deref(), DELTA_Y, self.delta.1);
         }
+        if let Some(pen) = self.pen {
+            // A tablet point: NSEvent.pressure, .tilt and .rotation in drawing apps.
+            let pressure = if self.buttons[0] { pen.pressure.max(0.01) as f64 } else { 0.0 };
+            let ev = ev.as_deref();
+            CGEvent::set_integer_value_field(ev, CGEventField::MouseEventSubtype, CGEventMouseSubtype::TabletPoint.0 as i64);
+            CGEvent::set_double_value_field(ev, CGEventField::MouseEventPressure, pressure);
+            CGEvent::set_double_value_field(ev, CGEventField::TabletEventPointPressure, pressure);
+            CGEvent::set_double_value_field(ev, CGEventField::TabletEventTiltX, pen.tilt.0 as f64 / 90.0);
+            CGEvent::set_double_value_field(ev, CGEventField::TabletEventTiltY, pen.tilt.1 as f64 / 90.0);
+            CGEvent::set_double_value_field(ev, CGEventField::TabletEventRotation, pen.twist as f64);
+            CGEvent::set_integer_value_field(ev, CGEventField::TabletEventPointButtons, self.buttons[0] as i64);
+            CGEvent::set_integer_value_field(ev, CGEventField::TabletEventDeviceID, PEN_DEVICE_ID);
+        }
+        self.post(ev);
+    }
+
+    /// The pen came near the screen (or left): apps learn a tablet pen is in use.
+    fn proximity(&self, enter: bool) {
+        let ev = CGEvent::new(self.source.as_deref());
+        let e = ev.as_deref();
+        CGEvent::set_type(e, CGEventType::TabletProximity);
+        CGEvent::set_location(e, self.pos);
+        CGEvent::set_integer_value_field(e, CGEventField::MouseEventSubtype, CGEventMouseSubtype::TabletProximity.0 as i64);
+        CGEvent::set_integer_value_field(e, CGEventField::TabletProximityEventDeviceID, PEN_DEVICE_ID);
+        CGEvent::set_integer_value_field(e, CGEventField::TabletProximityEventSystemTabletID, PEN_DEVICE_ID);
+        CGEvent::set_integer_value_field(e, CGEventField::TabletProximityEventPointerID, 1);
+        CGEvent::set_integer_value_field(e, CGEventField::TabletProximityEventPointerType, POINTER_TYPE_PEN);
+        CGEvent::set_integer_value_field(e, CGEventField::TabletProximityEventCapabilityMask, PEN_CAPABILITIES);
+        CGEvent::set_integer_value_field(e, CGEventField::TabletProximityEventEnterProximity, enter as i64);
         self.post(ev);
     }
 
