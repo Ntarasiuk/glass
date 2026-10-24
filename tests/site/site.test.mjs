@@ -169,3 +169,13 @@ test('stats need the key', async () => {
   assert.equal((await fetch(`${BASE}/api/stats`)).status, 401);
   assert.equal((await fetch(`${BASE}/api/stats`, { headers: { authorization: 'Bearer wrong' } })).status, 401);
 });
+
+test('a tarball too big for the site redirects to the GitHub release', async () => {
+  const { version } = await (await get('/version.json')).json();
+  const latest = await get('/releases/glass-latest-darwin-universal.tar.gz');
+  assert.equal(latest.status, 302);
+  assert.equal(latest.headers.get('location'), `https://github.com/Ntarasiuk/glass/releases/download/v${version}/glass-${version}-darwin-universal.tar.gz`);
+  const pinned = await get('/releases/glass-9.9.9-linux-x86_64.tar.gz');
+  assert.equal(pinned.headers.get('location'), 'https://github.com/Ntarasiuk/glass/releases/download/v9.9.9/glass-9.9.9-linux-x86_64.tar.gz');
+  assert.equal((await get('/releases/nope.tar.gz')).status, 404);
+});
