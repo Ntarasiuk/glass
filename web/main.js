@@ -1329,7 +1329,7 @@ function toggleAudio() {
   if (!audioContext) {
     // Must be created and resumed inside the tap: Safari can start it suspended.
     // 'playback' keeps it audible when the iPad's silent mode is on.
-    if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    setAudioSession(true);
     audioContext = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     audioContext.resume();
     audioContext.audioWorklet
@@ -1369,6 +1369,7 @@ async function toggleMic() {
     return;
   }
   try {
+    setAudioSession(Boolean(audioContext), true);
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
@@ -1384,14 +1385,23 @@ async function toggleMic() {
   } catch (e) {
     micStream?.getTracks().forEach((t) => t.stop());
     micStream = undefined;
+    setAudioSession();
     ui.toast({ text: `Couldn't use the microphone: ${e.message ?? e}`, kind: 'error' });
     log('error', `microphone failed: ${e.message ?? e}`);
   }
 }
 
+// Safari (iOS/iPadOS): 'playback' keeps the Mac's sound audible in silent mode but blocks
+// the microphone; while the mic is on it needs 'play-and-record'. Set before each start.
+function setAudioSession(playing = Boolean(audioContext), recording = Boolean(micStream)) {
+  if (!navigator.audioSession) return;
+  navigator.audioSession.type = recording ? 'play-and-record' : playing ? 'playback' : 'auto';
+}
+
 function stopMic() {
   micStream?.getTracks().forEach((t) => t.stop());
   micStream = undefined;
+  setAudioSession();
   worker.postMessage({ type: 'mic', on: false });
   ui.setMicOn(false);
   log('info', 'microphone off');
