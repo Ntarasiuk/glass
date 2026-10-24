@@ -196,7 +196,8 @@ let sharpWanted = storage((s) => s.getItem(SHARP_KEY)) === '1';
 let sharpMode = 'off'; // what the host is doing: 'off', 'sharp' or '4:2:2'
 let deniedMsg; // why the host last turned us away
 
-// Resolves with the next clipboard text the Mac reports (used for Cmd+C / Cmd+X).
+// Resolves with the next clipboard the Mac reports (used for Cmd+C / Cmd+X):
+// { text, html?, image } where `image` says there's one to fetch (macImage).
 let clipboardWaiters = [];
 let lastMacClipboard;
 function nextClipboard(timeoutMs) {
@@ -212,6 +213,61 @@ function nextClipboard(timeoutMs) {
       }
     }, timeoutMs);
   });
+}
+
+// The Mac clipboard's image, fetched when needed (it can be several MB).
+const IMAGE_WAIT_MS = 8000;
+let imageWaiters = [];
+function macImage() {
+  return new Promise((resolve, reject) => {
+    imageWaiters.push(resolve);
+    control({ t: 'clipboardImage' });
+    setTimeout(() => reject(new Error('the image never came')), IMAGE_WAIT_MS);
+  });
+}
+
+/**
+ * After ⌘C copied rich text or an image on the Mac (the text is already on this device's
+ * clipboard): put the whole thing there. Browsers that want a tap for that (Safari) get a
+ * Copy button.
+ */
+async function copyRich(clip) {
+  if (!clip.html && !clip.image) return;
+  const items = { 'text/plain': new Blob([clip.text], { type: 'text/plain' }) };
+  if (clip.html) items['text/html'] = new Blob([clip.html], { type: 'text/html' });
+  if (clip.image) {
+    try {
+      items['image/png'] = await macImage();
+    } catch (e) {
+      log('warn', `clipboard image: ${e.message}`);
+    }
+  }
+  const write = () => navigator.clipboard.write([new ClipboardItem(items)]);
+  try {
+    await write();
+    log('info', 'rich clipboard copied', { types: Object.keys(items) });
+  } catch {
+    // Text is there already; only an image is worth asking for a tap.
+    if (!items['image/png']) return;
+    ui.toast({
+      text: `Image copied on ${machineName(currentHost)}`,
+      icon: 'file',
+      timeout: 10_000,
+      action: { label: 'Copy here', run: () => write().catch((e) => ui.toast({ text: `Couldn't copy the image: ${e.message ?? e}`, kind: 'error' })) },
+    });
+  }
+}
+
+/** A clipboard from this device to the Mac; with `paste`, the Mac pastes it too. */
+const MAX_CLIPBOARD_IMAGE = 8 << 20; // the host's limit
+function sendClip({ text = '', html, image }, paste = false) {
+  if (image?.size > MAX_CLIPBOARD_IMAGE) {
+    ui.toast({ text: 'That image is too big to paste on the Mac (over 8 MB). Send it as a file instead.', kind: 'error' });
+    image = undefined;
+    if (!text && !html) return;
+  }
+  if (image) worker.postMessage({ type: 'sendClipboard', clip: { text, html, image, paste } });
+  else control({ t: 'clipboard', text, ...(html && { html }), paste });
 }
 
 const statusEl = document.getElementById('status');
@@ -231,6 +287,8 @@ const input = attachInput({
   send,
   control,
   nextClipboard,
+  onMacCopy: (clip) => copyRich(clip),
+  onPaste: (clip) => sendClip(clip, true),
   onLocalShortcut: (code) => (code === 'KeyF' ? toggleFullscreen() : toggleStats()),
   swapCmdOption: storage((s) => s.getItem(SWAP_KEY)) === '1',
   ctrlAsCmd,
@@ -437,6 +495,7 @@ const device = createDevice({
   input,
   screens,
   streams: () => (rtpVideo ? videos : canvases).slice(0, streamCount),
+  sendClip: (clip) => sendClip(clip),
   displays: () => displays,
   onPause: (away) => worker.postMessage({ type: 'visible', visible: !away && document.visibilityState === 'visible' }),
   onPressure: (scale) => {
@@ -656,6 +715,10 @@ worker.onmessage = ({ data }) => {
     case 'fileReceived':
       onFileReceived(data);
       break;
+    case 'clipboardImage':
+      for (const w of imageWaiters) w(data.image);
+      imageWaiters = [];
+      break;
     case 'audio':
       ui.setAudioOn(data.on);
       if (!data.on) audioContext?.suspend();
@@ -792,9 +855,9 @@ function onControl(msg) {
       offerUpdate(msg);
       break;
     case 'clipboard':
-      log('info', 'mac clipboard changed', { length: msg.text.length });
-      lastMacClipboard = msg.text;
-      for (const w of clipboardWaiters) w.resolve(msg.text);
+      log('info', 'mac clipboard changed', { length: msg.text.length, html: Boolean(msg.html), image: Boolean(msg.image) });
+      lastMacClipboard = { text: msg.text, html: msg.html, image: Boolean(msg.image) };
+      for (const w of clipboardWaiters) w.resolve(lastMacClipboard);
       clipboardWaiters = [];
       break;
     case 'term':

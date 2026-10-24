@@ -514,13 +514,36 @@ impl InputSink for FakeInput {
 // ---- Clipboard: in memory ----
 
 static CLIPBOARD: Mutex<String> = Mutex::new(String::new());
+/// The rest of the clipboard: its rich text and image.
+static RICH: Mutex<(Option<String>, Option<Vec<u8>>)> = Mutex::new((None, None));
 
 pub struct FakeClipboard;
 
 impl Clipboard for FakeClipboard {
     fn set_text(&self, text: &str) {
         *CLIPBOARD.lock().unwrap() = text.to_owned();
+        *RICH.lock().unwrap() = (None, None);
     }
+
+    fn set(&self, c: &crate::clip::Clip) {
+        *CLIPBOARD.lock().unwrap() = c.text.clone();
+        *RICH.lock().unwrap() = (c.html.clone(), c.image.clone());
+    }
+
+    fn image_png(&self) -> Option<Vec<u8>> {
+        RICH.lock().unwrap().1.clone()
+    }
+}
+
+/// What tests read and write at /test/clipboard/rich (the image as base64).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct RichClip {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    html: Option<String>,
+    #[serde(default)]
+    image: Option<String>,
 }
 
 // ---- Files ----
@@ -569,11 +592,39 @@ pub fn routes(events: broadcast::Sender<ServerMsg>, downloads: PathBuf) -> axum:
         )
         .route(
             "/test/clipboard",
-            get(|| async { CLIPBOARD.lock().unwrap().clone() }).post(move |text: String| {
+            get(|| async { CLIPBOARD.lock().unwrap().clone() }).post({
                 let events = events.clone();
-                async move {
-                    *CLIPBOARD.lock().unwrap() = text.clone();
-                    let _ = events.send(ServerMsg::Clipboard { text });
+                move |text: String| {
+                    let events = events.clone();
+                    async move {
+                        FakeClipboard.set_text(&text);
+                        let _ = events.send(ServerMsg::Clipboard { text, html: None, image: false });
+                    }
+                }
+            }),
+        )
+        .route(
+            "/test/clipboard/rich",
+            get(|| async {
+                use base64::Engine;
+                let (html, image) = RICH.lock().unwrap().clone();
+                Json(RichClip {
+                    text: CLIPBOARD.lock().unwrap().clone(),
+                    html,
+                    image: image.map(|i| base64::engine::general_purpose::STANDARD.encode(i)),
+                })
+            })
+            .post({
+                let events = events.clone();
+                move |Json(c): Json<RichClip>| {
+                    let events = events.clone();
+                    async move {
+                        use base64::Engine;
+                        let image = c.image.and_then(|i| base64::engine::general_purpose::STANDARD.decode(i).ok());
+                        let has_image = image.is_some();
+                        FakeClipboard.set(&crate::clip::Clip { text: c.text.clone(), html: c.html.clone(), image });
+                        let _ = events.send(ServerMsg::Clipboard { text: c.text, html: c.html, image: has_image });
+                    }
                 }
             }),
         )

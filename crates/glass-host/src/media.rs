@@ -145,7 +145,15 @@ pub trait InputSink: Send {
     }
 }
 
-/// The host clipboard (text).
+/// The host clipboard: text, and where the platform allows, rich text and images.
 pub trait Clipboard: Send + Sync {
     fn set_text(&self, text: &str);
+    /// Text, HTML and an image together (what a viewer copied).
+    fn set(&self, clip: &crate::clip::Clip) {
+        self.set_text(&clip.text);
+    }
+    /// The clipboard's image as PNG, if it holds one.
+    fn image_png(&self) -> Option<Vec<u8>> {
+        None
+    }
 }

@@ -24,6 +24,7 @@ mod passkey;
 mod posture;
 mod power;
 mod privacy;
+mod clip;
 mod push;
 mod recording;
 mod scim;
