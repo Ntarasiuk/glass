@@ -33,7 +33,7 @@ pub struct Snapshot {
     pub token: String,
     /// Devices that get notifications (Web Push).
     pub notify: Vec<NotifyDevice>,
-    /// The BlackHole device viewers' microphones play into, if installed.
+    /// The device viewers' microphones play into (Glass Microphone or BlackHole), if installed.
     pub mic: Option<String>,
 }
 

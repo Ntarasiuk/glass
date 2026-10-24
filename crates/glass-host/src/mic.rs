@@ -2,40 +2,159 @@
 //!
 //! Linux: while any viewer's mic is on, a virtual source "Glass microphone" exists
 //! (PulseAudio / PipeWire `module-pipe-source`), fed 48 kHz mono s16 through a FIFO. Apps
-//! on the host pick it like any other microphone.
+//! on the host pick it like any other microphone. Needs only `pactl` (`glass mic install`
+//! adds it with the system's package manager when it's missing).
 //!
-//! macOS: through BlackHole, a free virtual audio driver (`glass mic install`). A
-//! microphone other apps can choose needs a driver installed system-wide; Glass plays the
-//! viewer's voice into BlackHole's output, which comes out of its input, and makes that
-//! the Mac's default input while a mic is on (put back after). Without BlackHole the mic
-//! isn't offered: playing the voice through the speakers would feed it back to the viewer
+//! macOS: through Glass Microphone, our own virtual audio driver (native/glass-mic, shipped
+//! with Glass; `glass mic install` puts it in /Library/Audio/Plug-Ins/HAL, which asks for
+//! the Mac's password once), or BlackHole when that's what's installed. A microphone other
+//! apps can choose needs a driver installed system-wide; Glass plays the viewer's voice
+//! into the driver's output, which comes out of its input, and makes that the Mac's
+//! default input while a mic is on (put back after). Without a driver the mic isn't
+//! offered: playing the voice through the speakers would feed it back to the viewer
 //! through the host's own audio capture, an echo rather than a microphone.
 
 use glass_proto::{AUDIO_HEADER_LEN, KIND_MIC};
 
 pub fn supported() -> bool {
-    if crate::testmode::enabled() || cfg!(target_os = "linux") {
+    if crate::testmode::enabled() {
         return true;
     }
     #[cfg(target_os = "macos")]
     return mac::device().is_some();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    return linux::pactl();
+    #[allow(unreachable_code)]
     false
 }
 
-/// macOS: the BlackHole device's name, if installed ("BlackHole 2ch").
+/// What a viewer's mic comes in as: "Glass Microphone", "BlackHole 2ch", or on Linux
+/// "Glass microphone" (made while a mic is on); `None` when it can't yet.
 pub fn device_name() -> Option<String> {
     #[cfg(target_os = "macos")]
     return mac::device().map(|(_, name)| name);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    return linux::pactl().then(|| "Glass microphone".to_string());
+    #[allow(unreachable_code)]
     None
 }
 
-/// macOS: downloads BlackHole's installer (the official package, as Homebrew lists it,
-/// checked against its SHA-256) and opens it; Installer asks for the Mac's password.
-/// Falls back to opening BlackHole's website.
+/// How `install` asks for the admin password: in this terminal (`sudo`), or with the
+/// system's own password dialog (the app, or a viewer asking remotely).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Ask {
+    Terminal,
+    Dialog,
+}
+
+/// Installs what a viewer's microphone needs. macOS: the Glass Microphone driver shipped
+/// with Glass (or BlackHole's official installer when this build has no driver). Linux:
+/// `pactl`, with the system's package manager.
+pub fn install(ask: Ask) -> anyhow::Result<String> {
+    #[cfg(target_os = "macos")]
+    return mac_install(ask);
+    #[cfg(target_os = "linux")]
+    return linux::install(ask);
+    #[allow(unreachable_code)]
+    {
+        let _ = ask;
+        anyhow::bail!("not supported on this system")
+    }
+}
+
+/// Removes the Glass Microphone driver (macOS).
+pub fn uninstall(ask: Ask) -> anyhow::Result<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let dest = std::path::Path::new(HAL_DIR).join(DRIVER);
+        if !dest.exists() {
+            return Ok("Glass Microphone isn't installed.".into());
+        }
+        as_admin(&format!("rm -rf {} && killall -9 coreaudiod 2>/dev/null; true", sh_quote(&dest.display().to_string())), ask, "remove Glass Microphone")?;
+        return Ok("Removed Glass Microphone.".into());
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = ask;
+        Ok("Nothing to remove here.".into())
+    }
+}
+
+/// Runs a shell command as root: sudo in the terminal, or the system's password dialog.
+fn as_admin(script: &str, ask: Ask, why: &str) -> anyhow::Result<()> {
+    let ok = match ask {
+        Ask::Terminal => std::process::Command::new("sudo").args(["sh", "-c", script]).status()?.success(),
+        #[cfg(target_os = "macos")]
+        Ask::Dialog => {
+            let apple = format!(
+                "do shell script \"{}\" with prompt \"Glass needs your password to {why}.\" with administrator privileges",
+                script.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            let out = std::process::Command::new("osascript").args(["-e", &apple]).output()?;
+            anyhow::ensure!(!String::from_utf8_lossy(&out.stderr).contains("-128"), "cancelled");
+            out.status.success()
+        }
+        #[cfg(not(target_os = "macos"))]
+        Ask::Dialog => std::process::Command::new("pkexec").args(["sh", "-c", script]).status()?.success(),
+    };
+    anyhow::ensure!(ok, "couldn't {why}");
+    Ok(())
+}
+
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 #[cfg(target_os = "macos")]
-pub fn install() -> anyhow::Result<String> {
+const HAL_DIR: &str = "/Library/Audio/Plug-Ins/HAL";
+#[cfg(target_os = "macos")]
+const DRIVER: &str = "GlassMicrophone.driver";
+
+/// The driver shipped with this Glass: `<prefix>/share/glass/GlassMicrophone.driver`
+/// (installed), or the CMake build in a checkout; `GLASS_MIC_DRIVER` overrides.
+#[cfg(target_os = "macos")]
+fn bundled_driver() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("GLASS_MIC_DRIVER") {
+        return Some(p.into());
+    }
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let mut candidates = vec![exe.parent()?.parent()?.join("share/glass").join(DRIVER)];
+    // A checkout: target/<profile>/glass-host -> target/glass-mic/
+    candidates.push(exe.parent()?.parent()?.join("glass-mic").join(DRIVER));
+    candidates.into_iter().find(|p| p.join("Contents/MacOS/GlassMicrophone").exists())
+}
+
+#[cfg(target_os = "macos")]
+fn mac_install(ask: Ask) -> anyhow::Result<String> {
+    if let Some(src) = bundled_driver() {
+        let dest = std::path::Path::new(HAL_DIR).join(DRIVER);
+        // Copy, owned by root, then restart the audio server (launchd starts it again) so
+        // it loads the driver.
+        let script = format!(
+            "mkdir -p {hal} && rm -rf {dest} && cp -R {src} {hal}/ && chown -R root:wheel {dest} && xattr -cr {dest} && killall -9 coreaudiod 2>/dev/null; true",
+            hal = sh_quote(HAL_DIR),
+            dest = sh_quote(&dest.display().to_string()),
+            src = sh_quote(&src.display().to_string()),
+        );
+        as_admin(&script, ask, "install its microphone (Glass Microphone)")?;
+        // The audio server takes a moment to come back with the new device.
+        for _ in 0..40 {
+            if mac::device().is_some_and(|(_, name)| name == "Glass Microphone") {
+                return Ok("Glass Microphone is installed. Turn on the mic in the viewer.".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        anyhow::bail!("installed, but the Mac's audio hasn't picked it up yet; try again in a minute, or restart the Mac");
+    }
+    blackhole_install()
+}
+
+/// Without a bundled driver (a build without one): BlackHole's official installer, as
+/// Homebrew lists it, checked against its SHA-256, opened in Installer. Falls back to
+/// BlackHole's website.
+#[cfg(target_os = "macos")]
+fn blackhole_install() -> anyhow::Result<String> {
+
     let opened = (|| -> anyhow::Result<()> {
         let info: serde_json::Value = ureq::get("https://formulae.brew.sh/api/cask/blackhole-2ch.json")
             .call()?
@@ -259,18 +378,22 @@ mod mac {
     /// BlackHole, if installed (the 2-channel one first): its id and name.
     /// `GLASS_MIC_DEVICE` picks another loopback driver by name instead.
     pub fn device() -> Option<(AudioObjectID, String)> {
-        let want = std::env::var("GLASS_MIC_DEVICE").unwrap_or_else(|_| "BlackHole".into());
-        let mut found: Vec<(AudioObjectID, String)> = devices()
+        // Ours first, then BlackHole (2ch over its bigger variants); GLASS_MIC_DEVICE picks
+        // another loopback driver by name.
+        let wanted: Vec<String> = match std::env::var("GLASS_MIC_DEVICE") {
+            Ok(name) => vec![name],
+            Err(_) => vec!["Glass Microphone".into(), "BlackHole".into()],
+        };
+        let mut found: Vec<(usize, AudioObjectID, String)> = devices()
             .into_iter()
             .filter_map(|d| Some((d, string(d, kAudioObjectPropertyName)?)))
-            .filter(|(d, name)| {
-                name.contains(&want)
-                    && has_streams(*d, kAudioObjectPropertyScopeOutput)
-                    && has_streams(*d, kAudioObjectPropertyScopeInput)
+            .filter_map(|(d, name)| {
+                let rank = wanted.iter().position(|w| name.contains(w.as_str()))?;
+                (has_streams(d, kAudioObjectPropertyScopeOutput) && has_streams(d, kAudioObjectPropertyScopeInput)).then_some((rank, d, name))
             })
             .collect();
-        found.sort_by_key(|(_, name)| !name.contains("2ch"));
-        found.into_iter().next()
+        found.sort_by_key(|(rank, _, name)| (*rank, !name.contains("2ch")));
+        found.into_iter().next().map(|(_, d, name)| (d, name))
     }
 
     fn default_input() -> Option<AudioObjectID> {
@@ -480,6 +603,44 @@ mod linux {
     }
 
     static SOURCE: Mutex<Option<Source>> = Mutex::new(None);
+
+    /// `pactl` works here: it's installed and reaches a PulseAudio or PipeWire server.
+    pub fn pactl() -> bool {
+        Command::new("pactl")
+            .arg("info")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Adds `pactl` with this system's package manager (it's in PulseAudio's utilities,
+    /// which PipeWire systems use too).
+    pub fn install(ask: super::Ask) -> anyhow::Result<String> {
+        if pactl() {
+            return Ok("The microphone is ready: nothing to install.".into());
+        }
+        let has = |cmd: &str| Command::new("sh").args(["-c", &format!("command -v {cmd}")]).output().is_ok_and(|o| o.status.success());
+        let script = if has("apt-get") {
+            "apt-get install -y pulseaudio-utils"
+        } else if has("dnf") {
+            "dnf install -y pulseaudio-utils"
+        } else if has("pacman") {
+            "pacman -S --noconfirm --needed libpulse"
+        } else if has("zypper") {
+            "zypper --non-interactive install pulseaudio-utils"
+        } else if has("apk") {
+            "apk add pulseaudio-utils"
+        } else {
+            anyhow::bail!("install pactl (PulseAudio's utilities) with your package manager, then try again");
+        };
+        super::as_admin(script, ask, "install pactl for the microphone")?;
+        anyhow::ensure!(
+            pactl(),
+            "pactl is installed but can't reach a sound server; make sure PipeWire (with pipewire-pulse) or PulseAudio is running"
+        );
+        Ok("The microphone is ready. Turn it on in the viewer.".into())
+    }
 
     fn fifo_path() -> PathBuf {
         let dir = std::env::var_os("XDG_RUNTIME_DIR")
