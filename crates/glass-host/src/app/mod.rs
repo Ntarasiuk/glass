@@ -22,9 +22,10 @@ mod ui;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable, Theme, ThemeMode, TitleBar, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, Theme, ThemeMode, TitleBar, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -165,10 +166,16 @@ pub struct Store {
     pub machines: Vec<Machine>,
     /// The newest release, once checked.
     pub latest: Option<String>,
+    /// Asking glassdesk.dev for the newest release right now.
+    pub checking: bool,
+    /// Installing an update right now.
+    pub updating: bool,
     /// The first read has finished (until then, don't show setup or "not running").
     pub loaded: bool,
     rt: tokio::runtime::Handle,
 }
+
+const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(30 * 60);
 
 struct StoreHandle(Entity<Store>);
 impl Global for StoreHandle {}
@@ -203,17 +210,45 @@ impl Store {
             }
         })
         .detach();
-        // Updates, once.
-        let rt3 = rt.clone();
+        // Updates: now, then every half hour (the window can stay open for days).
         cx.spawn(async move |this, cx| {
-            let latest = cx.background_executor().spawn(async move { rt3.block_on(crate::update::fetch_latest()) }).await;
+            loop {
+                let Ok(()) = this.update(cx, |s, cx| s.check_updates(cx)) else { break };
+                cx.background_executor().timer(UPDATE_CHECK_EVERY).await;
+            }
+        })
+        .detach();
+        Self {
+            snap: Snapshot::default(),
+            tailnet: Tailnet::Checking,
+            machines: Vec::new(),
+            latest: None,
+            checking: false,
+            updating: false,
+            loaded: false,
+            rt,
+        }
+    }
+
+    /// Asks glassdesk.dev for the newest release (in the background).
+    pub fn check_updates(&mut self, cx: &mut Context<Self>) {
+        if self.checking {
+            return;
+        }
+        self.checking = true;
+        cx.notify();
+        let rt = self.rt.clone();
+        cx.spawn(async move |this, cx| {
+            let latest = cx.background_executor().spawn(async move { rt.block_on(crate::update::fetch_latest()) }).await;
             let _ = this.update(cx, |s, cx| {
-                s.latest = latest;
+                if latest.is_some() {
+                    s.latest = latest;
+                }
+                s.checking = false;
                 cx.notify();
             });
         })
         .detach();
-        Self { snap: Snapshot::default(), tailnet: Tailnet::Checking, machines: Vec::new(), latest: None, loaded: false, rt }
     }
 
     fn set(&mut self, snap: Snapshot, cx: &mut Context<Self>) {
@@ -438,6 +473,79 @@ impl GlassApp {
         cx.notify();
     }
 
+    /// The bottom of the sidebar: update now when there's a new version, else check.
+    fn update_button(&self, update: Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
+        let store = self.store.read(cx);
+        let (checking, updating, checked) = (store.checking, store.updating, store.latest.is_some());
+        let theme = cx.theme();
+        let button = match &update {
+            Some(v) => Button::new("update")
+                .primary()
+                .small()
+                .w_full()
+                .icon(I::Download)
+                .label(if updating { "Updating…".to_string() } else { format!("Update to {v}") })
+                .loading(updating)
+                .disabled(updating)
+                .on_click(cx.listener(|this, _, window, cx| this.update_now(window, cx))),
+            None => Button::new("check-updates")
+                .ghost()
+                .small()
+                .w_full()
+                .icon(I::RefreshCw)
+                .label(if checking { "Checking…" } else { "Check for updates" })
+                .loading(checking)
+                .disabled(checking)
+                .on_click(cx.listener(|this, _, _, cx| this.store.update(cx, |s, cx| s.check_updates(cx)))),
+        };
+        v_flex()
+            .mx_1()
+            .mb_1()
+            .gap_1p5()
+            .child(button)
+            .child(
+                div()
+                    .px_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(match &update {
+                        Some(_) => format!("You have {}", crate::update::CURRENT),
+                        None if checked && !checking => format!("Glass {} · up to date", crate::update::CURRENT),
+                        None => format!("Glass {}", crate::update::CURRENT),
+                    }),
+            )
+    }
+
+    /// Installs the newest release, restarts the service on it, and reopens this window
+    /// on the new version.
+    pub(crate) fn update_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.read(cx).updating {
+            return;
+        }
+        self.store.update(cx, |s, cx| {
+            s.updating = true;
+            cx.notify();
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async { actions::update_now() }).await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(version) => {
+                    toast(window, cx, Ok(format!("Updated to {version}. Reopening…")));
+                    actions::relaunch();
+                    cx.quit();
+                }
+                Err(e) => {
+                    this.store.update(cx, |s, cx| {
+                        s.updating = false;
+                        cx.notify();
+                    });
+                    toast(window, cx, Err(e));
+                }
+            });
+        })
+        .detach();
+    }
+
     fn send_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.chat.read(cx).value().to_string();
         self.chat.update(cx, |s, cx| s.set_value("", window, cx));
@@ -555,30 +663,6 @@ impl GlassApp {
                     .on_click(cx.listener(move |this, _, _, cx| this.go(page, cx)))
             }))
             .child(div().flex_1())
-            .children(update.map(|v| {
-                let theme = cx.theme();
-                h_flex()
-                    .id("update")
-                    .mx_1()
-                    .mb_2()
-                    .p_2p5()
-                    .gap_2()
-                    .rounded(px(10.))
-                    .bg(theme.primary.opacity(0.12))
-                    .text_xs()
-                    .cursor_pointer()
-                    .child(Icon::new(I::Download).small().text_color(theme.primary))
-                    .child(v_flex().child(div().font_weight(FontWeight::MEDIUM).child(format!("Glass {v} is out"))).child(
-                        div().text_color(theme.muted_foreground).child("Click to update"),
-                    ))
-                    .on_click(cx.listener(|_, _, window, cx| act(window, cx, actions::update)))
-            }))
-            .child(
-                div()
-                    .px_2()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("Version {}", crate::update::CURRENT)),
-            )
+            .child(self.update_button(update, cx))
     }
 }

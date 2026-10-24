@@ -293,7 +293,7 @@ impl GlassApp {
                 h_flex()
                     .gap_2()
                     .when(update.is_some(), |d| {
-                        d.child(Button::new("update").small().primary().icon(I::Download).label("Update").on_click(|_, window, cx| act(window, cx, actions::update)))
+                        d.child(Button::new("update").small().primary().icon(I::Download).label("Update").on_click(cx.listener(|this, _, window, cx| this.update_now(window, cx))))
                     })
                     .child(Button::new("docs").small().ghost().label("Docs").icon(I::ExternalLink).on_click(|_, _, _| actions::open("https://glassdesk.dev/docs"))),
                 cx,

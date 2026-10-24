@@ -78,6 +78,21 @@ pub fn start_self_update() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The installer, waited for, with its output in update.log (the app's Update button).
+pub fn run_logged() -> anyhow::Result<()> {
+    let log = crate::platform::log_dir().join("update.log");
+    let _ = std::fs::create_dir_all(log.parent().unwrap());
+    let status = std::process::Command::new("sh")
+        .args(["-c", &format!("curl -fsSL {}/install.sh | sh", base_url())])
+        .env("GLASS_BASE", base_url())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(&log)?)
+        .stderr(std::fs::File::options().append(true).open(&log)?)
+        .status()?;
+    anyhow::ensure!(status.success(), "the update didn't finish; see update.log in Glass's logs");
+    Ok(())
+}
+
 /// `glass update`: the installer, in the foreground.
 pub fn run_cli() -> anyhow::Result<()> {
     let status = std::process::Command::new("sh")
