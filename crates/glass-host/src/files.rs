@@ -48,8 +48,10 @@ pub async fn receive(stream: &mut RecvStream) -> Result<(String, PathBuf)> {
     stream.read_exact(&mut header).await?;
     let header: FileHeader = serde_json::from_slice(&header)?;
 
-    let dir = downloads_dir();
-    let dest = unique_path(&dir, &header.name);
+    // A file from a dropped folder keeps its place in it ("Photos/2024/a.jpg").
+    let (dir, name) = place(&downloads_dir(), &header.name);
+    tokio::fs::create_dir_all(&dir).await?;
+    let dest = unique_path(&dir, &name);
     let partial = dest.with_extension(format!(
         "{}glass-partial",
         dest.extension()
@@ -81,6 +83,21 @@ pub async fn receive(stream: &mut RecvStream) -> Result<(String, PathBuf)> {
     let name = dest.file_name().unwrap().to_string_lossy().into_owned();
     info!("received file {} ({received} bytes)", dest.display());
     Ok((name, dest))
+}
+
+/// Where an uploaded `name` goes under `base`: its folders (safe ones only: no `..`, no
+/// hidden names, at most 16 deep) and its file name.
+fn place(base: &Path, name: &str) -> (PathBuf, String) {
+    let mut parts: Vec<&str> = name
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != "." && *p != ".." && !p.starts_with('.'))
+        .collect();
+    let file = parts.pop().unwrap_or("file").to_string();
+    let mut dir = base.to_path_buf();
+    for p in parts.into_iter().take(16) {
+        dir.push(p);
+    }
+    (dir, file)
 }
 
 /// Shows a native file chooser on the host's screen (visible to the remote user).
@@ -153,6 +170,16 @@ fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folders_stay_inside_downloads() {
+        let base = Path::new("/d");
+        assert_eq!(place(base, "a.txt"), (PathBuf::from("/d"), "a.txt".into()));
+        assert_eq!(place(base, "Photos/2024/a.jpg"), (PathBuf::from("/d/Photos/2024"), "a.jpg".into()));
+        assert_eq!(place(base, "../../etc/passwd"), (PathBuf::from("/d/etc"), "passwd".into()));
+        assert_eq!(place(base, "/abs/.ssh/x"), (PathBuf::from("/d/abs"), "x".into()));
+        assert_eq!(place(base, "dir/"), (PathBuf::from("/d"), "dir".into()));
+    }
 
     #[test]
     fn decodes_file_uris() {

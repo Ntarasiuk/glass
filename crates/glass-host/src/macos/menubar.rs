@@ -26,6 +26,11 @@ define_class!(
     unsafe impl NSObjectProtocol for MenuTarget {}
 
     impl MenuTarget {
+        #[unsafe(method(openApp:))]
+        fn open_app(&self, _sender: Option<&AnyObject>) {
+            crate::app::open_app();
+        }
+
         #[unsafe(method(disconnectAll:))]
         fn disconnect_all(&self, _sender: Option<&AnyObject>) {
             viewers::disconnect_all();
@@ -308,6 +313,9 @@ fn menu(
         item
     };
     menu.addItem(&label(&format!("Glass {}", crate::update::CURRENT)));
+    let open_app = item(mtm, "Open Glass…", Some(sel!(openApp:)), target);
+    open_app.setKeyEquivalent(ns_string!(","));
+    menu.addItem(&open_app);
     if state.updating {
         menu.addItem(&label("Updating…"));
     } else if let Some(v) = &state.update {

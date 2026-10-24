@@ -8,7 +8,8 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="icon" href="icon.svg">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="theme-color" content="#000000">
   <title>Glass</title>
   <style>
     :root {
@@ -136,6 +137,28 @@
       color: var(--text-dim); cursor: pointer; animation: rise-down 300ms var(--ease-out);
     }
     #toolbar-show:hover { color: var(--text); background: var(--surface-hover); }
+    /* Installed on a desktop with the title bar given over to the app: the toolbar lives in
+       it, beside the window's own controls, and the empty rest of it drags the window. */
+    #titlebar { display: none; }
+    @media (display-mode: window-controls-overlay) {
+      #titlebar {
+        display: block; position: fixed; left: env(titlebar-area-x, 0); top: env(titlebar-area-y, 0);
+        width: env(titlebar-area-width, 100%); height: env(titlebar-area-height, 36px);
+        -webkit-app-region: drag; app-region: drag;
+      }
+      #screens { top: env(titlebar-area-height, 36px); }
+      #toolbar {
+        top: env(titlebar-area-y, 0); right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
+        height: env(titlebar-area-height, 36px); padding: 0 4px; align-items: center; flex-wrap: nowrap;
+        border: 0; border-radius: 0; background: transparent; box-shadow: none;
+        -webkit-backdrop-filter: none; backdrop-filter: none; -webkit-app-region: no-drag; app-region: no-drag;
+      }
+      #toolbar.tucked { transform: none; opacity: 1; }
+      #toolbar button { width: 32px; height: calc(env(titlebar-area-height, 36px) - 6px); }
+      #toolbar svg { width: 17px; height: 17px; }
+      #btn-hide-toolbar, #toolbar-show { display: none !important; }
+      .panel { top: calc(env(titlebar-area-height, 36px) + 6px); }
+    }
     #toolbar-show svg { width: 18px; height: 18px; }
     [data-input="touch"] #toolbar-show { width: 56px; height: 32px; }
     @keyframes rise-down { from { opacity: 0; transform: translateY(-8px); } }
@@ -295,7 +318,8 @@
       *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
     }
     /* Chat */
-    #btn-chat { position: relative; }
+    #btn-chat, #btn-device { position: relative; }
+    #btn-device.hint::after { content: ""; position: absolute; top: 8px; right: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
     #btn-chat .dot { position: absolute; top: 8px; right: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
     #chat-panel { display: grid; gap: 8px; width: min(320px, calc(100vw - 20px)); box-sizing: border-box; }
     #chat-panel .chat-log { list-style: none; margin: 0; padding: 4px 6px; max-height: 40vh; overflow-y: auto; display: grid; gap: 6px; -webkit-user-select: text; user-select: text; }
@@ -425,6 +449,7 @@
     </div>
   </div>
 
+  <div id="titlebar" aria-hidden="true"></div>
   <nav id="toolbar" class="glass" aria-label="Glass controls">
     <button id="btn-machines" title="Machines" aria-haspopup="true" aria-expanded="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="13" height="9" rx="1.5"/><rect x="9" y="12" width="13" height="9" rx="1.5"/></svg>
@@ -465,6 +490,9 @@
     <button id="btn-record" title="Record on the host" aria-pressed="false" class="hidden">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle id="record-dot" cx="12" cy="12" r="4" fill="currentColor"/></svg>
     </button>
+    <button id="btn-device" title="This device" aria-haspopup="true" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+    </button>
     <button id="btn-fullscreen" title="Fullscreen (Ctrl+Shift+F)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
     </button>
@@ -482,6 +510,7 @@
   <div id="shortcuts-panel" class="panel glass hidden" role="menu" aria-label="Mac shortcuts"></div>
   <div id="more-panel" class="panel glass hidden" role="menu" aria-label="Computer"></div>
   <div id="ports-panel" class="panel glass hidden" role="menu" aria-label="Forwarded ports"></div>
+  <div id="device-panel" class="panel glass hidden" role="menu" aria-label="This device"></div>
   <section id="terminal" class="glass hidden" aria-label="Terminal">
     <div id="terminal-grip" role="separator" aria-orientation="horizontal" aria-label="Resize terminal" title="Drag to resize"></div>
     <header><span>Terminal</span><button id="terminal-full" type="button" aria-pressed="false">Full screen</button><button id="terminal-end" type="button">End shell</button><button id="terminal-close" type="button">Hide</button></header>

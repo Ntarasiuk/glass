@@ -1,4 +1,6 @@
 mod access;
+#[cfg(target_os = "macos")]
+mod app;
 mod computer;
 mod admin;
 mod acl;
@@ -22,6 +24,7 @@ mod passkey;
 mod posture;
 mod power;
 mod privacy;
+mod push;
 mod recording;
 mod scim;
 mod settings;
@@ -134,6 +137,13 @@ enum Command {
         /// With --yes: print the report as JSON.
         #[arg(long, requires = "yes")]
         json: bool,
+    },
+    /// Open the Glass app: setup, who's connected, links, settings and more, in a window.
+    #[cfg(target_os = "macos")]
+    App {
+        /// Just (re)create Glass.app in ~/Applications.
+        #[arg(long)]
+        install: bool,
     },
     /// Show whether the background service is running and what it can do.
     Status {
@@ -250,6 +260,14 @@ enum Command {
     Deny { id: Option<u64> },
     /// Send a message to everyone viewing.
     Chat { message: Vec<String> },
+    /// Devices that get notifications (turned on in each device's viewer): list, test, or
+    /// turn one off.
+    Notifications {
+        #[arg(value_parser = ["list", "test", "off"], default_value = "list")]
+        action: String,
+        /// A device's id (from the list).
+        id: Option<String>,
+    },
     /// Blank this screen and block local input while viewed (or stop): on or off.
     Privacy {
         #[arg(value_parser = ["on", "off"])]
@@ -479,6 +497,13 @@ fn decide_cli(id: Option<u64>, allow: bool) -> Result<()> {
 
 /// `glass restart`: restarts the service and waits until it's back.
 fn restart_service() -> Result<()> {
+    let pid = restart_and_wait()?;
+    println!("Glass restarted (pid {pid}). Viewers reconnect by themselves.");
+    Ok(())
+}
+
+/// Restarts the service; returns its new pid once it reports in.
+pub(crate) fn restart_and_wait() -> Result<u32> {
     anyhow::ensure!(agent::is_installed(), "Glass isn't installed as a background service; run `glass setup`");
     let before = status::read().map(|s| s.pid);
     agent::restart()?;
@@ -489,8 +514,7 @@ fn restart_service() -> Result<()> {
             && Some(s.pid) != before
             && s.is_fresh()
         {
-            println!("Glass restarted (pid {}). Viewers reconnect by themselves.", s.pid);
-            return Ok(());
+            return Ok(s.pid);
         }
     }
     anyhow::bail!("Glass hasn't come back yet; check `glass status` and the logs")
@@ -551,6 +575,16 @@ const FEEDBACK_URL: &str = "https://glassdesk.dev/api/feedback";
 fn main() -> Result<()> {
     let args = Args::parse();
     let rt = tokio::runtime::Runtime::new()?;
+    // The app: `glass app`, or Glass.app (whose executable is this binary).
+    #[cfg(target_os = "macos")]
+    match &args.command {
+        Some(Command::App { install: true }) => {
+            println!("{}", app::install_bundle()?.display());
+            return Ok(());
+        }
+        Some(Command::App { install: false }) => return app::run(rt),
+        _ => {}
+    }
     // The host on macOS shows a menu bar icon (who's viewing), which needs the main thread:
     // the host itself then runs on the runtime's threads.
     #[cfg(target_os = "macos")]
@@ -696,6 +730,31 @@ async fn async_main(args: Args) -> Result<()> {
             println!("Sent to {} viewer(s).", reply["sent"]);
             Ok(())
         }
+        Some(Command::Notifications { action, id }) => {
+            match action.as_str() {
+                "test" => println!("Sent to {} device(s).", push::test(id.as_deref())?),
+                "off" => {
+                    let id = id.as_deref().context("which device? `glass notifications` lists them")?;
+                    anyhow::ensure!(push::remove(id)?, "no device {id}");
+                    println!("Notifications off for {id}.");
+                }
+                _ => {
+                    let subs = push::list();
+                    if subs.is_empty() {
+                        println!("No devices get notifications. Turn them on in a viewer: the bell in its toolbar.");
+                    }
+                    for s in subs {
+                        let kinds = [(s.kinds.chat, "messages"), (s.owner && s.kinds.asks, "questions"), (s.owner && s.kinds.activity, "activity")]
+                            .into_iter()
+                            .filter_map(|(on, k)| on.then_some(k))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        println!("{}  {}{}  {}", s.id, s.device, if s.owner { "" } else { " (guest)" }, kinds);
+                    }
+                }
+            }
+            Ok(())
+        }
         Some(Command::Privacy { state }) => {
             ipc::call(&ipc::Request::Privacy { on: state == "on" })?;
             println!("Privacy mode {state} (until everyone disconnects).");
@@ -731,6 +790,8 @@ async fn async_main(args: Args) -> Result<()> {
             Ok(())
         }
         Some(Command::Restart) => restart_service(),
+        #[cfg(target_os = "macos")]
+        Some(Command::App { .. }) => unreachable!("handled before the runtime starts"),
         Some(Command::Uninstall) => {
             agent::uninstall()?;
             println!(
@@ -770,9 +831,15 @@ fn send_feedback(message: &str) -> Result<()> {
         !message.trim().is_empty(),
         "usage: glass feedback \"what happened or what you'd like\""
     );
+    post_feedback(message, "cli")?;
+    println!("Thanks! Feedback sent.");
+    Ok(())
+}
+
+pub(crate) fn post_feedback(message: &str, source: &str) -> Result<()> {
     let body = serde_json::json!({
         "message": message,
-        "source": "cli",
+        "source": source,
         "version": env!("CARGO_PKG_VERSION"),
         "os": platform::os_version(),
     });
@@ -790,7 +857,6 @@ fn send_feedback(message: &str) -> Result<()> {
         .stdout(std::process::Stdio::null())
         .status()?;
     anyhow::ensure!(status.success(), "couldn't reach {FEEDBACK_URL}");
-    println!("Thanks! Feedback sent.");
     Ok(())
 }
 

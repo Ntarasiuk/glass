@@ -101,10 +101,23 @@ elif [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/glass.service" ]; then
   systemctl --user restart glass 2>/dev/null && info "Restarted the Glass service"
 fi
 
+# The Glass app (macOS): ~/Applications/Glass.app, in Spotlight and Launchpad.
+app=
+if [ "$(uname -s)" = Darwin ] && "$PREFIX/bin/glass" app --install >/dev/null 2>&1; then
+  app=1
+  info "Added Glass to your Applications"
+fi
+
 echo
 # Already set up: the service keeps its settings and permissions, so skip the guide.
 if [ -n "$previous" ] && [ -n "$service" ]; then
-  bold "Glass is up to date and running. To change settings: $glass_cmd setup"
+  bold "Glass is up to date and running. Open the Glass app for settings, or: $glass_cmd setup"
+  exit 0
+fi
+# On the Mac's own screen, setup happens in the app; over SSH, in the terminal.
+if [ -n "$app" ] && [ -z "${SSH_CONNECTION:-}" ]; then
+  open "$HOME/Applications/Glass.app"
+  bold "Glass is open: follow the steps in its window. (Or in a terminal: $glass_cmd setup)"
   exit 0
 fi
 # Piped from curl, stdin is this script, so the interactive setup reads the terminal.

@@ -122,7 +122,9 @@ pub async fn run(
     };
     let _ = SHARED.set(shared.clone());
     let _ = CLIENT_LOG.set(client_log.clone());
-    let machines_cache = Arc::new(tokio::sync::Mutex::new(None));
+    let machines_cache: MachinesCache = Arc::new(tokio::sync::Mutex::new(None));
+    let manifest_cache = machines_cache.clone();
+    let manifest_dir = web_dir.clone();
     let app = axum::Router::new()
         .merge(extra_routes.unwrap_or_default())
         .merge(crate::forward::routes())
@@ -132,7 +134,12 @@ pub async fn run(
         .merge(crate::scim::routes())
         .merge(crate::acl::routes())
         .merge(crate::computer::routes())
+        .merge(crate::push::routes())
         .route("/config.json", get(client_config))
+        .route(
+            "/manifest.webmanifest",
+            get(move || manifest(manifest_dir.clone(), manifest_cache.clone(), http_port, wt_port)),
+        )
         .route(
             "/machines.json",
             get(move || machines(machines_cache.clone(), http_port, wt_port)),
@@ -727,7 +734,16 @@ async fn control(
         },
         lossless: shared.video.supports_lossless()
             && !ctx.relayed.as_ref().is_some_and(|r| r.rtp_video),
+        push: crate::push::public_key(),
     };
+    // Someone other than the owner is in: worth a notification on the owner's devices.
+    if !perms.owner {
+        let mut who = crate::viewers::subscribe().borrow().iter().find(|v| v.id == session_id).map(|v| v.describe()).unwrap_or_else(|| device.clone());
+        if let Some(cut) = who.rfind(" · ") {
+            who.truncate(cut);
+        }
+        crate::push::activity("Someone joined", &who, &format!("joined-{session_id}"));
+    }
     let welcome = ServerMsg::Welcome {
         displays,
         streams: shared.video.streams(),
@@ -840,6 +856,27 @@ async fn control(
                     });
                 }
             }
+            ClientMsg::PushSubscribe { subscription } => {
+                let (device, owner) = (device.clone(), perms.owner);
+                let reply = match tokio::task::spawn_blocking(move || crate::push::subscribe(subscription, &device, owner)).await? {
+                    Ok(key) => {
+                        info!("{peer}: notifications on");
+                        ServerMsg::Push { key: Some(key), owner }
+                    }
+                    Err(e) => {
+                        refuse(&format!("Couldn't turn on notifications: {e:#}"));
+                        ServerMsg::Push { key: None, owner }
+                    }
+                };
+                let _ = ctx.ctl_tx.send(reply);
+            }
+            ClientMsg::PushUnsubscribe { endpoint } => {
+                let _ = tokio::task::spawn_blocking(move || crate::push::remove(&endpoint)).await?;
+                info!("{peer}: notifications off");
+            }
+            ClientMsg::PushSeen { endpoint } => {
+                tokio::task::spawn_blocking(move || crate::push::seen(&endpoint));
+            }
             ClientMsg::Fit { .. } if guest => {
                 refuse("Only this computer's owner can change its display shape.")
             }
@@ -918,6 +955,8 @@ async fn control(
                 }
                 info!("{peer}: chat ({} chars)", text.chars().count());
                 crate::notify::notify(&format!("Message from {device}"), &text);
+                remember_chat(&device, false, &text);
+                crate::push::chat(&device, &text);
                 let _ = shared.events.send(ServerMsg::Chat {
                     from: device.clone(),
                     sender: session_id,
@@ -1057,12 +1096,40 @@ pub fn host_chat(text: &str) -> Result<usize> {
         .unwrap_or_else(|| "This computer".into());
     let n = crate::viewers::subscribe().borrow().len();
     anyhow::ensure!(n > 0, "nobody is connected");
+    remember_chat(&from, true, &text);
+    crate::push::chat(&from, &text);
     let _ = shared.events.send(ServerMsg::Chat {
         from,
         sender: 0,
         text,
     });
     Ok(n)
+}
+
+/// One chat message, kept (in memory only) so the app can show the conversation.
+#[derive(Clone, serde::Serialize)]
+pub struct ChatLine {
+    pub at: u64,
+    pub from: String,
+    /// Sent from this computer, not by a viewer.
+    pub mine: bool,
+    pub text: String,
+}
+
+const CHAT_KEEP: usize = 200;
+static CHAT_LOG: Mutex<std::collections::VecDeque<ChatLine>> = Mutex::new(std::collections::VecDeque::new());
+
+fn remember_chat(from: &str, mine: bool, text: &str) {
+    let mut log = CHAT_LOG.lock().unwrap();
+    if log.len() == CHAT_KEEP {
+        log.pop_front();
+    }
+    log.push_back(ChatLine { at: crate::access::now(), from: from.into(), mine, text: text.into() });
+}
+
+/// The conversation so far, oldest first.
+pub fn chat_log() -> Vec<ChatLine> {
+    CHAT_LOG.lock().unwrap().iter().cloned().collect()
 }
 
 /// "Fit this device" (macOS): a virtual display in one viewer's shape, which the main
@@ -1425,6 +1492,41 @@ type MachinesCache = Arc<tokio::sync::Mutex<Option<(std::time::Instant, Vec<Mach
 const MACHINES_TTL: Duration = Duration::from_secs(15);
 
 /// Your tailnet devices and which of them run Glass, for the client's machine switcher.
+/// The web app's manifest, with a shortcut to each other machine running Glass (long-press
+/// the app icon: "Mac Studio").
+async fn manifest(web_dir: PathBuf, cache: MachinesCache, port: u16, wt_port: u16) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Ok(mut m) = tokio::fs::read(web_dir.join("manifest.webmanifest"))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|b| Ok(serde_json::from_slice::<serde_json::Value>(&b)?))
+    else {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    };
+    // Don't hold the manifest up on probing the tailnet.
+    let list = tokio::time::timeout(Duration::from_secs(3), machines(cache, port, wt_port)).await;
+    if let (Ok(Json(list)), Some(shortcuts)) = (list, m["shortcuts"].as_array_mut()) {
+        let others = list["machines"].as_array().cloned().unwrap_or_default();
+        for o in others.iter().filter(|o| o["glass"] == true && o["self"] != true).take(4) {
+            let dns = o["dns"].as_str().unwrap_or_default();
+            let id = match o["wt_port"].as_u64() {
+                Some(p) if p != wt_port as u64 => format!("{dns}:{p}"),
+                _ => dns.to_string(),
+            };
+            shortcuts.push(serde_json::json!({
+                "name": o["name"],
+                "url": format!("./?machine={id}"),
+                "icons": [{ "src": "icon-192.png", "sizes": "192x192" }],
+            }));
+        }
+    }
+    (
+        [(header::CONTENT_TYPE, HeaderValue::from_static("application/manifest+json"))],
+        Json(m),
+    )
+        .into_response()
+}
+
 async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_json::Value> {
     // Tests stand in other hosts for tailnet machines.
     if crate::testmode::enabled()

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 const REFRESH: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Status {
     pub version: String,
     pub pid: u32,

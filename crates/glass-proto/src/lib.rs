@@ -185,6 +185,8 @@ pub enum InputEvent {
     /// A game controller (browser Gamepad API, standard mapping). `kind`: 0 button
     /// (`value` 0..1), 1 axis (-1..1), 2 connected (`value` 1) or gone (0).
     Gamepad { pad: u8, kind: u8, index: u16, value: f32 },
+    /// Relative motion in display points (pointer lock: games, 3D apps).
+    MouseMoveBy { dx: f32, dy: f32 },
 }
 
 pub const GAMEPAD_BUTTON: u8 = 0;
@@ -210,6 +212,7 @@ impl InputEvent {
                 index: keycode,
                 value: a,
             },
+            10 => Self::MouseMoveBy { dx: a, dy: b },
             _ => return None,
         })
     }
@@ -228,6 +231,7 @@ impl InputEvent {
                 index,
                 value,
             } => (7 + kind.min(2), pad, index, value, 0.0),
+            Self::MouseMoveBy { dx, dy } => (10, 0, 0, dx, dy),
         };
         let mut out = [0u8; INPUT_EVENT_LEN];
         out[0] = kind;

@@ -9,68 +9,128 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
-  macos:
-    name: macOS host + end-to-end
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with: { node-version: 24 }
-      - run: cargo test --workspace
-      - run: cargo build --release -p glass-host
-      - run: node --test tests/unit/*.test.mjs
-      - name: Site deps (the e2e tests run its introducer locally)
-        working-directory: site
-        run: npm ci
-      - name: End-to-end (Chrome, glass --test)
-        working-directory: tests/e2e
-        run: |
-          npm ci
-          npx playwright install chrome || true
-          npx playwright test
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: e2e-macos
-          path: tests/e2e/test-results
+env:
+  CARGO_TERM_COLOR: always
+  # Builds once per OS in the `ci` profile (Cargo.toml): optimized, no LTO, parallel codegen.
+  CARGO_PROFILE: ci
 
-  linux:
-    name: Linux host + end-to-end
+jobs:
+  # Only run what a change can affect: docs and site edits skip the host builds.
+  changes:
     runs-on: ubuntu-latest
+    outputs:
+      host: ${{ steps.f.outputs.host }}
+      site: ${{ steps.f.outputs.site }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libpipewire-0.3-dev libclang-dev pkg-config nasm
+      - uses: dorny/paths-filter@v3
+        id: f
+        with:
+          filters: |
+            host:
+              - 'crates/**'
+              - 'web/**'
+              - 'tests/e2e/**'
+              - 'tests/unit/**'
+              - 'site/src/**'
+              - 'site/package*.json'
+              - 'Cargo.*'
+              - '.github/workflows/ci.yml'
+            site:
+              - 'site/**'
+              - 'web/**'
+              - 'tests/site/**'
+              - '.github/workflows/ci.yml'
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.host == 'true'
+    name: ${{ matrix.name }} build + unit
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, name: macOS }
+          - { os: ubuntu-latest, name: Linux }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev pkg-config nasm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+        with:
+          # One cache per OS, shared by every branch; only main writes it, so PRs start
+          # warm and the cache never fills up with branch copies.
+          shared-key: ci-${{ runner.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --workspace --profile $CARGO_PROFILE
+      - run: cargo build --profile $CARGO_PROFILE -p glass-host
+      - if: runner.os == 'Linux'
+        uses: actions/setup-node@v4
         with: { node-version: 24 }
-      - run: cargo test --workspace
-      - run: cargo build --release -p glass-host
+      - if: runner.os == 'Linux'
+        run: node --test tests/unit/*.test.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glass-${{ runner.os }}
+          path: target/ci/glass-host
+          retention-days: 1
+
+  e2e:
+    needs: build
+    name: ${{ matrix.name }} e2e ${{ matrix.shard }}/3
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        shard: [1, 2, 3]
+        include:
+          - { os: macos-latest, name: macOS }
+          - { os: ubuntu-latest, name: Linux }
+    runs-on: ${{ matrix.os }}
+    env:
+      GLASS_BIN: ${{ github.workspace }}/bin/glass-host
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: 'glass-${{ runner.os }}', path: bin }
+      - run: chmod +x bin/glass-host
+      # The binary links PipeWire (screen capture), which the runner doesn't have.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-0t64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            site/package-lock.json
+            tests/e2e/package-lock.json
       - name: Site deps (the e2e tests run its introducer locally)
         working-directory: site
-        run: npm ci
+        run: npm ci --no-audit --no-fund
       - name: End-to-end (Chrome, glass --test)
         working-directory: tests/e2e
         run: |
-          npm ci
-          npx playwright install --with-deps chrome
-          npx playwright test
+          npm ci --no-audit --no-fund
+          # The runners ship Google Chrome; install it only if this one doesn't.
+          if [ "$RUNNER_OS" = Linux ]; then command -v google-chrome || npx playwright install --with-deps chrome; else npx playwright install chrome || true; fi
+          npx playwright test --shard=${{ matrix.shard }}/3
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: e2e-linux
+          name: e2e-${{ runner.os }}-${{ matrix.shard }}
           path: tests/e2e/test-results
 
   site:
+    needs: changes
+    if: needs.changes.outputs.site == 'true'
     name: Site and API
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 24 }
+        with: { node-version: 24, cache: npm, cache-dependency-path: site/package-lock.json }
       - working-directory: site
-        run: npm ci
+        run: npm ci --no-audit --no-fund
       - run: node --test tests/site/site.test.mjs

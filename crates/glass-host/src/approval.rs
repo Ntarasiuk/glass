@@ -39,6 +39,7 @@ pub async fn ask(who: String) -> bool {
         answer: tx,
     });
     tracing::info!("asking whether to let in: {who}");
+    crate::push::connect_request(id, &who);
     // The on-screen prompt answers through the same queue as the CLI.
     let body = format!("{who}\nwants to see and control this computer.");
     tokio::spawn(async move {

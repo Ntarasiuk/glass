@@ -34,10 +34,12 @@ pub fn watch() {
         loop {
             match fetch_latest().await {
                 Some(v) => {
-                    if newer(&v, CURRENT) {
+                    let mut latest = LATEST.lock().unwrap();
+                    if newer(&v, CURRENT) && latest.as_deref() != Some(v.as_str()) {
                         tracing::info!("update available: {CURRENT} → {v}");
+                        crate::push::activity("Glass update ready", &format!("Version {v} is out (you have {CURRENT})."), "update");
                     }
-                    *LATEST.lock().unwrap() = Some(v);
+                    *latest = Some(v);
                 }
                 None => tracing::debug!("version check failed"),
             }
@@ -46,7 +48,7 @@ pub fn watch() {
     });
 }
 
-async fn fetch_latest() -> Option<String> {
+pub async fn fetch_latest() -> Option<String> {
     let url = format!("{}/version.json", base_url());
     let out = tokio::process::Command::new("curl")
         .args(["-fsS", "--max-time", "10", &url])

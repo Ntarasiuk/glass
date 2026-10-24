@@ -13,7 +13,7 @@ export const FLAG_REFRESH = 4;
 export const VIDEO_HEADER_LEN = 20;
 export const INPUT_EVENT_LEN = 12;
 
-export const Input = { MOVE: 1, DOWN: 2, UP: 3, SCROLL: 4, KEY_DOWN: 5, KEY_UP: 6, PAD_BUTTON: 7, PAD_AXIS: 8, PAD_CONNECTED: 9 };
+export const Input = { MOVE: 1, DOWN: 2, UP: 3, SCROLL: 4, KEY_DOWN: 5, KEY_UP: 6, PAD_BUTTON: 7, PAD_AXIS: 8, PAD_CONNECTED: 9, MOVE_BY: 10 };
 
 /** One mic packet: same layout as host audio (kind, channels, seq, capture time, s16 PCM). */
 export function micPacket(seq, captureUs, channels, pcm) {

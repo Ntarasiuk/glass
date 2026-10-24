@@ -30,6 +30,13 @@ pub fn has_accessibility() -> bool {
 
 /// kCGMouseEventClickState
 const CLICK_STATE: CGEventField = CGEventField(1);
+/// kCGMouseEventDeltaX / DeltaY
+const DELTA_X: CGEventField = CGEventField(4);
+const DELTA_Y: CGEventField = CGEventField(5);
+
+fn contains(b: CGRect, p: CGPoint) -> bool {
+    p.x >= b.origin.x && p.y >= b.origin.y && p.x < b.origin.x + b.size.width && p.y < b.origin.y + b.size.height
+}
 
 pub struct Injector {
     source: Option<CFRetained<CGEventSource>>,
@@ -40,6 +47,8 @@ pub struct Injector {
     flags: CGEventFlags,
     last_click: Option<(u8, std::time::Instant, CGPoint)>,
     click_count: i64,
+    /// Relative motion for the next move event (games read these, not the position).
+    delta: (i64, i64),
 }
 
 // CGEventSource and CGEventPost are safe to use from any thread; access is serialized by a Mutex.
@@ -56,6 +65,7 @@ impl Injector {
             flags: CGEventFlags(0),
             last_click: None,
             click_count: 1,
+            delta: (0, 0),
         }
     }
 
@@ -83,6 +93,23 @@ impl Injector {
                     self.click_count = self.next_click_count(button);
                 }
                 self.mouse(ty, cg_button);
+            }
+            InputEvent::MouseMoveBy { dx, dy } => {
+                // Stay on the display the pointer is on (or the first streamed one).
+                let b = self
+                    .bounds
+                    .iter()
+                    .find(|b| contains(**b, self.pos))
+                    .or(self.bounds.first())
+                    .copied();
+                let Some(b) = b else { return };
+                let to = CGPoint {
+                    x: (self.pos.x + dx as f64).clamp(b.origin.x, b.origin.x + b.size.width - 1.0),
+                    y: (self.pos.y + dy as f64).clamp(b.origin.y, b.origin.y + b.size.height - 1.0),
+                };
+                self.delta = (dx.round() as i64, dy.round() as i64);
+                self.move_to(to);
+                self.delta = (0, 0);
             }
             InputEvent::Scroll { dx, dy } => {
                 let ev = CGEvent::new_scroll_wheel_event2(
@@ -192,6 +219,10 @@ impl Injector {
     fn mouse(&self, ty: CGEventType, button: CGMouseButton) {
         let ev = CGEvent::new_mouse_event(self.source.as_deref(), ty, self.pos, button);
         CGEvent::set_integer_value_field(ev.as_deref(), CLICK_STATE, self.click_count);
+        if self.delta != (0, 0) {
+            CGEvent::set_integer_value_field(ev.as_deref(), DELTA_X, self.delta.0);
+            CGEvent::set_integer_value_field(ev.as_deref(), DELTA_Y, self.delta.1);
+        }
         self.post(ev);
     }
 

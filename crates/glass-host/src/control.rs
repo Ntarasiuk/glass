@@ -111,6 +111,11 @@ pub enum ClientMsg {
     /// "Fit this device": give the Mac a desktop of this size (the viewer's shape), or
     /// `null` to put its displays back.
     Fit { size: Option<[u32; 2]> },
+    /// Notifications on this device (Web Push), or new choices of what to hear about.
+    PushSubscribe { subscription: crate::push::NewSubscription },
+    PushUnsubscribe { endpoint: String },
+    /// This device's viewer is open: clear its badge.
+    PushSeen { endpoint: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,6 +145,9 @@ pub enum ServerMsg {
     Denied { msg: String },
     /// Something worth a (non-error) toast.
     Notice { msg: String },
+    /// Notifications are on for this device: `key` lets its service worker answer from a
+    /// notification (owner only). `None`: subscribing failed.
+    Push { key: Option<String>, owner: bool },
     /// Asks the browser to create (`mode: create`) or use (`get`) a passkey.
     Passkey(crate::passkey::Challenge),
     Chat {
@@ -250,6 +258,8 @@ pub struct Features {
     pub forward_ports: Vec<u16>,
     /// Sharp text can add lossless (full-colour, 4:4:4) pictures of a still screen.
     pub lossless: bool,
+    /// The key browsers subscribe to notifications with (VAPID, base64url).
+    pub push: Option<String>,
 }
 
 /// Header that follows the `STREAM_FILE` tag in either direction.
