@@ -20,6 +20,7 @@ mod mcp;
 mod media;
 mod mic;
 mod notify;
+mod now_playing;
 mod oidc;
 mod passkey;
 mod posture;

@@ -787,6 +787,7 @@ function onControl(msg) {
       chat.setAvailable(true);
       files.setAvailable(Boolean(msg.features?.browse));
       restarting = undefined;
+      onNowPlaying(null); // the host says what it's playing right after welcome
       push.connected({ key: msg.features?.push, isOwner: Boolean(msg.perms ? msg.perms.owner : !guest) }).then(() => {
         // Point out the new menu until it's been opened once (notifications are off).
         if (push.state === 'off' && storage((s) => s.getItem('glass.deviceSeen')) !== '1') ui.setDeviceHint(true);
@@ -847,6 +848,9 @@ function onControl(msg) {
         showStatus('connecting', 'Connecting', machineName(currentHost));
         worker.postMessage({ type: 'askAgain' });
       } } });
+      break;
+    case 'nowPlaying':
+      onNowPlaying(msg.info);
       break;
     case 'micReady':
       micReady = true;
@@ -1447,28 +1451,67 @@ addEventListener('online', () => worker.postMessage({ type: 'wake' }));
 addEventListener('pagehide', () => worker.postMessage({ type: 'leave' }));
 addEventListener('pageshow', (e) => e.persisted && worker.postMessage({ type: 'wake' }));
 
-// The Mac's sound in the system's media controls (lock screen, Control Center, media keys):
-// play and pause turn Glass's audio on and off.
+// The browser's media controls (Chrome's media hub, the lock screen, media keys) show what
+// the computer is playing (its title, artist and artwork) and control it there. Without a
+// track they show the computer, and play/pause turn Glass's sound on and off.
+let nowPlaying = null; // { title, artist, album, playing, rate, duration, elapsed, at }
+let artworkUrl;
+function onNowPlaying(info) {
+  if (info?.artwork) {
+    if (artworkUrl) URL.revokeObjectURL(artworkUrl);
+    const bytes = Uint8Array.from(atob(info.artwork), (c) => c.charCodeAt(0));
+    artworkUrl = URL.createObjectURL(new Blob([bytes], { type: info.artworkType || 'image/jpeg' }));
+  } else if (info && info.artworkId === '' && artworkUrl) {
+    URL.revokeObjectURL(artworkUrl);
+    artworkUrl = undefined;
+  }
+  nowPlaying = info && (info.title || info.artist) ? { ...info, receivedAt: Date.now() } : null;
+  setMediaSession();
+}
+
 function setMediaSession() {
   if (!('mediaSession' in navigator)) return;
-  navigator.mediaSession.metadata = new MediaMetadata({
+  const ms = navigator.mediaSession;
+  const handle = (action, fn) => { try { ms.setActionHandler(action, fn); } catch {} };
+  const np = nowPlaying;
+  if (np) {
+    ms.metadata = new MediaMetadata({
+      title: np.title ?? '',
+      artist: np.artist ?? '',
+      album: np.album ?? '',
+      artwork: artworkUrl ? [{ src: artworkUrl, sizes: '600x600' }] : [{ src: 'icon-512.png', sizes: '512x512', type: 'image/png' }],
+    });
+    ms.playbackState = np.playing ? 'playing' : 'paused';
+    if (np.duration > 0 && np.elapsed != null) {
+      // Where it is now: the reported position, moved on by the time since it was reported.
+      const since = np.playing ? (Date.now() - (np.at ?? np.receivedAt)) / 1000 * (np.rate || 1) : 0;
+      try {
+        ms.setPositionState({ duration: np.duration, position: Math.min(np.duration, Math.max(0, np.elapsed + since)), playbackRate: np.rate > 0 ? np.rate : 1 });
+      } catch {}
+    }
+    const media = (action, position) => () => control({ t: 'media', action, ...(position != null && { position }) });
+    handle('play', media('play'));
+    handle('pause', media('pause'));
+    handle('nexttrack', media('next'));
+    handle('previoustrack', media('previous'));
+    handle('seekto', (d) => d.seekTime != null && control({ t: 'media', action: 'seek', position: d.seekTime }));
+    return;
+  }
+  ms.metadata = new MediaMetadata({
     title: machineName(currentHost),
     artist: 'Glass',
     artwork: [{ src: 'icon-512.png', sizes: '512x512', type: 'image/png' }],
   });
-  const set = (on) => {
-    navigator.mediaSession.playbackState = on ? 'playing' : 'paused';
-  };
-  set(true);
+  const running = audioContext?.state === 'running';
+  ms.playbackState = running ? 'playing' : 'paused';
   for (const [action, on] of [['play', true], ['pause', false]]) {
-    try {
-      navigator.mediaSession.setActionHandler(action, () => {
-        if (on === (audioContext?.state === 'running')) return;
-        toggleAudio();
-        set(on);
-      });
-    } catch {}
+    handle(action, () => {
+      if (on === (audioContext?.state === 'running')) return;
+      toggleAudio();
+      ms.playbackState = on ? 'playing' : 'paused';
+    });
   }
+  for (const action of ['nexttrack', 'previoustrack', 'seekto']) handle(action, null);
 }
 
 // A new network (Wi-Fi to cellular, a VPN coming up): reconnect now instead of waiting.

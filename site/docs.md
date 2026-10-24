@@ -176,7 +176,7 @@ The toolbar (top right) groups its buttons: machines and displays, keyboard, sou
 - **Send files to Mac:** uploads to `~/Downloads` (drag and drop also works, folders included).
 - **Get files from Mac:** opens a file chooser on the Mac's screen; chosen files arrive with a Save button.
 - **Files** (the computer's owner only): browse the home folder from the viewer, with previews of images, PDFs and videos. Filter as you type, download (or drag a file onto your desktop in Chrome), upload into the folder you're in (button, or drop files and folders on it), make folders, rename (F2) and move to the Trash (Delete). Arrow keys, Enter to open, Backspace to go up.
-- **Audio:** turns Mac system audio on or off for this device.
+- **Audio:** turns Mac system audio on or off for this device. Your browser's media controls (Chrome's media hub, the iPhone or iPad lock screen, media keys) show what the computer is playing, with its artwork, and play, pause, skip and seek it there.
 - **Fullscreen** (hidden when running as a Home Screen app).
 - **… (More):** **Stats** (latency, frame rate, bitrate; Ctrl+Shift+H) for everyone, and for the computer's owner the privacy screen, restarts and the console.
 - **Hide toolbar** (last button): slides it away for an unobstructed screen; the small tab at the top brings it back. Remembered.

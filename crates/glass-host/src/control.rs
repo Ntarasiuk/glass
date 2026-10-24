@@ -79,6 +79,13 @@ pub enum ClientMsg {
     /// Install the Mac's microphone driver (BlackHole): its installer opens on the Mac's
     /// screen. Owner only.
     MicInstall,
+    /// Control what the computer is playing: play, pause, toggle, next, previous, or seek
+    /// (to `position` seconds).
+    Media {
+        action: String,
+        #[serde(default)]
+        position: Option<f64>,
+    },
     /// A shell on the host. Owner only.
     Term(crate::terminal::ClientTerm),
     /// Start or stop recording this session's video on the host. Owner only.
@@ -191,6 +198,9 @@ pub enum ServerMsg {
     FilesThumb { path: String, data: Option<String> },
     /// The microphone driver just got installed: the mic works now.
     MicReady,
+    /// What the computer is playing (title, artist, album, playing, duration, elapsed,
+    /// artwork as base64 when it changes); `{}` without a title when nothing is.
+    NowPlaying { info: serde_json::Value },
     /// Notifications are on for this device: `key` lets its service worker answer from a
     /// notification (owner only). `None`: subscribing failed.
     Push { key: Option<String>, owner: bool },

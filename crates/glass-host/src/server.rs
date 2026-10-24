@@ -100,6 +100,8 @@ pub async fn run(
     };
     info!("WebTransport listening on udp/{wt_port}");
     crate::remote::watch(wt_port);
+    // What the computer is playing, for viewers' media controls (while anyone is connected).
+    crate::now_playing::watch(shared.events.clone());
     // A mic left on when the host last stopped left BlackHole as the default input.
     crate::mic::recover();
 
@@ -782,6 +784,9 @@ async fn control(
         let path = Some(r.path.display().to_string());
         control::write_json(&mut send, &ServerMsg::Recording { on: true, path }).await?;
     }
+    if let Some(info) = crate::now_playing::current() {
+        control::write_json(&mut send, &ServerMsg::NowPlaying { info }).await?;
+    }
     for msg in crate::computer::snapshot() {
         control::write_json(&mut send, &msg).await?;
     }
@@ -1143,6 +1148,8 @@ async fn control(
                     .events
                     .send(ServerMsg::AnnotateClear { sender: session_id });
             }
+            ClientMsg::Media { .. } if !perms.input => refuse("This link is view only."),
+            ClientMsg::Media { action, position } => crate::now_playing::command(&action, position),
             ClientMsg::MicInstall if guest => refuse(OWNER_ONLY),
             ClientMsg::MicInstall => {
                 let tx = ctx.ctl_tx.clone();

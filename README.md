@@ -60,7 +60,7 @@ And the viewer is just a web page. No app to install, no account to create.
 
 ### Between your devices
 - **Your microphone on the computer.** Talk into its apps from your iPad or phone. On a Mac it comes in as Glass Microphone, our own small audio driver (`glass mic install`, one password); on Linux through PipeWire or PulseAudio, nothing to install.
-- **Sound, clipboard, files.** System audio, copy and paste both ways (text, rich text and images), and direct transfer of files and whole folders.
+- **Sound, clipboard, files.** System audio (your browser's media controls show what's playing, with artwork, and control it), copy and paste both ways (text, rich text and images), and direct transfer of files and whole folders.
 - **A file browser.** Browse the computer's folders with previews, download, upload into any folder, rename and move to the Trash (owner only).
 - **Share to your computer.** Share photos, files or links to Glass from other apps.
 
