@@ -17,6 +17,7 @@ import { createThumbs } from './thumbs.js';
 import { createAgent } from './agent.js';
 import { createPush } from './push.js';
 import { createDevice } from './device.js';
+import { createFiles } from './files.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -196,7 +197,8 @@ let sharpWanted = storage((s) => s.getItem(SHARP_KEY)) === '1';
 let sharpMode = 'off'; // what the host is doing: 'off', 'sharp' or '4:2:2'
 let deniedMsg; // why the host last turned us away
 
-// Resolves with the next clipboard text the Mac reports (used for Cmd+C / Cmd+X).
+// Resolves with the next clipboard the Mac reports (used for Cmd+C / Cmd+X):
+// { text, html?, image } where `image` says there's one to fetch (macImage).
 let clipboardWaiters = [];
 let lastMacClipboard;
 function nextClipboard(timeoutMs) {
@@ -212,6 +214,61 @@ function nextClipboard(timeoutMs) {
       }
     }, timeoutMs);
   });
+}
+
+// The Mac clipboard's image, fetched when needed (it can be several MB).
+const IMAGE_WAIT_MS = 8000;
+let imageWaiters = [];
+function macImage() {
+  return new Promise((resolve, reject) => {
+    imageWaiters.push(resolve);
+    control({ t: 'clipboardImage' });
+    setTimeout(() => reject(new Error('the image never came')), IMAGE_WAIT_MS);
+  });
+}
+
+/**
+ * After ⌘C copied rich text or an image on the Mac (the text is already on this device's
+ * clipboard): put the whole thing there. Browsers that want a tap for that (Safari) get a
+ * Copy button.
+ */
+async function copyRich(clip) {
+  if (!clip.html && !clip.image) return;
+  const items = { 'text/plain': new Blob([clip.text], { type: 'text/plain' }) };
+  if (clip.html) items['text/html'] = new Blob([clip.html], { type: 'text/html' });
+  if (clip.image) {
+    try {
+      items['image/png'] = await macImage();
+    } catch (e) {
+      log('warn', `clipboard image: ${e.message}`);
+    }
+  }
+  const write = () => navigator.clipboard.write([new ClipboardItem(items)]);
+  try {
+    await write();
+    log('info', 'rich clipboard copied', { types: Object.keys(items) });
+  } catch {
+    // Text is there already; only an image is worth asking for a tap.
+    if (!items['image/png']) return;
+    ui.toast({
+      text: `Image copied on ${machineName(currentHost)}`,
+      icon: 'file',
+      timeout: 10_000,
+      action: { label: 'Copy here', run: () => write().catch((e) => ui.toast({ text: `Couldn't copy the image: ${e.message ?? e}`, kind: 'error' })) },
+    });
+  }
+}
+
+/** A clipboard from this device to the Mac; with `paste`, the Mac pastes it too. */
+const MAX_CLIPBOARD_IMAGE = 8 << 20; // the host's limit
+function sendClip({ text = '', html, image }, paste = false) {
+  if (image?.size > MAX_CLIPBOARD_IMAGE) {
+    ui.toast({ text: 'That image is too big to paste on the Mac (over 8 MB). Send it as a file instead.', kind: 'error' });
+    image = undefined;
+    if (!text && !html) return;
+  }
+  if (image) worker.postMessage({ type: 'sendClipboard', clip: { text, html, image, paste } });
+  else control({ t: 'clipboard', text, ...(html && { html }), paste });
 }
 
 const statusEl = document.getElementById('status');
@@ -231,6 +288,8 @@ const input = attachInput({
   send,
   control,
   nextClipboard,
+  onMacCopy: (clip) => copyRich(clip),
+  onPaste: (clip) => sendClip(clip, true),
   onLocalShortcut: (code) => (code === 'KeyF' ? toggleFullscreen() : toggleStats()),
   swapCmdOption: storage((s) => s.getItem(SWAP_KEY)) === '1',
   ctrlAsCmd,
@@ -342,6 +401,7 @@ const ui = createUI({
     onConnectionStatus('restarting');
   },
   onTerminal: () => terminal.toggle(),
+  onExtend: (on) => setExtended(on),
   onOpenDevice: () => {
     storage((s) => s.setItem('glass.deviceSeen', '1'));
     ui.setDeviceHint(false);
@@ -413,6 +473,24 @@ function applyKeyboard(hostOs) {
 const chat = createChat({ onSend: (text) => control({ t: 'chat', text }), toast: (o) => ui.toast(o) });
 chat.setAvailable(false);
 
+const files = createFiles({
+  control,
+  log,
+  toast: (o) => ui.toast(o),
+  upload: (list, dir) => uploadFiles(list, dir),
+  // A plain browser download, from this page's own host (not over remote access).
+  download: (url, name) => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+  },
+  rawUrl: (ticket, path) =>
+    ticket && !remoteKey && currentHost === homeHost
+      ? `${location.origin}/files/raw?t=${encodeURIComponent(ticket)}&path=${encodeURIComponent(path)}`
+      : undefined,
+});
+
 const push = createPush({
   control,
   log,
@@ -437,6 +515,7 @@ const device = createDevice({
   input,
   screens,
   streams: () => (rtpVideo ? videos : canvases).slice(0, streamCount),
+  sendClip: (clip) => sendClip(clip),
   displays: () => displays,
   onPause: (away) => worker.postMessage({ type: 'visible', visible: !away && document.visibilityState === 'visible' }),
   onPressure: (scale) => {
@@ -518,6 +597,8 @@ worker.postMessage({
   pass: savedPass,
   rtcPort,
   device: deviceLabel(),
+  // A wide-colour screen: a Display P3 stream is drawn in P3, not clipped to sRGB.
+  wideColor: matchMedia('(color-gamut: p3)').matches,
   decoderStep: Number(storage((s) => s.getItem(DECODER_STEP_KEY)) ?? 0),
 }, rtcPort ? [rtcPort] : []);
 armMachineTimeout();
@@ -656,6 +737,10 @@ worker.onmessage = ({ data }) => {
     case 'fileReceived':
       onFileReceived(data);
       break;
+    case 'clipboardImage':
+      for (const w of imageWaiters) w(data.image);
+      imageWaiters = [];
+      break;
     case 'audio':
       ui.setAudioOn(data.on);
       if (!data.on) audioContext?.suspend();
@@ -674,6 +759,12 @@ function onControl(msg) {
       clearTimeout(machineTimer);
       displays = msg.displays;
       applyBranding(msg);
+      // Quick support (`glass support`): this viewer is someone helping.
+      if (msg.features?.support) {
+        const who = msg.name ?? 'them';
+        document.title = `Helping ${who}`;
+        ui.toast({ text: `You're helping ${who}. They can end this any time.`, timeout: 6000 });
+      }
       // Nothing being streamed (e.g. capture failed): fall back to the first display.
       if (!msg.streams.length && displays.length) control({ t: 'selectDisplay', id: displays[0].id });
       ui.setAudioAvailable(msg.audio);
@@ -685,13 +776,18 @@ function onControl(msg) {
       // Remote: other machines aren't reachable from here, so no machines menu either.
       ui.setGuest(guest || Boolean(remoteKey));
       ui.setCanFit(!guest);
+      // A new session has no second display (the host removed it when the last one ended).
+      extended = undefined;
+      ui.setExtend({ available: Boolean(msg.features?.extend && (msg.perms ? msg.perms.owner : !guest)), on: false });
       session = msg.session ?? 0;
       perms = msg.perms ?? perms;
       features = msg.features ?? {};
       inputAllowed = perms.input;
       ui.setPerms(perms);
       chat.setAvailable(true);
+      files.setAvailable(Boolean(msg.features?.browse));
       restarting = undefined;
+      onNowPlaying(null); // the host says what it's playing right after welcome
       push.connected({ key: msg.features?.push, isOwner: Boolean(msg.perms ? msg.perms.owner : !guest) }).then(() => {
         // Point out the new menu until it's been opened once (notifications are off).
         if (push.state === 'off' && storage((s) => s.getItem('glass.deviceSeen')) !== '1') ui.setDeviceHint(true);
@@ -717,7 +813,11 @@ function onControl(msg) {
         const canInput = msg.perms?.input ?? true;
         gamepads.setEnabled(Boolean(msg.features?.gamepad) && canInput);
         gamepads.resend();
-        ui.setMicAvailable(Boolean(msg.features?.mic) && canInput);
+        // On a Mac without its driver yet, the owner still gets the button: it offers to
+        // install it.
+        micReady = Boolean(msg.features?.mic);
+        micInstallable = Boolean(msg.features?.mic_install);
+        ui.setMicAvailable((micReady || micInstallable) && canInput);
         if (!canInput && micStream) stopMic();
       }
       terminal.reset();
@@ -749,11 +849,22 @@ function onControl(msg) {
         worker.postMessage({ type: 'askAgain' });
       } } });
       break;
+    case 'nowPlaying':
+      onNowPlaying(msg.info);
+      break;
+    case 'micReady':
+      micReady = true;
+      ui.toast({ text: `The microphone works on ${machineName(currentHost)} now.`, timeout: 6000, action: { label: 'Turn on', run: () => toggleMic() } });
+      break;
     case 'notice':
       ui.toast({ text: msg.msg });
       break;
     case 'push':
       push.onMessage(msg);
+      break;
+    case 'files':
+    case 'filesThumb':
+      files.onMessage(msg);
       break;
     case 'chat':
       if (msg.sender !== session) chat.receive(msg);
@@ -792,15 +903,16 @@ function onControl(msg) {
       offerUpdate(msg);
       break;
     case 'clipboard':
-      log('info', 'mac clipboard changed', { length: msg.text.length });
-      lastMacClipboard = msg.text;
-      for (const w of clipboardWaiters) w.resolve(msg.text);
+      log('info', 'mac clipboard changed', { length: msg.text.length, html: Boolean(msg.html), image: Boolean(msg.image) });
+      lastMacClipboard = { text: msg.text, html: msg.html, image: Boolean(msg.image) };
+      for (const w of clipboardWaiters) w.resolve(lastMacClipboard);
       clipboardWaiters = [];
       break;
     case 'term':
       terminal.onMessage(msg);
       break;
     case 'fileSaved':
+      files.onFileSaved();
       ui.toast({ text: `Saved on ${machineName(currentHost)}: ${msg.path.replace(/^\/(Users|home)\/[^/]+/, '~')}`, icon: 'file' });
       break;
     case 'passkey':
@@ -1037,6 +1149,27 @@ function sendViewport() {
   control({ t: 'viewport', streams });
 }
 
+// "Use as a second display": the host adds a display in this screen's shape beside its main
+// one and streams it here. `extended` keeps what was shown before, to go back to it.
+let extended;
+function setExtended(on) {
+  if (on && !extended) {
+    extended = { before: streamIds.length > 1 ? 'all' : streamIds[0] };
+    const dpr = devicePixelRatio;
+    const size = [Math.round(innerWidth * dpr), Math.round(innerHeight * dpr)];
+    control({ t: 'extend', size, hidpi: dpr >= 1.5 });
+    log('info', 'second display', { size, dpr });
+  } else if (!on && extended) {
+    const { before } = extended;
+    extended = undefined;
+    control({ t: 'extend', size: null });
+    if (before === 'all') control({ t: 'showAll' });
+    else if (before != null) control({ t: 'selectDisplay', id: before });
+    log('info', 'second display off');
+  }
+  ui.setExtend({ on: Boolean(extended) });
+}
+
 function setResolution(mode) {
   const wasFit = resolutionMode.startsWith('fit:');
   resolutionMode = mode;
@@ -1126,8 +1259,9 @@ function offerUpdate({ current, version }) {
   });
 }
 
-function uploadFiles(files) {
-  for (const file of files) worker.postMessage({ type: 'sendFile', file });
+/** Sends files to the computer: into Downloads, or `dir` (the file browser's folder). */
+function uploadFiles(list, dir) {
+  for (const file of list) worker.postMessage({ type: 'sendFile', file, dir });
 }
 
 function onFileProgress({ id, name, done, total, direction }) {
@@ -1199,7 +1333,7 @@ function toggleAudio() {
   if (!audioContext) {
     // Must be created and resumed inside the tap: Safari can start it suspended.
     // 'playback' keeps it audible when the iPad's silent mode is on.
-    if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    setAudioSession(true);
     audioContext = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     audioContext.resume();
     audioContext.audioWorklet
@@ -1220,9 +1354,26 @@ function toggleAudio() {
 }
 
 // The viewer's microphone, as a microphone on the host.
+let micReady = false;
+let micInstallable = false;
 async function toggleMic() {
   if (micStream) return stopMic();
+  if (!micReady) {
+    ui.toast({
+      text: `Your microphone on ${machineName(currentHost)} needs a small audio driver. Installing it asks for that computer's password, on its screen.`,
+      timeout: 0,
+      action: {
+        label: 'Install',
+        run: () => {
+          control({ t: 'micInstall' });
+          ui.toast({ text: 'Asking for the password on the computer\'s screen. The mic is ready once it\'s typed.', timeout: 8000 });
+        },
+      },
+    });
+    return;
+  }
   try {
+    setAudioSession(Boolean(audioContext), true);
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
@@ -1238,14 +1389,23 @@ async function toggleMic() {
   } catch (e) {
     micStream?.getTracks().forEach((t) => t.stop());
     micStream = undefined;
+    setAudioSession();
     ui.toast({ text: `Couldn't use the microphone: ${e.message ?? e}`, kind: 'error' });
     log('error', `microphone failed: ${e.message ?? e}`);
   }
 }
 
+// Safari (iOS/iPadOS): 'playback' keeps the Mac's sound audible in silent mode but blocks
+// the microphone; while the mic is on it needs 'play-and-record'. Set before each start.
+function setAudioSession(playing = Boolean(audioContext), recording = Boolean(micStream)) {
+  if (!navigator.audioSession) return;
+  navigator.audioSession.type = recording ? 'play-and-record' : playing ? 'playback' : 'auto';
+}
+
 function stopMic() {
   micStream?.getTracks().forEach((t) => t.stop());
   micStream = undefined;
+  setAudioSession();
   worker.postMessage({ type: 'mic', on: false });
   ui.setMicOn(false);
   log('info', 'microphone off');
@@ -1291,28 +1451,67 @@ addEventListener('online', () => worker.postMessage({ type: 'wake' }));
 addEventListener('pagehide', () => worker.postMessage({ type: 'leave' }));
 addEventListener('pageshow', (e) => e.persisted && worker.postMessage({ type: 'wake' }));
 
-// The Mac's sound in the system's media controls (lock screen, Control Center, media keys):
-// play and pause turn Glass's audio on and off.
+// The browser's media controls (Chrome's media hub, the lock screen, media keys) show what
+// the computer is playing (its title, artist and artwork) and control it there. Without a
+// track they show the computer, and play/pause turn Glass's sound on and off.
+let nowPlaying = null; // { title, artist, album, playing, rate, duration, elapsed, at }
+let artworkUrl;
+function onNowPlaying(info) {
+  if (info?.artwork) {
+    if (artworkUrl) URL.revokeObjectURL(artworkUrl);
+    const bytes = Uint8Array.from(atob(info.artwork), (c) => c.charCodeAt(0));
+    artworkUrl = URL.createObjectURL(new Blob([bytes], { type: info.artworkType || 'image/jpeg' }));
+  } else if (info && info.artworkId === '' && artworkUrl) {
+    URL.revokeObjectURL(artworkUrl);
+    artworkUrl = undefined;
+  }
+  nowPlaying = info && (info.title || info.artist) ? { ...info, receivedAt: Date.now() } : null;
+  setMediaSession();
+}
+
 function setMediaSession() {
   if (!('mediaSession' in navigator)) return;
-  navigator.mediaSession.metadata = new MediaMetadata({
+  const ms = navigator.mediaSession;
+  const handle = (action, fn) => { try { ms.setActionHandler(action, fn); } catch {} };
+  const np = nowPlaying;
+  if (np) {
+    ms.metadata = new MediaMetadata({
+      title: np.title ?? '',
+      artist: np.artist ?? '',
+      album: np.album ?? '',
+      artwork: artworkUrl ? [{ src: artworkUrl, sizes: '600x600' }] : [{ src: 'icon-512.png', sizes: '512x512', type: 'image/png' }],
+    });
+    ms.playbackState = np.playing ? 'playing' : 'paused';
+    if (np.duration > 0 && np.elapsed != null) {
+      // Where it is now: the reported position, moved on by the time since it was reported.
+      const since = np.playing ? (Date.now() - (np.at ?? np.receivedAt)) / 1000 * (np.rate || 1) : 0;
+      try {
+        ms.setPositionState({ duration: np.duration, position: Math.min(np.duration, Math.max(0, np.elapsed + since)), playbackRate: np.rate > 0 ? np.rate : 1 });
+      } catch {}
+    }
+    const media = (action, position) => () => control({ t: 'media', action, ...(position != null && { position }) });
+    handle('play', media('play'));
+    handle('pause', media('pause'));
+    handle('nexttrack', media('next'));
+    handle('previoustrack', media('previous'));
+    handle('seekto', (d) => d.seekTime != null && control({ t: 'media', action: 'seek', position: d.seekTime }));
+    return;
+  }
+  ms.metadata = new MediaMetadata({
     title: machineName(currentHost),
     artist: 'Glass',
     artwork: [{ src: 'icon-512.png', sizes: '512x512', type: 'image/png' }],
   });
-  const set = (on) => {
-    navigator.mediaSession.playbackState = on ? 'playing' : 'paused';
-  };
-  set(true);
+  const running = audioContext?.state === 'running';
+  ms.playbackState = running ? 'playing' : 'paused';
   for (const [action, on] of [['play', true], ['pause', false]]) {
-    try {
-      navigator.mediaSession.setActionHandler(action, () => {
-        if (on === (audioContext?.state === 'running')) return;
-        toggleAudio();
-        set(on);
-      });
-    } catch {}
+    handle(action, () => {
+      if (on === (audioContext?.state === 'running')) return;
+      toggleAudio();
+      ms.playbackState = on ? 'playing' : 'paused';
+    });
   }
+  for (const action of ['nexttrack', 'previoustrack', 'seekto']) handle(action, null);
 }
 
 // A new network (Wi-Fi to cellular, a VPN coming up): reconnect now instead of waiting.

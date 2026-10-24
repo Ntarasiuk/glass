@@ -23,6 +23,7 @@ self.addEventListener('unhandledrejection', (e) =>
 const STREAM_INPUT = 0x49; // 'I'
 const STREAM_FILE = 0x46; // 'F'
 const STREAM_LOSSLESS = 0x50; // 'P': a lossless picture (sharp text)
+const STREAM_CLIPBOARD = 0x43; // 'C': a clipboard with an image, either way
 const encoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -33,6 +34,7 @@ let device; // e.g. "Safari on iPad", shown on the host
 let rtcPort; // remote access: WebRTC over the main thread instead of WebTransport
 let link; // magic link code; traded for a guest pass on first sign-in
 let pass; // guest pass
+let wideColor = false; // the screen shows Display P3: draw video in it
 let codecs = ['h264']; // what this browser decodes, offered in hello (HEVC if hardware)
 let rejected = false;
 let controlWriter;
@@ -77,6 +79,7 @@ function videoStream(index) {
 self.onmessage = async ({ data }) => {
   if (data.type === 'init') {
     ({ url, certHash, token, link, pass, rtcPort, device } = data);
+    wideColor = Boolean(data.wideColor);
     setDecoderStep(data.decoderStep ?? 0);
     await probeDecoders(log);
     codecs = await probeCodecs();
@@ -84,7 +87,7 @@ self.onmessage = async ({ data }) => {
     setInterval(tick, 1000);
     run();
   } else if (data.type === 'canvas') {
-    videoStream(data.stream).setCanvas(data.canvas);
+    videoStream(data.stream).setCanvas(data.canvas, wideColor);
   } else if (data.type === 'streams') {
     // Streams the host no longer sends give up their decoders.
     for (const s of streams.slice(data.count)) s?.release();
@@ -93,7 +96,9 @@ self.onmessage = async ({ data }) => {
   } else if (data.type === 'control') {
     sendControl(data.msg);
   } else if (data.type === 'sendFile') {
-    sendFile(data.file).catch((e) => log('error', `send file failed: ${e.message ?? e}`));
+    sendFile(data.file, data.dir).catch((e) => log('error', `send file failed: ${e.message ?? e}`));
+  } else if (data.type === 'sendClipboard') {
+    sendClipboard(data.clip).catch((e) => log('error', `send clipboard failed: ${e.message ?? e}`));
   } else if (data.type === 'switchHost') {
     url = data.url;
     rejected = false;
@@ -338,10 +343,11 @@ async function readControl(readable) {
   }
 }
 
-async function sendFile(file) {
+async function sendFile(file, dir) {
   if (!transport) throw new Error('not connected');
   const id = `${Date.now()}-${file.name}`;
-  const header = encoder.encode(JSON.stringify({ name: file.name, size: file.size }));
+  // `dir`: the file browser's folder (relative to the home folder) instead of Downloads.
+  const header = encoder.encode(JSON.stringify({ name: file.name, size: file.size, ...(dir != null && { dir }) }));
   const prefix = new Uint8Array(5 + header.length);
   prefix[0] = STREAM_FILE;
   new DataView(prefix.buffer).setUint32(1, header.length, true);
@@ -382,6 +388,34 @@ async function receiveStream(readable) {
   const tag = await r.read(1);
   if (tag?.[0] === STREAM_FILE) return receiveFile(r);
   if (tag?.[0] === STREAM_LOSSLESS) return receiveLossless(r);
+  if (tag?.[0] === STREAM_CLIPBOARD) return receiveClipboard(r);
+}
+
+/** The host clipboard's image, asked for with `clipboardImage`: header, then a PNG. */
+async function receiveClipboard(r) {
+  const len = await r.read(4);
+  const header = JSON.parse(textDecoder.decode(await r.read(new DataView(len.buffer).getUint32(0, true))));
+  const chunks = [];
+  for await (const chunk of r.rest()) chunks.push(chunk);
+  const image = new Blob(chunks, { type: header.mime || 'image/png' });
+  if (image.size !== header.size) throw new Error(`clipboard image: got ${image.size} of ${header.size} bytes`);
+  self.postMessage({ type: 'clipboardImage', image });
+}
+
+/** A clipboard with an image, to the host (and pasted there with `paste`). */
+async function sendClipboard({ text = '', html, image, paste = false }) {
+  if (!transport) throw new Error('not connected');
+  const header = encoder.encode(JSON.stringify({ text, html, mime: image.type, size: image.size, paste }));
+  const prefix = new Uint8Array(5 + header.length);
+  prefix[0] = STREAM_CLIPBOARD;
+  new DataView(prefix.buffer).setUint32(1, header.length, true);
+  prefix.set(header, 5);
+  const stream = await transport.createUnidirectionalStream();
+  const writer = stream.getWriter();
+  await writer.write(prefix);
+  await writer.write(new Uint8Array(await image.arrayBuffer()));
+  await writer.close();
+  log('info', 'clipboard image sent', { size: image.size, type: image.type, paste });
 }
 
 /** A lossless picture of part of a stream: header (x, y, w, h of fw × fh), then a PNG. */

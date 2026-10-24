@@ -133,6 +133,23 @@ impl GlassApp {
                 }),
                 cx,
             ),
+            ui::row(
+                "Microphone from your devices",
+                match &snap.mic {
+                    Some(name) => format!("Ready: a viewer's mic plays into {name}, the Mac's default input while it's on."),
+                    None => "Needs Glass Microphone, a small audio driver. Installing asks for your Mac's password once.".into(),
+                },
+                match &snap.mic {
+                    Some(_) => ui::status("Ready", theme.success).into_any_element(),
+                    None => Button::new("install-mic")
+                        .small()
+                        .icon(I::Download)
+                        .label("Install…")
+                        .on_click(|_, window, cx| act(window, cx, || crate::mic::install(crate::mic::Ask::Dialog)))
+                        .into_any_element(),
+                },
+                cx,
+            ),
             self.field("relay", "Your own relay", "A self-hosted server for reaching from anywhere.", cx),
             self.field("forward-ports", "Forwarded ports", "Local web apps your devices may open through Glass.", cx),
         ];

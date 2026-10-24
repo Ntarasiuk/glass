@@ -34,7 +34,7 @@ test.describe('apps', () => {
     // The window is checked, and not listed as a display.
     await toolbarClick(page, 'btn-displays');
     await expect(panel.locator('button[aria-checked="true"]', { hasText: 'Notes' })).toBeVisible();
-    await expect(panel.locator('button', { hasText: 'display' })).toHaveCount(3); // Left, Right, All
+    await expect(panel.locator('button', { hasText: /^(Left|Right|All) display/ })).toHaveCount(3);
     await page.keyboard.press('Escape');
 
     // Input lands on stream 0, which now carries the window.

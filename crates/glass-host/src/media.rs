@@ -77,6 +77,13 @@ pub trait VideoSource: Send + Sync {
     fn rebalance(&self) {}
     /// Encodes each stream at this width (`None` = native), from what viewers show.
     fn set_target_widths(&self, _widths: &[Option<u32>]) {}
+    /// Frames per second viewers want (crate::refresh); capped by each display's refresh.
+    fn set_max_fps(&self, _fps: u32) {}
+    /// The colour profile of a stream's pictures when it isn't sRGB (Display P3), for
+    /// tagging lossless pictures.
+    fn icc(&self, _stream: u8) -> Option<std::sync::Arc<Vec<u8>>> {
+        None
+    }
     /// Can this source stream single windows?
     fn supports_windows(&self) -> bool {
         false
@@ -145,7 +152,15 @@ pub trait InputSink: Send {
     }
 }
 
-/// The host clipboard (text).
+/// The host clipboard: text, and where the platform allows, rich text and images.
 pub trait Clipboard: Send + Sync {
     fn set_text(&self, text: &str);
+    /// Text, HTML and an image together (what a viewer copied).
+    fn set(&self, clip: &crate::clip::Clip) {
+        self.set_text(&clip.text);
+    }
+    /// The clipboard's image as PNG, if it holds one.
+    fn image_png(&self) -> Option<Vec<u8>> {
+        None
+    }
 }

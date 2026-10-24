@@ -130,6 +130,8 @@ impl Injector {
             }
             // Routed to crate::gamepad by the server, never here.
             Ev::Gamepad { .. } => {}
+            // Pressure needs a tablet device; the pen still works as a mouse.
+            Ev::Pen { .. } => {}
             Ev::MouseDown { button } | Ev::MouseUp { button } => {
                 let down = matches!(ev, Ev::MouseDown { .. });
                 let code = match button {

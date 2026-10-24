@@ -22,7 +22,7 @@ use wtransport::{Endpoint, Identity, RecvStream, SendStream, ServerConfig};
 
 use crate::audio::AudioPackets;
 use crate::clock::now_us;
-use crate::control::{self, ClientMsg, STREAM_FILE, STREAM_INPUT, ServerMsg};
+use crate::control::{self, ClientMsg, STREAM_CLIPBOARD, STREAM_FILE, STREAM_INPUT, ServerMsg};
 use crate::files;
 use crate::media::EncodedFrame;
 use crate::media::{Clipboard, InputSink, Layout, VideoSource};
@@ -100,6 +100,10 @@ pub async fn run(
     };
     info!("WebTransport listening on udp/{wt_port}");
     crate::remote::watch(wt_port);
+    // What the computer is playing, for viewers' media controls (while anyone is connected).
+    crate::now_playing::watch(shared.events.clone());
+    // A mic left on when the host last stopped left BlackHole as the default input.
+    crate::mic::recover();
 
     let cert_hash = cert_hash.map(|h| serde_json::from_str::<Vec<u8>>(&h).unwrap());
     let version_dir = web_dir.clone();
@@ -135,6 +139,7 @@ pub async fn run(
         .merge(crate::acl::routes())
         .merge(crate::computer::routes())
         .merge(crate::push::routes())
+        .merge(crate::browse::routes())
         .route("/config.json", get(client_config))
         .route(
             "/manifest.webmanifest",
@@ -654,10 +659,14 @@ async fn control(
     impl Drop for ViewportGuard {
         fn drop(&mut self) {
             crate::resolution::set(self.0, None);
+            crate::refresh::set(self.0, None);
             end_fit(self.0, self.1.clone());
+            end_extend(self.0, self.1.clone());
         }
     }
     let _viewport = ViewportGuard(viewport_id, ctx.shared.clone());
+    // 60 fps until the viewer says its screen is faster.
+    crate::refresh::set(viewport_id, Some(crate::refresh::DEFAULT));
     let _codec = crate::codec::joined(
         session_id,
         codecs.iter().any(|c| c == "hevc"),
@@ -721,6 +730,7 @@ async fn control(
         privacy: crate::privacy::supported(),
         gamepad: crate::gamepad::supported(),
         mic: crate::mic::supported(),
+        mic_install: perms.owner && !crate::mic::supported(),
         windows: shared.video.supports_windows(),
         terminal: crate::terminal::SUPPORTED,
         restart: true,
@@ -735,6 +745,9 @@ async fn control(
         lossless: shared.video.supports_lossless()
             && !ctx.relayed.as_ref().is_some_and(|r| r.rtp_video),
         push: crate::push::public_key(),
+        browse: perms.owner && perms.files,
+        extend: cfg!(target_os = "macos") || crate::testmode::enabled(),
+        support: crate::support::is_host(),
     };
     // Someone other than the owner is in: worth a notification on the owner's devices.
     if !perms.owner {
@@ -770,6 +783,9 @@ async fn control(
     if let Some(r) = &recording {
         let path = Some(r.path.display().to_string());
         control::write_json(&mut send, &ServerMsg::Recording { on: true, path }).await?;
+    }
+    if let Some(info) = crate::now_playing::current() {
+        control::write_json(&mut send, &ServerMsg::NowPlaying { info }).await?;
     }
     for msg in crate::computer::snapshot() {
         control::write_json(&mut send, &msg).await?;
@@ -830,11 +846,30 @@ async fn control(
             ClientMsg::Clipboard { .. } if !perms.clipboard => {
                 warn!("{peer}: clipboard is off for this link; ignored")
             }
-            ClientMsg::Clipboard { text, paste } => {
-                shared.clipboard.set_text(&text);
+            ClientMsg::ClipboardImage if !perms.clipboard => {}
+            ClientMsg::Clipboard { text, html, paste } => {
+                match crate::clip::html_for_viewer(html) {
+                    Some(html) => shared.clipboard.set(&crate::clip::Clip { text, html: Some(html), image: None }),
+                    None => shared.clipboard.set_text(&text),
+                }
                 if paste && perms.input {
                     shared.injector.lock().unwrap().paste();
                 }
+            }
+            ClientMsg::ClipboardImage => {
+                let (clipboard, conn) = (shared.clipboard.clone(), ctx.conn.clone());
+                let ctl = ctx.ctl_tx.clone();
+                tokio::spawn(async move {
+                    let png = tokio::task::spawn_blocking(move || clipboard.image_png()).await.ok().flatten();
+                    let result = match png {
+                        Some(png) if png.len() <= crate::clip::MAX_IMAGE => crate::clip::send_image(&conn, &png).await,
+                        Some(_) => Err(anyhow::anyhow!("The image on the clipboard is too big to send (over 8 MB).")),
+                        None => Err(anyhow::anyhow!("There's no image on the clipboard any more.")),
+                    };
+                    if let Err(e) = result {
+                        let _ = ctl.send(ServerMsg::Error { msg: format!("{e:#}") });
+                    }
+                });
             }
             ClientMsg::Video { on } => {
                 ctx.video_on.store(on, Ordering::Relaxed);
@@ -877,10 +912,17 @@ async fn control(
             ClientMsg::PushSeen { endpoint } => {
                 tokio::task::spawn_blocking(move || crate::push::seen(&endpoint));
             }
+            ClientMsg::Refresh { hz } => {
+                let fps = crate::refresh::snap(hz);
+                info!("{peer}: screen refreshes at {hz:.0} Hz; asks for {fps} fps");
+                crate::refresh::set(viewport_id, Some(fps));
+            }
             ClientMsg::Fit { .. } if guest => {
                 refuse("Only this computer's owner can change its display shape.")
             }
             ClientMsg::Fit { size } => fit(&ctx, viewport_id, size).await?,
+            ClientMsg::Extend { .. } if guest => refuse("Only this computer's owner can add a display."),
+            ClientMsg::Extend { size, hidpi } => extend(&ctx, viewport_id, size, hidpi).await?,
             // Sharp text keeps this viewer at native size, whatever its screen.
             ClientMsg::Viewport { .. } if sharp_on => {}
             ClientMsg::LosslessReset => lossless_reset.store(true, Ordering::Relaxed),
@@ -925,6 +967,68 @@ async fn control(
             ClientMsg::Audio { on } => {
                 ctx.audio_on.store(on, Ordering::Relaxed);
                 info!("{peer}: audio {}", if on { "on" } else { "off" });
+            }
+            ClientMsg::FilesList { .. }
+            | ClientMsg::FilesFetch { .. }
+            | ClientMsg::FilesMkdir { .. }
+            | ClientMsg::FilesRename { .. }
+            | ClientMsg::FilesTrash { .. }
+            | ClientMsg::FilesThumb { .. }
+                if !(perms.owner && perms.files) =>
+            {
+                refuse("The file browser is for the computer's owner.")
+            }
+            ClientMsg::FilesList { path, hidden } => {
+                let tx = ctx.ctl_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _ = tx.send(files_listing(&path, hidden));
+                });
+            }
+            ClientMsg::FilesFetch { path } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let result = match crate::browse::resolve(&crate::browse::root(), &path) {
+                        Ok(p) if p.is_dir() => Err(anyhow::anyhow!("folders can't be downloaded; open it and pick files")),
+                        Ok(p) => files::send(&ctx.conn, &p).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = result {
+                        let _ = ctx.ctl_tx.send(ServerMsg::Error { msg: format!("{e:#}") });
+                    }
+                });
+            }
+            ClientMsg::FilesMkdir { path, name } => {
+                let tx = ctx.ctl_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let r = crate::browse::mkdir(&crate::browse::root(), &path, &name).map(|_| ());
+                    files_changed(&tx, &path, r);
+                });
+            }
+            ClientMsg::FilesRename { path, name } => {
+                let tx = ctx.ctl_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let parent = parent_of(&path);
+                    let r = crate::browse::rename(&crate::browse::root(), &path, &name).map(|_| ());
+                    files_changed(&tx, &parent, r);
+                });
+            }
+            ClientMsg::FilesTrash { path } => {
+                let tx = ctx.ctl_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let parent = parent_of(&path);
+                    let r = crate::browse::trash(&crate::browse::root(), &path);
+                    if r.is_ok() {
+                        info!("file browser: moved {path} to the Trash");
+                    }
+                    files_changed(&tx, &parent, r);
+                });
+            }
+            ClientMsg::FilesThumb { path } => {
+                let tx = ctx.ctl_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let data = crate::browse::thumbnail(&crate::browse::root(), &path).ok().flatten();
+                    let _ = tx.send(ServerMsg::FilesThumb { path, data });
+                });
             }
             ClientMsg::PickFiles if !perms.files => refuse("Files are turned off for this link."),
             ClientMsg::PickFiles => {
@@ -1044,6 +1148,32 @@ async fn control(
                     .events
                     .send(ServerMsg::AnnotateClear { sender: session_id });
             }
+            ClientMsg::Media { .. } if !perms.input => refuse("This link is view only."),
+            ClientMsg::Media { action, position } => crate::now_playing::command(&action, position),
+            ClientMsg::MicInstall if guest => refuse(OWNER_ONLY),
+            ClientMsg::MicInstall => {
+                let tx = ctx.ctl_tx.clone();
+                tokio::spawn(async move {
+                    // The password dialog shows on this computer's screen (seen in the stream).
+                    let msg = match tokio::task::spawn_blocking(|| crate::mic::install(crate::mic::Ask::Dialog)).await {
+                        Ok(Ok(m)) => ServerMsg::Notice { msg: m },
+                        Ok(Err(e)) => ServerMsg::Error { msg: format!("Couldn't set up the microphone: {e:#}") },
+                        Err(_) => return,
+                    };
+                    let _ = tx.send(msg);
+                    // Tell this viewer as soon as it works (an installer can take a while).
+                    for _ in 0..300 {
+                        if tokio::task::spawn_blocking(crate::mic::supported).await.unwrap_or(false) {
+                            let _ = tx.send(ServerMsg::MicReady);
+                            return;
+                        }
+                        if tx.is_closed() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                });
+            }
             ClientMsg::Mic { .. } if !perms.input => refuse("This link is view only."),
             ClientMsg::Mic { on } => {
                 ctx.mic_on.store(on, Ordering::Relaxed);
@@ -1104,6 +1234,26 @@ pub fn host_chat(text: &str) -> Result<usize> {
         text,
     });
     Ok(n)
+}
+
+/// A folder for the file browser, or why it can't be shown.
+fn files_listing(path: &str, hidden: bool) -> ServerMsg {
+    match crate::browse::list(&crate::browse::root(), path, hidden) {
+        Ok(l) => ServerMsg::Files { path: l.path, entries: l.entries, truncated: l.truncated, ticket: crate::browse::ticket(), error: None },
+        Err(e) => ServerMsg::Files { path: path.into(), entries: Vec::new(), truncated: false, ticket: String::new(), error: Some(format!("{e:#}")) },
+    }
+}
+
+/// After a change in the file browser: the folder again, or the error.
+fn files_changed(tx: &mpsc::UnboundedSender<ServerMsg>, folder: &str, result: Result<()>) {
+    if let Err(e) = result {
+        let _ = tx.send(ServerMsg::Error { msg: format!("{e:#}") });
+    }
+    let _ = tx.send(files_listing(folder, false));
+}
+
+fn parent_of(path: &str) -> String {
+    path.trim_matches('/').rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default()
 }
 
 /// One chat message, kept (in memory only) so the app can show the conversation.
@@ -1211,6 +1361,113 @@ async fn fit(ctx: &SessionCtx, _session: u64, size: Option<[u32; 2]>) -> Result<
         let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
     }
     Ok(())
+}
+
+/// "Use as a second display" (macOS): a virtual display beside the main one, extending the
+/// desktop onto a viewer's screen. One per viewer; it ends with that viewer's session.
+#[cfg(target_os = "macos")]
+static EXTENDED: Mutex<Vec<(u64, crate::platform::virtual_display::VirtualDisplay)>> = Mutex::new(Vec::new());
+
+async fn extend(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>, hidpi: bool) -> Result<()> {
+    if crate::testmode::enabled() {
+        crate::testmode::record("extend", serde_json::json!({ "size": size, "hidpi": hidpi }));
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = session;
+        if size.is_some() {
+            let msg = "Using this device as a second display isn't available on Linux yet.".into();
+            let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let peer = ctx.conn.remote_address();
+        // This viewer's earlier one goes first (dropping it removes the display).
+        let old: Vec<_> = {
+            let mut list = EXTENDED.lock().unwrap();
+            let (mine, rest): (Vec<_>, Vec<_>) = list.drain(..).partition(|(s, _)| *s == session);
+            *list = rest;
+            mine
+        };
+        let had = !old.is_empty();
+        if had {
+            tokio::task::spawn_blocking(move || drop(old)).await?;
+        }
+        let Some([w, h]) = size else {
+            if had {
+                info!("{peer}: second display removed");
+                set_layout(ctx, Layout::Single(None)).await?;
+            }
+            return Ok(());
+        };
+        // Even sizes (and even points, for Retina).
+        let (w, h) = if hidpi { (w & !3, h & !3) } else { (w & !1, h & !1) };
+        let created = tokio::task::spawn_blocking(move || {
+            let display = crate::platform::virtual_display::VirtualDisplay::create_scaled(w, h, hidpi)?;
+            display.place_right_of_main()?;
+            anyhow::Ok(display)
+        })
+        .await?;
+        let display = match created {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("{peer}: second display {w}×{h} failed: {e:#}");
+                let msg = format!("Couldn't add a display: {e:#}");
+                let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
+                return Ok(());
+            }
+        };
+        let id = display.id;
+        info!("{peer}: second display {w}×{h}{} (virtual display {id})", if hidpi { " Retina" } else { "" });
+        EXTENDED.lock().unwrap().push((session, display));
+        // Screen capture sees a new display a moment after it appears.
+        for _ in 0..30 {
+            let shared = ctx.shared.clone();
+            let listed = tokio::task::spawn_blocking(move || shared.video.displays())
+                .await?
+                .is_ok_and(|ds| ds.iter().any(|d| d.id == id));
+            if listed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        set_layout(ctx, Layout::Single(Some(id))).await
+    }
+}
+
+/// When a session ends, the display it added goes too.
+fn end_extend(session: u64, shared: Arc<Shared>) {
+    #[cfg(target_os = "macos")]
+    {
+        let mine: Vec<_> = {
+            let mut list = EXTENDED.lock().unwrap();
+            let (mine, rest): (Vec<_>, Vec<_>) = list.drain(..).partition(|(s, _)| *s == session);
+            *list = rest;
+            mine
+        };
+        if mine.is_empty() {
+            return;
+        }
+        WINDOW_WATCH.fetch_add(1, Ordering::Relaxed);
+        tokio::task::spawn_blocking(move || {
+            let gone: Vec<u32> = mine.iter().map(|(_, d)| d.id).collect();
+            drop(mine);
+            // Only move the others off it if it was what they were watching.
+            let streaming_it = shared.video.streams().iter().any(|d| gone.contains(&d.id));
+            if streaming_it && let Ok(streams) = shared.video.set_layout(Layout::Single(None)) {
+                let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
+                shared.injector.lock().unwrap().set_displays(&ids);
+                let displays = shared.video.displays().ok();
+                let _ = shared.events.send(ServerMsg::Layout { streams, displays });
+            }
+            info!("second display removed (its viewer left)");
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (session, shared);
 }
 
 /// When a session ends, its "fit this device" display goes too.
@@ -1416,13 +1673,30 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
                 ctx.conn.remote_address()
             );
         }
+        STREAM_CLIPBOARD if !perms.clipboard => {
+            warn!("{}: clipboard is off for this link; ignored", ctx.conn.remote_address());
+        }
+        STREAM_CLIPBOARD => {
+            let (clip, paste) = crate::clip::receive(&mut stream).await?;
+            info!(
+                "{}: clipboard with an image ({} bytes){}",
+                ctx.conn.remote_address(),
+                clip.image.as_ref().map_or(0, Vec::len),
+                if paste { ", pasting" } else { "" }
+            );
+            let clipboard = ctx.shared.clipboard.clone();
+            tokio::task::spawn_blocking(move || clipboard.set(&clip)).await?;
+            if paste && perms.input {
+                ctx.shared.injector.lock().unwrap().paste();
+            }
+        }
         STREAM_FILE if !perms.files => {
             let _ = ctx.ctl_tx.send(ServerMsg::Error {
                 msg: "Files are turned off for this link.".into(),
             });
         }
         STREAM_FILE => {
-            let (name, path) = files::receive(&mut stream).await?;
+            let (name, path) = files::receive(&mut stream, perms.owner).await?;
             let _ = ctx.ctl_tx.send(ServerMsg::FileSaved {
                 name,
                 path: path.display().to_string(),

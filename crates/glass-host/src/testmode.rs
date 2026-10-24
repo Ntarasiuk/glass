@@ -142,11 +142,17 @@ pub struct TestVideo {
     shown: Mutex<Vec<u32>>,
     /// Per display: the width to encode at (dynamic resolution).
     widths: Vec<Arc<std::sync::atomic::AtomicUsize>>,
+    /// `--fps`: the test displays' refresh rate.
+    refresh: u32,
 }
+
+/// The test pattern's frame rate now: `--fps`, or less if viewers want fewer.
+static PATTERN_FPS: AtomicU32 = AtomicU32::new(30);
 
 impl TestVideo {
     pub fn new(frames: broadcast::Sender<Arc<EncodedFrame>>, fps: u32, bitrate: u32) -> Self {
         BITRATE.store(bitrate, Ordering::Relaxed);
+        PATTERN_FPS.store(fps.min(crate::refresh::DEFAULT), Ordering::Relaxed);
         let displays: Vec<DisplayInfo> = (0..DISPLAYS)
             .map(|i| DisplayInfo {
                 id: i as u32,
@@ -187,7 +193,7 @@ impl TestVideo {
             let (slot, keyframe, frames) = (slots[i].clone(), keyframes[i].clone(), frames.clone());
             let width = widths[i].clone();
             let size = (displays[i].width, displays[i].height);
-            std::thread::spawn(move || pattern_loop(i, size, slot, keyframe, width, frames, fps));
+            std::thread::spawn(move || pattern_loop(i, size, slot, keyframe, width, frames));
         }
         Self {
             sources: displays,
@@ -195,6 +201,7 @@ impl TestVideo {
             keyframes,
             shown: Mutex::new(Vec::new()),
             widths,
+            refresh: fps,
         }
     }
 }
@@ -211,6 +218,10 @@ impl TestVideo {
 impl VideoSource for TestVideo {
     fn supports_lossless(&self) -> bool {
         true
+    }
+
+    fn set_max_fps(&self, fps: u32) {
+        PATTERN_FPS.store(self.refresh.min(fps).max(1), Ordering::Relaxed);
     }
 
     fn set_full_colour(&self, on: bool) {
@@ -337,26 +348,27 @@ fn pattern_loop(
     keyframe: Arc<AtomicBool>,
     width: Arc<std::sync::atomic::AtomicUsize>,
     frames: broadcast::Sender<Arc<EncodedFrame>>,
-    fps: u32,
 ) {
     let mut applied = BITRATE.load(Ordering::Relaxed);
     let mut encoded_width = w;
+    let mut fps = PATTERN_FPS.load(Ordering::Relaxed);
     let mut encoder = Encoder::new(w, h, fps, applied, 1.0).expect("test encoder");
-    let interval = Duration::from_secs_f64(1.0 / fps as f64);
     let mut next = Instant::now();
     // The pattern's position: frozen while paused, so frames repeat the same picture.
     let mut shown = 0u64;
     let mut last_encoded = None;
     loop {
-        next += interval;
+        next += Duration::from_secs_f64(1.0 / fps as f64);
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
         let s = slot.load(Ordering::Relaxed);
         if s < 0 {
             continue;
         }
-        // Dynamic resolution: a new size means a new encoder, starting on a keyframe.
+        // Dynamic resolution or a new frame rate: a new encoder, starting on a keyframe.
         let want = width.load(Ordering::Relaxed);
-        if want != encoded_width {
+        let want_fps = PATTERN_FPS.load(Ordering::Relaxed);
+        if want != encoded_width || want_fps != fps {
+            fps = want_fps;
             let scale = want as f64 / w as f64;
             if let Ok(e) = Encoder::new(w, h, fps, applied, scale) {
                 encoder = e;
@@ -483,6 +495,9 @@ impl InputSink for FakeInput {
             }
             InputEvent::KeyUp { keycode } => serde_json::json!({"t": "keyup", "keycode": keycode}),
             InputEvent::MouseMoveBy { dx, dy } => serde_json::json!({"t": "moveBy", "dx": dx, "dy": dy}),
+            InputEvent::Pen { near, pressure, tilt_x, tilt_y, twist } => {
+                serde_json::json!({"t": "pen", "near": near, "pressure": pressure, "tiltX": tilt_x, "tiltY": tilt_y, "twist": twist})
+            }
             InputEvent::Gamepad { pad, kind, index, value } => {
                 serde_json::json!({"t": "gamepad", "pad": pad, "kind": kind, "index": index, "value": value})
             }
@@ -511,13 +526,36 @@ impl InputSink for FakeInput {
 // ---- Clipboard: in memory ----
 
 static CLIPBOARD: Mutex<String> = Mutex::new(String::new());
+/// The rest of the clipboard: its rich text and image.
+static RICH: Mutex<(Option<String>, Option<Vec<u8>>)> = Mutex::new((None, None));
 
 pub struct FakeClipboard;
 
 impl Clipboard for FakeClipboard {
     fn set_text(&self, text: &str) {
         *CLIPBOARD.lock().unwrap() = text.to_owned();
+        *RICH.lock().unwrap() = (None, None);
     }
+
+    fn set(&self, c: &crate::clip::Clip) {
+        *CLIPBOARD.lock().unwrap() = c.text.clone();
+        *RICH.lock().unwrap() = (c.html.clone(), c.image.clone());
+    }
+
+    fn image_png(&self) -> Option<Vec<u8>> {
+        RICH.lock().unwrap().1.clone()
+    }
+}
+
+/// What tests read and write at /test/clipboard/rich (the image as base64).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct RichClip {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    html: Option<String>,
+    #[serde(default)]
+    image: Option<String>,
 }
 
 // ---- Files ----
@@ -566,11 +604,39 @@ pub fn routes(events: broadcast::Sender<ServerMsg>, downloads: PathBuf) -> axum:
         )
         .route(
             "/test/clipboard",
-            get(|| async { CLIPBOARD.lock().unwrap().clone() }).post(move |text: String| {
+            get(|| async { CLIPBOARD.lock().unwrap().clone() }).post({
                 let events = events.clone();
-                async move {
-                    *CLIPBOARD.lock().unwrap() = text.clone();
-                    let _ = events.send(ServerMsg::Clipboard { text });
+                move |text: String| {
+                    let events = events.clone();
+                    async move {
+                        FakeClipboard.set_text(&text);
+                        let _ = events.send(ServerMsg::Clipboard { text, html: None, image: false });
+                    }
+                }
+            }),
+        )
+        .route(
+            "/test/clipboard/rich",
+            get(|| async {
+                use base64::Engine;
+                let (html, image) = RICH.lock().unwrap().clone();
+                Json(RichClip {
+                    text: CLIPBOARD.lock().unwrap().clone(),
+                    html,
+                    image: image.map(|i| base64::engine::general_purpose::STANDARD.encode(i)),
+                })
+            })
+            .post({
+                let events = events.clone();
+                move |Json(c): Json<RichClip>| {
+                    let events = events.clone();
+                    async move {
+                        use base64::Engine;
+                        let image = c.image.and_then(|i| base64::engine::general_purpose::STANDARD.decode(i).ok());
+                        let has_image = image.is_some();
+                        FakeClipboard.set(&crate::clip::Clip { text: c.text.clone(), html: c.html.clone(), image });
+                        let _ = events.send(ServerMsg::Clipboard { text: c.text, html: c.html, image: has_image });
+                    }
                 }
             }),
         )

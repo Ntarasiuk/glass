@@ -1,7 +1,7 @@
-//! A virtual display in the viewer's shape, so the Mac's desktop can fill an iPad (4:3) or
-//! another screen with no black bars. The main display mirrors the virtual one while it
-//! exists, so the desktop takes its size; dropping it (or this process exiting) removes
-//! it and macOS restores the displays.
+//! A virtual display in the viewer's shape. "Fit this device": the main display mirrors it,
+//! so the desktop fills an iPad (4:3) or another screen with no black bars. "Use as a second
+//! display": it stays its own display beside the main one, extending the desktop onto the
+//! viewer. Dropping it (or this process exiting) removes it and macOS restores the displays.
 //!
 //! macOS has no public API for this; CGVirtualDisplay is CoreGraphics SPI (also used by
 //! apps such as BetterDisplay and DeskPad), reached here through the Objective-C runtime
@@ -14,7 +14,8 @@ use objc2::{msg_send, sel};
 use objc2_core_foundation::{CGPoint, CGSize};
 use objc2_core_graphics::{
     CGBeginDisplayConfiguration, CGCompleteDisplayConfiguration, CGConfigureDisplayMirrorOfDisplay,
-    CGConfigureOption, CGDirectDisplayID, CGDisplayConfigRef, CGError, CGMainDisplayID,
+    CGConfigureDisplayOrigin, CGConfigureOption, CGDirectDisplayID, CGDisplayBounds, CGDisplayConfigRef,
+    CGError, CGMainDisplayID,
 };
 use objc2_foundation::{NSArray, NSString};
 
@@ -39,10 +40,17 @@ fn class(name: &str) -> Result<&'static AnyClass> {
 impl VirtualDisplay {
     /// A virtual display of exactly `width`×`height` pixels (1x, 60 Hz).
     pub fn create(width: u32, height: u32) -> Result<Self> {
+        Self::create_scaled(width, height, false)
+    }
+
+    /// `width`×`height` pixels; with `hidpi`, a Retina mode (half as many points, each two
+    /// pixels wide), so text on an iPad is as crisp as on the iPad itself.
+    pub fn create_scaled(width: u32, height: u32, hidpi: bool) -> Result<Self> {
         anyhow::ensure!(
             (640..=7680).contains(&width) && (480..=4320).contains(&height),
             "unsupported size {width}×{height}"
         );
+        let (mode_w, mode_h) = if hidpi { (width / 2, height / 2) } else { (width, height) };
         unsafe {
             let descriptor: Retained<AnyObject> =
                 msg_send![class("CGVirtualDisplayDescriptor")?, new];
@@ -71,12 +79,12 @@ impl VirtualDisplay {
             let mode_alloc: Allocated<AnyObject> = msg_send![class("CGVirtualDisplayMode")?, alloc];
             let mode: Retained<AnyObject> = msg_send![
                 mode_alloc,
-                initWithWidth: width as usize,
-                height: height as usize,
+                initWithWidth: mode_w as usize,
+                height: mode_h as usize,
                 refreshRate: 60.0f64
             ];
             let settings: Retained<AnyObject> = msg_send![class("CGVirtualDisplaySettings")?, new];
-            let _: () = msg_send![&settings, setHiDPI: 0u32];
+            let _: () = msg_send![&settings, setHiDPI: u32::from(hidpi)];
             let modes = NSArray::from_retained_slice(&[mode]);
             let _: () = msg_send![&settings, setModes: &*modes];
             let applied: Bool = msg_send![&display, applySettings: &*settings];
@@ -99,6 +107,29 @@ impl VirtualDisplay {
         configure(|cfg| unsafe { CGConfigureDisplayMirrorOfDisplay(cfg, main, self.id) })?;
         self.mirrored = Some(main);
         Ok(())
+    }
+
+    /// Places this display just right of the main one, top edges aligned, so the pointer
+    /// moves onto it past the main display's right edge.
+    pub fn place_right_of_main(&self) -> Result<()> {
+        let main = CGDisplayBounds(CGMainDisplayID());
+        let (x, y) = right_of(main.origin.x, main.origin.y, main.size.width);
+        configure(|cfg| unsafe { CGConfigureDisplayOrigin(cfg, self.id, x, y) })
+    }
+}
+
+/// The origin that puts a display flush against the right edge of one at (`x`, `y`) that is
+/// `width` points wide.
+fn right_of(x: f64, y: f64, width: f64) -> (i32, i32) {
+    ((x + width).round() as i32, y.round() as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sits_right_of_the_main_display() {
+        assert_eq!(super::right_of(0.0, 0.0, 1512.0), (1512, 0));
+        assert_eq!(super::right_of(-1920.0, -200.0, 1920.0), (0, -200));
     }
 }
 

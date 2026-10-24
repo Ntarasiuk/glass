@@ -3,8 +3,10 @@
 // from the site's /app/ like it would from glassdesk.dev.
 
 import { spawn, execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
-import { Host, expectVideo, freePort, test, expect, toolbarClick } from './harness.mjs';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { BINARY, Host, expectVideo, freePort, test, expect, toolbarClick } from './harness.mjs';
 
 const SITE = resolve(import.meta.dirname, '../../site');
 
@@ -15,9 +17,12 @@ let base;
 
 test.beforeAll(async () => {
   execFileSync('node', ['build.mjs'], { cwd: SITE, stdio: 'ignore' });
+  // Its own database (quick-support codes live in D1).
+  const persist = mkdtempSync(join(tmpdir(), 'glass-site-'));
+  execFileSync('npx', ['wrangler', 'd1', 'migrations', 'apply', 'getglass', '--local', '--persist-to', persist], { cwd: SITE, stdio: 'ignore' });
   const port = await freePort('tcp');
   base = `http://localhost:${port}`;
-  introducer = spawn('npx', ['wrangler', 'dev', '--local', '--port', String(port), '--inspector-port', String(await freePort('tcp'))], {
+  introducer = spawn('npx', ['wrangler', 'dev', '--local', '--persist-to', persist, '--port', String(port), '--inspector-port', String(await freePort('tcp'))], {
     cwd: SITE,
     stdio: 'ignore',
     detached: true,
@@ -94,6 +99,44 @@ test('falls back to video over the data channel when tracks are unavailable', as
     await expect(page.locator('#screens > canvas:not(.hidden)')).toHaveCount(1);
   } finally {
     await host.stop();
+  }
+});
+
+test('quick support: a code typed at /help connects, once allowed, and stopping leaves nothing', async ({ page }) => {
+  // `glass support` in test mode: its own temporary config, a test-pattern host, a code.
+  const proc = spawn(BINARY, ['support', '--test', '--json'], { env: { ...process.env, GLASS_BASE: base }, stdio: ['ignore', 'pipe', 'inherit'] });
+  try {
+    const first = await new Promise((resolve, reject) => {
+      let out = '';
+      proc.stdout.on('data', (d) => {
+        out += d;
+        if (out.includes('\n')) resolve(JSON.parse(out.split('\n')[0]));
+      });
+      proc.once('exit', (code) => reject(new Error(`glass support exited (${code})`)));
+    });
+    expect(first.code).toMatch(/^\d{3} \d{3} \d{3}$/);
+    expect(existsSync(first.dir)).toBe(true);
+    const hostApi = `http://localhost:${first.http_port}`;
+
+    await page.goto(`${base}/help`);
+    await page.locator('#code').fill(first.code.replace(/ /g, ''));
+    await page.locator('#code-form button').click();
+    await page.waitForURL(/\/app\/#r=/);
+    // Asked first: nothing until the person allows it.
+    await expect.poll(async () => (await (await fetch(`${hostApi}/test/approvals`)).json()).pending.length, { timeout: 20_000 }).toBe(1);
+    await fetch(`${hostApi}/test/approvals?allow=true`, { method: 'POST' });
+    await expectVideo(page);
+    await expect(page.locator('.toast', { hasText: "You're helping" })).toBeVisible();
+
+    // The code was used up.
+    const again = await fetch(`${base}/api/support/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: first.code }) });
+    expect(again.status).toBe(404);
+
+    // Stopping takes the session's files (token, keys, settings, logs) with it.
+    proc.kill('SIGTERM');
+    await expect.poll(() => existsSync(first.dir), { timeout: 10_000 }).toBe(false);
+  } finally {
+    proc.kill('SIGKILL');
   }
 });
 

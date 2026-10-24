@@ -67,7 +67,9 @@ export async function freePort(kind) {
 
 export class Host {
   /** `os`: what the host reports itself as (macos or linux). */
-  constructor({ configDir, os = 'macos', latest, webDir, env } = {}) {
+  /** `fps`: the test displays' refresh rate (viewers get up to this). */
+  constructor({ configDir, os = 'macos', latest, webDir, env, fps = 30 } = {}) {
+    this.fps = fps;
     this.webDir = webDir;
     this.env = env;
     this.os = os;
@@ -91,7 +93,7 @@ export class Host {
         '--wt-port', String(this.wt),
         '--log-dir', join(this.dir, 'logs'),
         '--downloads-dir', join(this.dir, 'downloads'),
-        '--fps', '30',
+        '--fps', String(this.fps),
         ...(this.webDir ? ['--web-dir', this.webDir] : []),
       ],
       {

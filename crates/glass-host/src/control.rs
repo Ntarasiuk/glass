@@ -17,6 +17,8 @@ pub const STREAM_INPUT: u8 = b'I';
 pub const STREAM_FILE: u8 = b'F';
 /// host -> client: a lossless (PNG) picture of part of a stream, see `lossless`.
 pub const STREAM_LOSSLESS: u8 = b'P';
+/// Either way: a clipboard with an image, see `clip` (header, then the image bytes).
+pub const STREAM_CLIPBOARD: u8 = b'C';
 
 const MAX_MESSAGE: usize = 16 << 20;
 
@@ -74,6 +76,16 @@ pub enum ClientMsg {
     AnnotateClear,
     /// Start or stop sending this viewer's microphone (KIND_MIC datagrams).
     Mic { on: bool },
+    /// Install the Mac's microphone driver (BlackHole): its installer opens on the Mac's
+    /// screen. Owner only.
+    MicInstall,
+    /// Control what the computer is playing: play, pause, toggle, next, previous, or seek
+    /// (to `position` seconds).
+    Media {
+        action: String,
+        #[serde(default)]
+        position: Option<f64>,
+    },
     /// A shell on the host. Owner only.
     Term(crate::terminal::ClientTerm),
     /// Start or stop recording this session's video on the host. Owner only.
@@ -87,12 +99,17 @@ pub enum ClientMsg {
     SelectDisplay { id: u32 },
     /// Stream every display side by side.
     ShowAll,
-    /// Client clipboard text; with `paste`, the host also presses Cmd+V after setting it.
+    /// Client clipboard text (and rich text); with `paste`, the host also presses Cmd+V
+    /// after setting it. One with an image comes as a `STREAM_CLIPBOARD` stream instead.
     Clipboard {
         text: String,
         #[serde(default)]
+        html: Option<String>,
+        #[serde(default)]
         paste: bool,
     },
+    /// Send the host clipboard's image (a `STREAM_CLIPBOARD` stream back).
+    ClipboardImage,
     /// Opens a file chooser on the Mac; chosen files are streamed back.
     PickFiles,
     /// Start or stop sending system audio to this session.
@@ -108,14 +125,38 @@ pub enum ClientMsg {
     /// The device pixels each stream covers on this viewer's screen (`null`: full
     /// resolution), for dynamic resolution.
     Viewport { streams: Vec<Option<[u32; 2]>> },
+    /// This viewer's screen refresh rate (measured), so a fast screen gets more frames.
+    Refresh { hz: f64 },
     /// "Fit this device": give the Mac a desktop of this size (the viewer's shape), or
     /// `null` to put its displays back.
     Fit { size: Option<[u32; 2]> },
+    /// "Use as a second display": a new display of this size (the viewer's screen, in
+    /// pixels; Retina with `hidpi`) beside the main one, streamed to this viewer, or `null`
+    /// to remove it. Owner only.
+    Extend {
+        size: Option<[u32; 2]>,
+        #[serde(default)]
+        hidpi: bool,
+    },
     /// Notifications on this device (Web Push), or new choices of what to hear about.
     PushSubscribe { subscription: crate::push::NewSubscription },
     PushUnsubscribe { endpoint: String },
     /// This device's viewer is open: clear its badge.
     PushSeen { endpoint: String },
+    /// The file browser (owner only): a folder's contents, relative to the home folder.
+    FilesList {
+        path: String,
+        #[serde(default)]
+        hidden: bool,
+    },
+    /// Send this file (as a file stream, like picked files).
+    FilesFetch { path: String },
+    FilesMkdir { path: String, name: String },
+    FilesRename { path: String, name: String },
+    /// Move to the Trash.
+    FilesTrash { path: String },
+    /// A small preview of an image or PDF (answered with `filesThumb`).
+    FilesThumb { path: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,6 +186,21 @@ pub enum ServerMsg {
     Denied { msg: String },
     /// Something worth a (non-error) toast.
     Notice { msg: String },
+    /// A folder in the file browser (`error` instead when it can't be read). `ticket`
+    /// downloads by URL (`/files/raw`, for dragging a file out).
+    Files {
+        path: String,
+        entries: Vec<crate::browse::Entry>,
+        truncated: bool,
+        ticket: String,
+        error: Option<String>,
+    },
+    FilesThumb { path: String, data: Option<String> },
+    /// The microphone driver just got installed: the mic works now.
+    MicReady,
+    /// What the computer is playing (title, artist, album, playing, duration, elapsed,
+    /// artwork as base64 when it changes); `{}` without a title when nothing is.
+    NowPlaying { info: serde_json::Value },
     /// Notifications are on for this device: `key` lets its service worker answer from a
     /// notification (owner only). `None`: subscribing failed.
     Push { key: Option<String>, owner: bool },
@@ -201,8 +257,14 @@ pub enum ServerMsg {
         current: &'static str,
         version: String,
     },
+    /// The host clipboard changed: its text, rich text (HTML) if any, and whether it holds
+    /// an image (fetched on demand with `clipboardImage`: it can be large).
     Clipboard {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        html: Option<String>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        image: bool,
     },
     FileSaved {
         name: String,
@@ -249,6 +311,8 @@ pub struct Features {
     pub privacy: bool,
     pub gamepad: bool,
     pub mic: bool,
+    /// No mic yet, but the owner can install its driver (`MicInstall`, macOS).
+    pub mic_install: bool,
     pub windows: bool,
     pub terminal: bool,
     pub restart: bool,
@@ -260,6 +324,12 @@ pub struct Features {
     pub lossless: bool,
     /// The key browsers subscribe to notifications with (VAPID, base64url).
     pub push: Option<String>,
+    /// The file browser (owners with files allowed).
+    pub browse: bool,
+    /// The viewer can become a second display ("Use as a second display").
+    pub extend: bool,
+    /// A quick-support session (`glass support`): the viewer is someone helping.
+    pub support: bool,
 }
 
 /// Header that follows the `STREAM_FILE` tag in either direction.
@@ -267,6 +337,10 @@ pub struct Features {
 pub struct FileHeader {
     pub name: String,
     pub size: u64,
+    /// Upload into this folder (relative to the home folder; owner only) instead of
+    /// Downloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 pub async fn read_json<T: for<'de> Deserialize<'de>>(stream: &mut RecvStream) -> Result<Option<T>> {

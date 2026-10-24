@@ -4,6 +4,7 @@
 // and installing Glass as an app.
 
 const AWAKE_KEY = 'glass.awake';
+const SMOOTH_KEY = 'glass.smooth';
 const CLIPBOARD_KEY = 'glass.clipboardSync';
 const AWAY_KEY = 'glass.pauseAway';
 
@@ -11,10 +12,40 @@ function storage(fn) {
   try { return fn(localStorage); } catch { return undefined; }
 }
 
-export function createDevice({ ui, push, control, log, input, screens, streams, displays, onPause, onPressure, standalone }) {
+export function createDevice({ ui, push, control, log, input, screens, streams, displays, onPause, onPressure, standalone, sendClip = (c) => control({ t: 'clipboard', text: c.text }) }) {
   const touch = matchMedia('(hover: none)').matches;
   let connected = false;
   let installPrompt; // Chromium's beforeinstallprompt, kept for the menu
+
+  // ---- Smooth motion: a fast screen (120 Hz) asks the host for more frames ----
+
+  let smooth = storage((s) => s.getItem(SMOOTH_KEY)) !== '0';
+  let refreshHz = 0; // measured; 0 until known
+  /** Times animation frames for about a second: the screen's refresh rate. */
+  function measureRefresh() {
+    if (document.visibilityState !== 'visible') return;
+    const times = [];
+    const tick = (t) => {
+      times.push(t);
+      if (times.length < 40) return requestAnimationFrame(tick);
+      const gaps = times.slice(1).map((t, i) => t - times[i]).sort((a, b) => a - b);
+      const median = gaps[gaps.length >> 1];
+      const hz = median > 0 ? 1000 / median : 0;
+      if (Math.abs(hz - refreshHz) < 3) return;
+      refreshHz = hz;
+      log('info', `screen refresh ${hz.toFixed(0)} Hz`);
+      sendRefresh();
+      render();
+    };
+    requestAnimationFrame(tick);
+  }
+  const fast = () => refreshHz > 68;
+  /** The panel rate a measurement means (as the host snaps it), at most 120. */
+  const snapHz = (hz) => Math.min(120, [60, 75, 90, 100, 120, 144, 165, 240].reduce((a, b) => (Math.abs(b - hz) < Math.abs(a - hz) ? b : a)));
+  function sendRefresh() {
+    if (connected && fast()) control({ t: 'refresh', hz: smooth ? refreshHz : 60 });
+  }
+  measureRefresh();
 
   // ---- Keep the screen awake while watching ----
 
@@ -136,15 +167,28 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
   // ---- Send this device's clipboard when coming back (Chromium) ----
 
   let clipboardSync = storage((s) => s.getItem(CLIPBOARD_KEY)) === '1';
-  let lastSent;
+  let lastSent; // a fingerprint of the last clipboard sent, so an unchanged one isn't resent
+  /** This device's clipboard: text, rich text and an image, where present. */
+  async function readClipboard() {
+    if (!navigator.clipboard.read) return { text: await navigator.clipboard.readText() };
+    const clip = { text: '' };
+    for (const item of await navigator.clipboard.read()) {
+      const get = (type) => (item.types.includes(type) ? item.getType(type) : undefined);
+      if (!clip.text) clip.text = await (await get('text/plain'))?.text() ?? '';
+      clip.html ??= await (await get('text/html'))?.text();
+      clip.image ??= await get('image/png');
+    }
+    return clip;
+  }
+  const fingerprint = (c) => `${c.text}\u0000${c.html ?? ''}\u0000${c.image?.size ?? ''}`;
   async function sendClipboard() {
     if (!clipboardSync || !connected || !document.hasFocus()) return;
     try {
-      const text = await navigator.clipboard.readText();
-      if (!text || text === lastSent) return;
-      lastSent = text;
-      control({ t: 'clipboard', text });
-      log('info', 'clipboard sent on return', { length: text.length });
+      const clip = await readClipboard();
+      if ((!clip.text && !clip.image) || fingerprint(clip) === lastSent) return;
+      lastSent = fingerprint(clip);
+      sendClip(clip);
+      log('info', 'clipboard sent on return', { length: clip.text.length, html: Boolean(clip.html), image: clip.image?.size });
     } catch {}
   }
   addEventListener('focus', () => setTimeout(sendClipboard, 50));
@@ -186,9 +230,26 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
 
   if ('PressureObserver' in window) {
     try {
+      // Each change resizes the stream (a new encoder), so only act on a lasting state:
+      // smaller after 10 s under pressure, back up after 30 s of calm, one step at a time.
+      const STEPS = [1, 0.75, 0.5];
+      let step = 0;
+      let wanted = 0;
+      let timer;
+      // The observer reports changes only, so a timer checks once the state has lasted.
+      const settle = () => {
+        clearTimeout(timer);
+        if (wanted === step) return;
+        timer = setTimeout(() => {
+          step += wanted > step ? 1 : -1;
+          onPressure(STEPS[step]);
+          settle(); // the next step waits its turn too
+        }, wanted > step ? 10_000 : 30_000);
+      };
       const observer = new PressureObserver((records) => {
         const state = records.at(-1)?.state;
-        onPressure(state === 'critical' ? 0.5 : state === 'serious' ? 0.75 : 1);
+        wanted = state === 'critical' ? 2 : state === 'serious' ? 1 : 0;
+        settle();
       });
       observer.observe('cpu', { sampleInterval: 2000 }).catch(() => {});
     } catch {}
@@ -243,6 +304,17 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
         : 'When a message comes, even with Glass closed.'));
     }
     items.push(hr());
+    if (fast()) {
+      items.push(ui.menuItem('Smooth motion', `${snapHz(refreshHz)} Hz`, {
+        checked: smooth,
+        onSelect: () => {
+          smooth = !smooth;
+          storage((s) => s.setItem(SMOOTH_KEY, smooth ? '1' : '0'));
+          sendRefresh();
+          render();
+        },
+      }));
+    }
     if ('wakeLock' in navigator) {
       items.push(ui.menuItem('Keep screen awake', 'while connected', {
         checked: awake,
@@ -278,7 +350,7 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
           clipboardSync = !clipboardSync;
           storage((s) => s.setItem(CLIPBOARD_KEY, clipboardSync ? '1' : '0'));
           // Ask for permission now, in the tap.
-          if (clipboardSync) await navigator.clipboard.readText().then((t) => { lastSent = t; }).catch(() => {});
+          if (clipboardSync) await readClipboard().then((c) => { lastSent = fingerprint(c); }).catch(() => {});
           render();
         },
       }));
@@ -315,6 +387,8 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
+      // Possibly on another screen now (a window dragged to a 60 Hz monitor).
+      measureRefresh();
       holdAwake();
       push.seen();
     }
@@ -325,6 +399,7 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
     /** The session is live (welcome) or gone. */
     setConnected(on) {
       connected = on;
+      if (on) sendRefresh();
       if (on) holdAwake();
       else releaseAwake();
       render();

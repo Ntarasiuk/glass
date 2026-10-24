@@ -2517,7 +2517,7 @@ dependencies = [
 
 [[package]]
 name = "glass-host"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -2541,6 +2541,7 @@ dependencies = [
  "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-core-audio",
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-core-graphics",
@@ -2571,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "glass-proto"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "glob"

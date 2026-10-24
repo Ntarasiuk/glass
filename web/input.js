@@ -1,6 +1,6 @@
 // Pointer, touch, keyboard and clipboard input → remote input events.
 
-import { Input } from './proto.js';
+import { Input, penFields } from './proto.js';
 import { MAC_KEYCODES, charToKey, KVK_SHIFT } from './keymap.js';
 
 const LONG_PRESS_MS = 500;
@@ -22,12 +22,14 @@ const MODIFIER_KEYCODES = new Set(MODIFIER_CODES.map((c) => MAC_KEYCODES[c]));
  * @param keySink     hidden textarea that holds keyboard focus (and summons the iPad keyboard)
  * @param send        (kind, fields) => void, sends one input event
  * @param control     (msg) => void, sends a control message
- * @param nextClipboard () => Promise<string>, resolves with the next Mac clipboard text
+ * @param nextClipboard () => Promise<{ text, html?, image }>, the next Mac clipboard
+ * @param onMacCopy   (clip) => void, after ⌘C/⌘X: put its rich text or image here too
+ * @param onPaste     ({ text, html?, image? }) => void, this device's clipboard, to paste on the Mac
  * @param onLocalShortcut (code) => void, for Ctrl+Shift+<key> shortcuts handled locally
  */
 export function attachInput({
-  screens, keySink, send, control, nextClipboard, onLocalShortcut, swapCmdOption = false, ctrlAsCmd = true,
-  pcKeyboard = false, onZoom,
+  screens, keySink, send, control, nextClipboard, onMacCopy = () => {}, onPaste, onLocalShortcut, swapCmdOption = false,
+  ctrlAsCmd = true, pcKeyboard = false, onZoom,
 }) {
   // With iPadOS set to turn the physical ⌘ key into ⌥ (so it can't claim ⌘Tab etc.),
   // swap them back here so the Mac gets the keys the user actually pressed.
@@ -93,6 +95,43 @@ export function attachInput({
     keySink.focus({ preventScroll: true });
   }
 
+  // ---- Pen (Apple Pencil, stylus): pressure and tilt ride ahead of each mouse event ----
+
+  let penNear = false;
+  let lastPen = '';
+  /** Tilt in degrees toward +x and +y, from tiltX/Y or (Safari) altitude and azimuth. */
+  function tiltOf(e) {
+    if (e.tiltX || e.tiltY || e.altitudeAngle === undefined) return [e.tiltX ?? 0, e.tiltY ?? 0];
+    // Upright (altitude π/2) is no tilt.
+    const t = Math.tan(e.altitudeAngle);
+    if (!t || t > 1e6) return [0, 0];
+    const deg = (r) => (r * 180) / Math.PI;
+    return [deg(Math.atan(Math.cos(e.azimuthAngle) / t)), deg(Math.atan(Math.sin(e.azimuthAngle) / t))];
+  }
+  /** Sends the pen's state if it changed; `e` null when it leaves. */
+  function sendPen(e) {
+    const near = Boolean(e);
+    let fields;
+    if (near) {
+      const [tiltX, tiltY] = tiltOf(e);
+      // Hovering (Pencil hover, M2 iPads) touches nothing: no pressure.
+      const pressure = e.buttons & 1 ? e.pressure : 0;
+      fields = penFields({ near, pressure, tiltX, tiltY, twist: e.twist ?? 0 });
+    } else {
+      if (!penNear) return;
+      fields = penFields({ near: false });
+    }
+    penNear = near;
+    const key = `${fields.button}|${fields.keycode}|${fields.a.toFixed(3)}|${Math.round(fields.b)}`;
+    if (key === lastPen) return;
+    lastPen = key;
+    send(Input.PEN, fields);
+  }
+  /** A non-pen pointer took over (mouse, finger): the pen isn't near any more. */
+  function penGone(e) {
+    if (penNear && e.pointerType !== 'pen') sendPen(null);
+  }
+
   // ---- Mouse, trackpad and pen: direct mapping ----
 
   const moveEvent = 'onpointerrawupdate' in window ? 'pointerrawupdate' : 'pointermove';
@@ -101,8 +140,24 @@ export function attachInput({
       if (e.movementX || e.movementY) send(Input.MOVE_BY, { a: e.movementX, b: e.movementY });
       return;
     }
+    penGone(e);
+    if (e.pointerType === 'pen') {
+      // Every sample the pen took since the last event, for smooth strokes.
+      const canvas = canvasOf(e);
+      // (pointerrawupdate has none: it is already every sample.)
+      const samples = e.getCoalescedEvents?.() ?? [];
+      for (const c of samples.length ? samples : [e]) {
+        sendPen(c);
+        sendMove(c.clientX, c.clientY, canvas);
+      }
+      return;
+    }
     if (e.pointerType !== 'touch') sendMove(e.clientX, e.clientY, canvasOf(e));
   }, { passive: true });
+  // The pen lifted away from the screen.
+  screens.addEventListener('pointerleave', (e) => {
+    if (e.pointerType === 'pen') sendPen(null);
+  });
 
   screens.addEventListener('pointerdown', (e) => {
     const canvas = canvasOf(e);
@@ -112,17 +167,21 @@ export function attachInput({
     // Don't focus the key sink here: iPad Safari leaves fullscreen when a text field takes
     // focus, and hardware keys reach the window without it.
     if (!locked) try { canvas.setPointerCapture(e.pointerId); } catch {}
+    penGone(e);
+    if (e.pointerType === 'pen') sendPen(e);
     sendMove(e.clientX, e.clientY, canvas);
     send(Input.DOWN, { button: e.button });
   });
   screens.addEventListener('pointerup', (e) => {
     e.preventDefault();
     if (e.pointerType === 'touch') return touchUp(e);
+    if (e.pointerType === 'pen') sendPen(e);
     sendMove(e.clientX, e.clientY, canvasOf(e));
     send(Input.UP, { button: e.button });
   });
   screens.addEventListener('pointercancel', (e) => {
     if (e.pointerType === 'touch') touchUp(e, true);
+    if (e.pointerType === 'pen') sendPen(null);
   });
   screens.addEventListener('contextmenu', (e) => e.preventDefault());
   screens.addEventListener('wheel', (e) => {
@@ -318,8 +377,11 @@ export function attachInput({
     if (cmdHeld(e) && (code === 'KeyC' || code === 'KeyX') && navigator.clipboard?.write) {
       // Must be called during the keydown for Safari; the item resolves once the
       // Mac reports its new clipboard.
-      const text = nextClipboard(CLIPBOARD_WAIT_MS).then((t) => new Blob([t], { type: 'text/plain' }));
+      const clip = nextClipboard(CLIPBOARD_WAIT_MS);
+      const text = clip.then((c) => new Blob([c.text], { type: 'text/plain' }));
       navigator.clipboard.write([new ClipboardItem({ 'text/plain': text })]).catch(() => {});
+      // Rich text or an image: written again, whole, once it's here.
+      clip.then(onMacCopy, () => {});
     }
 
     e.preventDefault();
@@ -364,8 +426,13 @@ export function attachInput({
     if (localField(e.target)) return;
     e.preventDefault();
     pasteHandled = true;
-    const text = e.clipboardData?.getData('text/plain');
-    if (text) control({ t: 'clipboard', text, paste: true });
+    const data = e.clipboardData;
+    const text = data?.getData('text/plain') ?? '';
+    const html = data?.getData('text/html') || undefined;
+    const image = [...(data?.files ?? [])].find((f) => f.type.startsWith('image/'));
+    if (!text && !html && !image) return;
+    if (onPaste) onPaste({ text, html, image });
+    else control({ t: 'clipboard', text, paste: true });
   });
 
   // On-screen keyboard text (and anything else that bypassed keydown).

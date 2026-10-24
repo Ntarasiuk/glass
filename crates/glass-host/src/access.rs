@@ -182,9 +182,14 @@ pub fn now() -> u64 {
 }
 
 pub fn create_link(path: &Path, grant: Duration, scope: Scope) -> Result<NewLink> {
+    create_link_for(path, LINK_TTL, grant, scope)
+}
+
+/// A link that stays usable for `ttl` (quick support waits up to an hour for the helper).
+pub fn create_link_for(path: &Path, ttl: Duration, grant: Duration, scope: Scope) -> Result<NewLink> {
     let grant = grant.clamp(MIN_GRANT, MAX_GRANT);
     let code = random_code()?;
-    let expires = now() + LINK_TTL.as_secs();
+    let expires = now() + ttl.as_secs();
     update(path, |store| {
         store.links.push(Link {
             hash: fingerprint(&code),

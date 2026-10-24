@@ -267,6 +267,22 @@ impl GlassApp {
                 cx,
             ),
         ];
+        // Until it's installed: your devices' microphones on this Mac need a driver.
+        let mut quick = quick;
+        if snap.mic.is_none() {
+            quick.push(ui::icon_row(
+                I::Mic,
+                theme.primary,
+                "Microphone from your devices",
+                "Talk into this Mac's apps from your iPad or phone. Needs a small audio driver.",
+                Button::new("home-install-mic")
+                    .small()
+                    .icon(I::Download)
+                    .label("Install…")
+                    .on_click(|_, window, cx| act(window, cx, || crate::mic::install(crate::mic::Ask::Dialog))),
+                cx,
+            ));
+        }
 
         let recent: Vec<AnyElement> = snap.log.iter().take(4).map(|e| super::history::entry_row(e, cx)).collect();
 

@@ -7,6 +7,11 @@ export { Introducer } from './introducer.js';
 
 const FEEDBACK_MAX = 4000;
 const FEEDBACK_PER_HOUR = 5;
+// Quick support: how long a code waits, how many a computer may make, and how many wrong
+// guesses a browser gets, per hour.
+const SUPPORT_TTL_MS = 3600_000;
+const SUPPORT_CODES_PER_HOUR = 20;
+const SUPPORT_MISSES_PER_HOUR = 20;
 // Command-line fetchers get the install script at the bare domain (`curl glassdesk.dev | sh`).
 const CLI_AGENT = /^(curl|wget|fetch|httpie|python-requests|go-http-client)\b/i;
 
@@ -40,6 +45,13 @@ export default {
 
     if (url.pathname === '/api/stats') return stats(request, env);
 
+    if (url.pathname === '/api/support') {
+      if (request.method === 'POST') return supportRegister(request, env, url);
+      if (request.method === 'DELETE') return supportCancel(request, env);
+      return json({ error: 'method not allowed' }, 405);
+    }
+    if (url.pathname === '/api/support/claim' && request.method === 'POST') return supportClaim(request, env);
+
     // /signal/host/<id> (the host) and /signal/connect/<id> (a browser).
     const signal = url.pathname.match(/^\/signal\/(host|connect)\/([A-Za-z0-9_-]{22})$/);
     if (signal) {
@@ -52,6 +64,14 @@ export default {
 
     // An agent asking for markdown gets the page's markdown twin, even from curl; `curl … | sh` never asks.
     const wantsMarkdown = /\btext\/markdown\b/i.test(request.headers.get('accept') ?? '');
+    // Quick support: `curl glassdesk.dev/help | sh` runs Glass for one session, installing nothing.
+    if (url.pathname === '/help.sh' || (url.pathname === '/help' && CLI_AGENT.test(ua) && !wantsMarkdown)) {
+      ctx.waitUntil(recordDownload(env, request, 'script', 'help.sh'));
+      const res = await env.ASSETS.fetch(new URL('/help.sh', url));
+      return new Response(res.body, {
+        headers: { 'content-type': 'text/x-shellscript; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
+      });
+    }
     const wantsScript = url.pathname === '/install.sh' || (url.pathname === '/' && CLI_AGENT.test(ua) && !wantsMarkdown);
     if (wantsScript) {
       ctx.waitUntil(recordDownload(env, request, 'script', 'install.sh'));
@@ -165,6 +185,99 @@ async function feedback(request, env) {
     )
     .run();
   return json({ ok: true });
+}
+
+// ---- Quick support ----
+
+/** `glass support` registers its one-time link and gets a code for the helper to type. */
+async function supportRegister(request, env, url) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: 'expected JSON' }, 400);
+  }
+  // Only links to this site's own viewer, so a code can never send anyone elsewhere.
+  // (Local dev, over plain HTTP, also takes localhost: wrangler dev reports the route's host.)
+  const link = String(body.url ?? '');
+  const m = link.match(/^(https?:\/\/[^/]+)\/app\/#r=[A-Za-z0-9_-]{40,120}&l=[0-9a-f]{32}$/);
+  const local = url.protocol === 'http:' && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(m?.[1] ?? '');
+  if (!m || (m[1] !== url.origin && !local)) return json({ error: 'not a Glass link' }, 400);
+  const now = Date.now();
+  const visitor = await visitorId(request, env);
+  const recent = await env.DB.prepare('SELECT COUNT(*) AS n FROM support_codes WHERE visitor = ? AND created > ?')
+    .bind(visitor, now - 3600_000)
+    .first('n');
+  if (recent >= SUPPORT_CODES_PER_HOUR) return json({ error: 'too many codes; try again later' }, 429);
+  await env.DB.prepare('DELETE FROM support_codes WHERE expires < ?').bind(now).run();
+  const cancel = randomToken();
+  for (let i = 0; i < 5; i++) {
+    const code = randomCode();
+    const res = await env.DB.prepare(
+      'INSERT OR IGNORE INTO support_codes (code_hash, url, cancel_hash, created, expires, visitor) VALUES (?, ?, ?, ?, ?, ?)',
+    )
+      .bind(await secretHash(env, `code:${code}`), link, await secretHash(env, `cancel:${cancel}`), now, now + SUPPORT_TTL_MS, visitor)
+      .run();
+    if (res.meta.changes) return json({ code, cancel, expires: Math.floor((now + SUPPORT_TTL_MS) / 1000) });
+  }
+  return json({ error: 'no free code; try again' }, 503);
+}
+
+/** The helper typed a code at /help: its link, once. */
+async function supportClaim(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: 'expected JSON' }, 400);
+  }
+  const now = Date.now();
+  const visitor = await visitorId(request, env);
+  const misses = await env.DB.prepare('SELECT COUNT(*) AS n FROM support_misses WHERE visitor = ? AND ts > ?')
+    .bind(visitor, now - 3600_000)
+    .first('n');
+  if (misses >= SUPPORT_MISSES_PER_HOUR) return json({ error: 'Too many wrong codes. Try again in an hour.' }, 429);
+  const code = String(body.code ?? '').replace(/\D/g, '');
+  const hash = code.length === 9 ? await secretHash(env, `code:${code}`) : '';
+  // Taken in one step: a code works once, even if two browsers race for it.
+  const row = hash
+    ? await env.DB.prepare('DELETE FROM support_codes WHERE code_hash = ? AND expires > ? RETURNING url').bind(hash, now).first()
+    : null;
+  if (!row) {
+    await env.DB.prepare('INSERT INTO support_misses (visitor, ts) VALUES (?, ?)').bind(visitor, now).run();
+    return json({ error: "That code didn't work. Check it with them, or ask them for a new one." }, 404);
+  }
+  return json({ url: row.url });
+}
+
+/** `glass support` stopped: its code goes at once (header x-cancel: the token it got). */
+async function supportCancel(request, env) {
+  const cancel = request.headers.get('x-cancel') ?? '';
+  if (!cancel) return json({ error: 'missing x-cancel' }, 400);
+  await env.DB.prepare('DELETE FROM support_codes WHERE cancel_hash = ?').bind(await secretHash(env, `cancel:${cancel}`)).run();
+  return json({ ok: true });
+}
+
+/** Nine random digits (leading zeros allowed), without modulo bias. */
+function randomCode() {
+  const buf = new Uint32Array(1);
+  for (;;) {
+    crypto.getRandomValues(buf);
+    // Below 4e9, every residue mod 1e9 is equally likely.
+    if (buf[0] < 4_000_000_000) return String(buf[0] % 1_000_000_000).padStart(9, '0');
+  }
+}
+
+function randomToken() {
+  const b = new Uint8Array(24);
+  crypto.getRandomValues(b);
+  return btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** Salted SHA-256: a leaked table doesn't give the codes back (there are only 10⁹). */
+async function secretHash(env, value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${env.VISITOR_SALT ?? ''}:support:${value}`));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 async function recordDownload(env, request, kind, file) {

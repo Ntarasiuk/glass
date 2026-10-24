@@ -19,10 +19,15 @@ use objc2_core_media::{
     CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_H264,
     kCMVideoCodecType_HEVC,
 };
-use objc2_core_video::CVImageBuffer;
+use objc2_core_video::{
+    CVImageBuffer, kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferColorPrimaries_P3_D65,
+    kCVImageBufferTransferFunction_sRGB, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+};
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
+    kVTCompressionPropertyKey_ColorPrimaries, kVTCompressionPropertyKey_TransferFunction,
+    kVTCompressionPropertyKey_YCbCrMatrix,
     kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_ExpectedFrameRate,
     kVTCompressionPropertyKey_MaxAllowedFrameQP, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
@@ -115,6 +120,8 @@ impl Encoder {
         bitrate: i32,
         hevc: bool,
         rext: bool,
+        // The picture is Display P3 (a wide-colour display), not sRGB.
+        p3: bool,
         force_keyframe: Arc<AtomicBool>,
         on_frame: Arc<dyn Fn(EncodedFrame) + Send + Sync>,
     ) -> Result<Self> {
@@ -186,6 +193,18 @@ impl Encoder {
                 kVTCompressionPropertyKey_ExpectedFrameRate,
                 &CFNumber::new_i32(fps),
             );
+            // Colour, written into the stream (VUI) so the browser shows it as captured:
+            // Display P3 on a wide-colour display (not clipped to sRGB), else sRGB.
+            set(
+                kVTCompressionPropertyKey_ColorPrimaries,
+                if p3 {
+                    kCVImageBufferColorPrimaries_P3_D65
+                } else {
+                    kCVImageBufferColorPrimaries_ITU_R_709_2
+                },
+            );
+            set(kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_sRGB);
+            set(kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
             // Keyframes on demand (new client or reported loss), plus one before H.264's
             // frame_num wraps at 1024: Safari's hardware decoder fails on the wrap.
             set(
@@ -211,9 +230,9 @@ impl Encoder {
 
     /// Applies the sharpness policy for `bps` (see `rate::sharp_policy`): the bitrate, the
     /// expected frame rate and a cap on how coarse frames may get. Returns the frame-rate
-    /// ceiling for capture.
-    pub fn apply_policy(&self, bps: u32) -> u32 {
-        let (fps, qp) = crate::rate::sharp_policy(bps);
+    /// ceiling for capture (at most `max_fps`: what the display and viewers can show).
+    pub fn apply_policy(&self, bps: u32, max_fps: u32) -> u32 {
+        let (fps, qp) = crate::rate::sharp_policy(bps, max_fps);
         set_rate(&self.session, bps);
         self.set(
             unsafe { kVTCompressionPropertyKey_ExpectedFrameRate },
@@ -345,6 +364,7 @@ pub fn supports_rext() -> bool {
                 1_000_000,
                 true,
                 true,
+                false,
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(|_| {}),
             )
@@ -367,6 +387,7 @@ pub fn supports_hevc() -> bool {
             30,
             1_000_000,
             true,
+            false,
             false,
             Arc::new(AtomicBool::new(false)),
             Arc::new(|_| {}),

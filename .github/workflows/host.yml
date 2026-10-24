@@ -27,6 +27,19 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace --profile ci
       - run: cargo build --profile ci -p glass-host
+      # Glass Microphone (native/glass-mic): builds, and loads as an audio plug-in.
+      - if: runner.os == 'macOS'
+        run: |
+          cmake -S native/glass-mic -B target/glass-mic -DCMAKE_BUILD_TYPE=Release
+          cmake --build target/glass-mic
+          clang++ -std=c++17 native/glass-mic/check.cpp -framework CoreFoundation -framework CoreAudio -o target/glass-mic/check
+          target/glass-mic/check target/glass-mic/GlassMicrophone.driver/Contents/MacOS/GlassMicrophone
+      # The now-playing helper: builds, loads into /usr/bin/perl, and reports a JSON line.
+      - if: runner.os == 'macOS'
+        run: |
+          mkdir -p target/now-playing
+          clang -dynamiclib -fobjc-arc -framework Foundation native/now-playing/now_playing.m -o target/now-playing/libglassnowplaying.dylib
+          (sleep 3; echo) | /usr/bin/perl -e 'use DynaLoader; my $l = DynaLoader::dl_load_file($ARGV[0]) or die DynaLoader::dl_error(); my $s = DynaLoader::dl_find_symbol($l, "glass_now_playing") or die "no symbol"; DynaLoader::dl_install_xsub("main::run", $s); run();' target/now-playing/libglassnowplaying.dylib | head -1 | grep -q artworkId
       - if: runner.os == 'Linux'
         uses: actions/setup-node@v4
         with: { node-version: 24 }

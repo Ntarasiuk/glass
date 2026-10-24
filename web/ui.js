@@ -19,7 +19,7 @@ const storageSet = (key, value) => {
 };
 
 
-export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, onOpenDevice = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, onOpenDevice = () => {}, onExtend = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -83,7 +83,6 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   on('btn-audio', onAudio);
   on('btn-mic', () => onMic?.());
   on('btn-fullscreen', onFullscreen);
-  on('btn-stats', onToggleStats);
   on('btn-terminal', onTerminal);
   on('btn-ports', () => toggleMenu('ports'));
   on('btn-hide-toolbar', () => setToolbarHidden(true));
@@ -356,6 +355,16 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
         }),
       );
     }
+    // This screen as one more display of the Mac's, beside its main one.
+    if (extendAvailable) {
+      items.push(
+        document.createElement('hr'),
+        menuItem('Use as a second display', extended ? 'on' : 'extends the desktop', {
+          checked: extended,
+          onSelect: () => { setMenuOpen('displays', false); onExtend(!extended); },
+        }),
+      );
+    }
     // Resolution: sized to this screen (sharper and faster), or the Mac's full size.
     const native = displays.find((d) => d.id === streamed[0]) ?? displays[0];
     items.push(
@@ -421,11 +430,24 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   let resolutionMode = resolution;
   let lastDisplays;
 
-  // The computer menu (owner only): privacy screen and restarts.
+  // The … menu: stats for everyone; for the owner, the privacy screen, restarts and the
+  // console.
+  let statsOn = false;
+  let isOwner = false;
   let privacyAvailable = false;
   let privacyOn = false;
   function renderMore() {
-    const items = [];
+    const items = [
+      menuItem('Stats', 'Ctrl+Shift+H', {
+        checked: statsOn,
+        onSelect: () => { setMenuOpen('more', false); onToggleStats?.(); },
+      }),
+    ];
+    if (!isOwner) {
+      menus.more.panel.replaceChildren(...items);
+      return;
+    }
+    items.push(document.createElement('hr'));
     if (privacyAvailable) {
       const note = document.createElement('p');
       note.className = 'note';
@@ -464,6 +486,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     menus.more.panel.replaceChildren(...items);
   }
   let consoleUrl; // the owner's console (/admin/), from the Computer menu
+  let extendAvailable = false; // owner, and the host can add a display
+  let extended = false; // this device is a second display now
   let canFit = true;
   let sharpAvailable = false;
   let sharpOn = false;
@@ -569,6 +593,12 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       if (!input) $('btn-shortcuts').classList.add('hidden');
       renderBar();
     },
+    /** "Use as a second display": offered (`available`) and on (`on`). */
+    setExtend({ available = extendAvailable, on = extended } = {}) {
+      extendAvailable = available;
+      extended = on;
+      if (lastDisplays) renderDisplays(...lastDisplays);
+    },
     /** Only the owner can reshape the host's display (guests get an error). */
     setCanFit(on) {
       canFit = on;
@@ -594,12 +624,11 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       resolutionMode = mode;
       if (lastDisplays) renderDisplays(...lastDisplays);
     },
-    /** The computer menu: owners only; the privacy item only where the host supports it. */
-    setComputerControls({ isOwner, privacy, console: url }) {
+    /** The … menu: owner items only for the owner; the privacy item only where the host supports it. */
+    setComputerControls({ isOwner: owner, privacy, console: url }) {
       privacyAvailable = privacy;
-      consoleUrl = isOwner ? url : undefined;
-      $('btn-more').classList.toggle('hidden', !isOwner);
-      if (!isOwner) setMenuOpen('more', false);
+      isOwner = owner;
+      consoleUrl = owner ? url : undefined;
       renderMore();
     },
     setPrivacyOn(on) {
@@ -607,7 +636,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       renderMore();
     },
     setStatsPressed(on) {
-      $('btn-stats').setAttribute('aria-pressed', String(on));
+      statsOn = on;
+      renderMore();
     },
     /** The ⌘ menu (Mac shortcuts and key remaps) only applies to Mac hosts. */
     setHostOs(os) {

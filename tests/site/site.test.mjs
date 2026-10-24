@@ -179,3 +179,49 @@ test('a tarball too big for the site redirects to the GitHub release', async () 
   assert.equal(pinned.headers.get('location'), 'https://github.com/Ntarasiuk/glass/releases/download/v9.9.9/glass-9.9.9-linux-x86_64.tar.gz');
   assert.equal((await get('/releases/nope.tar.gz')).status, 404);
 });
+
+// ---- Quick support ----
+
+const support = (method, path, body, headers = {}) =>
+  fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...headers }, body: body && JSON.stringify(body) });
+const supportLink = () => `${BASE}/app/#r=${'B'.repeat(87)}&l=${'0123456789abcdef'.repeat(2)}`;
+
+test('quick support: the one-liner at /help for terminals, the page for browsers', async () => {
+  const script = await get('/help', 'curl/8.7.1');
+  assert.match(script.headers.get('content-type'), /shellscript/);
+  const text = await script.text();
+  assert.match(text, /Glass quick support/);
+  assert.match(text, /bin\/glass" support/);
+  assert.doesNotMatch(text, /\.local\/bin|LaunchAgents|PREFIX/, 'installs nothing');
+  const page = await (await get('/help', 'Mozilla/5.0 (Macintosh) Safari/605.1.15')).text();
+  assert.match(page, /Help someone with their computer/);
+  assert.match(page, /\/api\/support\/claim/);
+});
+
+test('quick support: a code stands for a Glass link once', async () => {
+  assert.equal((await support('POST', '/api/support', { url: 'https://evil.example/app/#r=x&l=y' })).status, 400);
+  assert.equal((await support('POST', '/api/support', { url: `${BASE}/app/#r=short&l=1` })).status, 400);
+  const made = await (await support('POST', '/api/support', { url: supportLink() })).json();
+  assert.match(made.code, /^\d{9}$/);
+  assert.ok(made.cancel.length >= 20);
+  assert.ok(made.expires * 1000 > Date.now() + 50 * 60_000);
+  // Typed with spaces, as read out.
+  const spaced = made.code.replace(/(\d{3})(?=\d)/g, '$1 ');
+  const claimed = await support('POST', '/api/support/claim', { code: spaced });
+  assert.equal(claimed.status, 200);
+  assert.equal((await claimed.json()).url, supportLink());
+  assert.equal((await support('POST', '/api/support/claim', { code: made.code })).status, 404, 'works once');
+});
+
+test('quick support: stopping cancels the code', async () => {
+  const made = await (await support('POST', '/api/support', { url: supportLink() })).json();
+  assert.equal((await support('DELETE', '/api/support', undefined, { 'x-cancel': 'wrong' })).status, 200);
+  assert.equal((await support('DELETE', '/api/support', undefined, { 'x-cancel': made.cancel })).status, 200);
+  assert.equal((await support('POST', '/api/support/claim', { code: made.code })).status, 404);
+});
+
+test('quick support: guessing codes is slow', async () => {
+  let status;
+  for (let i = 0; i < 25; i++) status = (await support('POST', '/api/support/claim', { code: '000000000' })).status;
+  assert.equal(status, 429);
+});

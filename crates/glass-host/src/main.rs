@@ -5,6 +5,7 @@ mod computer;
 mod admin;
 mod acl;
 mod approval;
+mod browse;
 mod codec;
 mod connlog;
 mod control;
@@ -19,11 +20,13 @@ mod mcp;
 mod media;
 mod mic;
 mod notify;
+mod now_playing;
 mod oidc;
 mod passkey;
 mod posture;
 mod power;
 mod privacy;
+mod clip;
 mod push;
 mod recording;
 mod scim;
@@ -32,6 +35,7 @@ mod sharp;
 mod terminal;
 mod wol;
 mod rate;
+mod refresh;
 mod remote;
 mod resolution;
 mod rtp;
@@ -39,6 +43,7 @@ mod server;
 mod setup;
 mod soft_encode;
 mod status;
+mod support;
 mod tailscale;
 mod testmode;
 mod thumbs;
@@ -86,8 +91,8 @@ struct Args {
     /// Port for WebTransport (UDP).
     #[arg(long, default_value_t = 4433)]
     wt_port: u16,
-    /// Capture frame rate cap.
-    #[arg(long, default_value_t = 60)]
+    /// Capture frame rate cap. Viewers get 60, or up to 120 on a fast screen (macOS).
+    #[arg(long, default_value_t = 120)]
     fps: i32,
     /// Target bitrate in Mbps.
     #[arg(long, default_value_t = 30)]
@@ -144,6 +149,19 @@ enum Command {
         /// Just (re)create Glass.app in ~/Applications.
         #[arg(long)]
         install: bool,
+    },
+    /// Get help from someone: shows a code they type at glassdesk.dev/help to see and
+    /// control this computer, after you allow them. Nothing stays once you stop it.
+    Support {
+        /// No window: the code and questions in this terminal.
+        #[arg(long)]
+        no_window: bool,
+        /// One JSON line {code, url, http_port, dir}, then wait (scripts and tests).
+        #[arg(long)]
+        json: bool,
+        /// Test mode host (a test pattern, recorded input).
+        #[arg(long, hide = true)]
+        test: bool,
     },
     /// Show whether the background service is running and what it can do.
     Status {
@@ -260,6 +278,12 @@ enum Command {
     Deny { id: Option<u64> },
     /// Send a message to everyone viewing.
     Chat { message: Vec<String> },
+    /// Viewers' microphones on this Mac (through BlackHole): status, or install BlackHole.
+    #[cfg(target_os = "macos")]
+    Mic {
+        #[arg(value_parser = ["status", "install", "uninstall"], default_value = "status")]
+        action: String,
+    },
     /// Devices that get notifications (turned on in each device's viewer): list, test, or
     /// turn one off.
     Notifications {
@@ -574,7 +598,35 @@ const FEEDBACK_URL: &str = "https://glassdesk.dev/api/feedback";
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    // Quick support keeps everything in its own temporary config, chosen before anything
+    // (or any thread) reads the environment.
+    let support_dir = match &args.command {
+        Some(Command::Support { .. }) => {
+            let dir = support::new_dir()?;
+            // SAFETY: still single-threaded; nothing has read the environment yet.
+            unsafe { std::env::set_var("GLASS_CONFIG_DIR", &dir) };
+            Some(dir)
+        }
+        _ => None,
+    };
     let rt = tokio::runtime::Runtime::new()?;
+    if let (Some(dir), Some(Command::Support { no_window, json, test })) = (support_dir, &args.command) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let session = match support::Session::start(dir.clone(), *test) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
+        };
+        // On the Mac's own screen: a window. Over SSH, with --no-window or --json: here.
+        #[cfg(target_os = "macos")]
+        if !no_window && !json && std::env::var_os("SSH_CONNECTION").is_none() {
+            return app::run_support(rt, session);
+        }
+        let _ = no_window;
+        return rt.block_on(support::run_terminal(session, *json));
+    }
     // The app: `glass app`, or Glass.app (whose executable is this binary).
     #[cfg(target_os = "macos")]
     match &args.command {
@@ -723,6 +775,24 @@ async fn async_main(args: Args) -> Result<()> {
         }
         Some(Command::Allow { id }) => decide_cli(*id, true),
         Some(Command::Deny { id }) => decide_cli(*id, false),
+        #[cfg(target_os = "macos")]
+        Some(Command::Mic { action }) => {
+            match action.as_str() {
+                "install" => println!("{}", mic::install(mic::Ask::Terminal)?),
+                "uninstall" => println!("{}", mic::uninstall(mic::Ask::Terminal)?),
+                _ => match mic::device_name() {
+                    Some(name) if cfg!(target_os = "macos") => {
+                        println!("Ready: a viewer's microphone plays into {name}, which is the Mac's default input while it's on.")
+                    }
+                    Some(name) => println!("Ready: while a viewer's mic is on, apps here can pick \"{name}\"."),
+                    None if cfg!(target_os = "macos") => {
+                        println!("Not set up: a viewer's microphone needs Glass Microphone, a small audio driver. Install it: glass mic install")
+                    }
+                    None => println!("Not set up: a viewer's microphone needs pactl and PipeWire or PulseAudio. Set it up: glass mic install"),
+                },
+            }
+            Ok(())
+        }
         Some(Command::Chat { message }) => {
             let reply = ipc::call(&ipc::Request::Chat {
                 text: message.join(" "),
@@ -792,6 +862,7 @@ async fn async_main(args: Args) -> Result<()> {
         Some(Command::Restart) => restart_service(),
         #[cfg(target_os = "macos")]
         Some(Command::App { .. }) => unreachable!("handled before the runtime starts"),
+        Some(Command::Support { .. }) => unreachable!("handled before the runtime starts"),
         Some(Command::Uninstall) => {
             agent::uninstall()?;
             println!(
@@ -879,6 +950,10 @@ async fn run_host(args: Args) -> Result<()> {
         testmode::enable();
         info!("TEST MODE: test pattern, recorded input, in-memory clipboard");
     }
+    if support::is_host() {
+        info!("quick support session: {}", config_dir().display());
+        support::watch_parent();
+    }
     if let Some(dir) = &args.downloads_dir {
         files::set_downloads_dir(dir.clone());
     }
@@ -957,7 +1032,8 @@ async fn run_host(args: Args) -> Result<()> {
         let awake = platform::keep_awake();
         let video = Arc::new(video::Video::new(
             video::VideoConfig {
-                fps: args.fps,
+                // Linux encodes in software: 60 at most.
+                fps: if cfg!(target_os = "linux") { args.fps.min(60) } else { args.fps },
                 bitrate: args.mbps * 1_000_000,
                 scale: args.scale,
             },

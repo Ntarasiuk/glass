@@ -179,15 +179,18 @@ pub fn split(total: u32, activity: &[u64]) -> Vec<u32> {
 /// ceiling, and a cap on how coarse a frame may get (QP; lower is sharper). When bits run
 /// short it sends fewer, sharp frames rather than many blurry ones; a still screen keeps
 /// refining after motion stops. Measured on 2560×1440 text with VideoToolbox.
-pub fn sharp_policy(bps: u32) -> (u32, u32) {
-    policy(bps, crate::sharp::active())
+///
+/// `max_fps`: what the display and its viewers can show (60, or up to 120 for a fast
+/// screen; see crate::refresh).
+pub fn sharp_policy(bps: u32, max_fps: u32) -> (u32, u32) {
+    policy(bps, crate::sharp::active(), max_fps)
 }
 
 /// [`sharp_policy`] for a bitrate, with or without sharp text (a viewer reading code or
 /// documents): then frames come at most half as often, each allowed to be finer (QP 4
 /// lower), so the same bits buy detail instead of motion.
-pub fn policy(bps: u32, text: bool) -> (u32, u32) {
-    let (fps, qp) = motion_policy(bps);
+pub fn policy(bps: u32, text: bool, max_fps: u32) -> (u32, u32) {
+    let (fps, qp) = motion_policy(bps, max_fps);
     if text {
         ((fps / 2).clamp(5, 30), qp.saturating_sub(4).max(20))
     } else {
@@ -195,15 +198,21 @@ pub fn policy(bps: u32, text: bool) -> (u32, u32) {
     }
 }
 
-fn motion_policy(bps: u32) -> (u32, u32) {
-    match bps {
+/// A fast screen (over 60 Hz) gets its extra frames once the link carries a full 60 fps
+/// comfortably: the adaptive rate settles near 10 Mbps for ordinary desktop work, and
+/// frames of a moving picture are mostly small differences.
+fn motion_policy(bps: u32, max_fps: u32) -> (u32, u32) {
+    let (fps, qp) = match bps {
+        b if b >= 10_000_000 && max_fps > 90 => (120, 28),
+        b if b >= 8_000_000 && max_fps > 60 => (90, 30),
         b if b >= 12_000_000 => (60, 28),
         b if b >= 8_000_000 => (60, 30),
         b if b >= 5_000_000 => (45, 30),
         b if b >= 3_000_000 => (30, 30),
         b if b >= 1_500_000 => (15, 28),
         _ => (10, 28),
-    }
+    };
+    (fps.min(max_fps.max(1)), qp)
 }
 
 #[cfg(test)]
@@ -229,12 +238,12 @@ mod tests {
     #[test]
     fn text_policy_trades_frames_for_detail() {
         for bps in [500_000, 2_000_000, 6_000_000, 20_000_000] {
-            let (fps, qp) = policy(bps, false);
-            let (tfps, tqp) = policy(bps, true);
+            let (fps, qp) = policy(bps, false, 60);
+            let (tfps, tqp) = policy(bps, true, 60);
             assert!(tfps < fps && tfps >= 5, "{bps}: {tfps} vs {fps}");
             assert!(tqp < qp && tqp >= 20, "{bps}: {tqp} vs {qp}");
         }
-        assert_eq!(policy(20_000_000, true), (30, 24));
+        assert_eq!(policy(20_000_000, true, 60), (30, 24));
     }
 
     #[test]
@@ -348,12 +357,24 @@ mod tests {
     }
 
     #[test]
+    fn a_fast_screen_gets_more_frames_once_the_link_carries_60() {
+        assert_eq!(policy(30_000_000, false, 60).0, 60, "60 Hz viewers stay at 60");
+        assert_eq!(policy(30_000_000, false, 120).0, 120);
+        assert_eq!(policy(10_000_000, false, 120).0, 120);
+        assert_eq!(policy(9_000_000, false, 120).0, 90);
+        assert_eq!(policy(6_000_000, false, 120).0, 45, "a slow link: as for anyone");
+        assert_eq!(policy(30_000_000, false, 90).0, 90, "a 90 Hz screen gets 90");
+        assert_eq!(policy(30_000_000, false, 30).0, 30, "a slow display caps it");
+        assert_eq!(policy(30_000_000, true, 120).0, 30, "sharp text still trades frames for detail");
+    }
+
+    #[test]
     fn less_bitrate_means_fewer_frames_never_coarser_ones() {
         let mut last_fps = u32::MAX;
         for bps in [
             20_000_000, 10_000_000, 6_000_000, 4_000_000, 2_000_000, 1_000_000,
         ] {
-            let (fps, qp) = sharp_policy(bps);
+            let (fps, qp) = policy(bps, false, 60);
             assert!(fps <= last_fps);
             assert!(qp <= 30, "QP cap never loosens past 30");
             last_fps = fps;

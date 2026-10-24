@@ -15,13 +15,17 @@ Glass streams a Mac's screen to a web browser and sends mouse, keyboard, and tou
 Features:
 
 - **Low latency.** About 15–30 ms capture-to-display on a home network or Tailscale, measured live in the stats overlay.
+- **120 fps and wide colour.** A viewer on a fast screen (120 Hz and up) gets up to 120 frames a second from a Mac whose display refreshes that fast; a wide-colour (Display P3) Mac display arrives in P3 instead of being clipped to sRGB.
 - **Works in the browser.** Open a URL on the iPad; there's no app to install. Add it to the Home Screen for a true fullscreen app.
 - **Full control.** Mouse, trackpad, keyboard, and touch (tap to click, drag, long-press to right-click, two-finger scroll), plus an on-screen keyboard button.
 - **Unlocks a locked Mac.** Type the password at the lock screen from the remote device.
+- **Apple Pencil.** Pressure and tilt reach the Mac as tablet input, so drawing apps (Photoshop, Affinity, Krita) respond as they do to a drawing tablet.
 - **Multiple displays.** Show one display, switch between them, or show all of them side by side in their macOS arrangement.
+- **A second display.** Your iPad, a laptop or any browser becomes one more display that extends the Mac's desktop (Displays › Use as a second display), Retina where the screen is.
 - **Audio.** Streams Mac system audio to the browser.
-- **Clipboard sync.** Copy on the Mac, paste on the iPad, and the reverse.
+- **Clipboard sync.** Copy on the Mac, paste on the iPad, and the reverse: text, rich text and images.
 - **File transfer.** Send files from the iPad to the Mac's Downloads folder, or pick files on the Mac and save them on the iPad. Transfers are direct and peer-to-peer.
+- **A file browser.** The owner browses the computer's folders in the viewer (Files): previews, download, upload into any folder, new folder, rename, move to the Trash.
 - **Auto-reconnect.** Survives iPad tab suspension, network changes, and host restarts.
 - **Notifications.** On your phone, iPad or laptop, even with Glass closed: an agent needs you, someone asks to connect (Allow or Deny right from the notification), or a message. End-to-end encrypted, per device, and off until you turn them on.
 - **A real app on every device.** Install it from the browser (Add to Home Screen on iPhone and iPad): its own icon with a badge, a shortcut to each of your machines, sharing photos and files to the Mac from any app, and it opens even when the computer is asleep to say so.
@@ -31,13 +35,15 @@ Features:
 - **One-time links.** Let another device in without sharing the token: each link works once and gives that device its own pass, revocable with `glass link --revoke`.
 - **Links with limits.** View-only, no files, no clipboard, a time limit, ask the person at the computer first, or require a passkey (Face ID, Touch ID or a security key) every time.
 - **Helping someone.** Chat, drawing on the screen (shown on the computer too), a privacy screen that blanks the computer and blocks its own keyboard and mouse, and a connection history.
+- **Quick support.** Someone without Glass pastes one line (`curl -fsSL glassdesk.dev/help | sh`) and reads you a code; you type it at glassdesk.dev/help and connect once they allow it. Nothing stays installed afterwards.
 - **Sharp text.** A per-viewer mode for code and documents: native size, finer frames, HEVC 4:2:2 colour while things move and a lossless full-colour (4:4:4) picture once the screen is still.
 - **One window.** Stream a single app's window instead of the whole display (macOS).
 - **Terminal and ports.** A shell on the computer inside the viewer, and its local web servers (`/fwd/3000/`) opened from your tailnet.
 - **Recording.** Record sessions to MP4 on the computer, per session or always.
-- **Controllers and microphone.** Game controllers and your microphone reach the computer (Linux hosts).
+- **Microphone and controllers.** Your microphone reaches the computer, so its apps hear you (on a Mac through Glass Microphone, a small audio driver Glass installs with one password prompt). Game controllers reach Linux hosts.
 - **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps are remembered for each computer; an optional shortcut bar puts Mac shortcuts one tap away.
 - **Power.** Wake a sleeping machine (Wake-on-LAN), restart Glass or the whole computer and reconnect.
+- **AI agents, supervised.** `glass mcp` lets Claude Code, Claude Desktop, Cursor or any MCP client use the computer (and your other computers running Glass) while you watch each step, pause or stop it, and approve anything risky, from the viewer, the Mac app or a notification.
 - **The Glass app (macOS).** A native window for everything the command line does: setup, who's connected, links with QR codes, machines, history, AI agents, settings and teams. In Applications, Spotlight and the menu bar (**Open Glass…**).
 - **A console.** `https://<computer>/admin/`: who's connected, requests to allow, links with QR codes, devices, history, settings, access rules and an address book of your machines.
 - **For teams.** Single sign-on (any OpenID Connect provider), LDAP, SCIM provisioning, access rules per email, domain or group, and device posture checks.
@@ -137,6 +143,17 @@ Devices that aren't on your tailnet, or belong to another tailnet user, are aske
 
 **From anywhere (no Tailscale on the device).** `glass link --anywhere` makes a link like `https://glassdesk.dev/app/#r=…&l=…` that works from any network. The browser and your computer connect directly over WebRTC: UDP, end-to-end encrypted, about as fast as on the tailnet. When a direct path is impossible (some cellular and corporate networks), traffic goes through Cloudflare's TURN relay, still end-to-end encrypted. glassdesk.dev only introduces the two sides; your computer keeps one outgoing connection to it and opens no ports. The link carries your computer's public key and the computer signs every connection answer, so the browser refuses anyone else, glassdesk.dev included. Remote access is off until you make such a link (or run `glass remote on`); `glass remote off` turns it off. One thing to know: in this mode the viewer page itself comes from glassdesk.dev, whereas on your tailnet it comes from your own computer.
 
+## Help someone (quick support)
+
+For helping a parent or a friend who doesn't have Glass, and shouldn't have to install anything:
+
+1. They open Terminal (on a Mac: Spotlight, type Terminal) and paste `curl -fsSL glassdesk.dev/help | sh`. If they already have Glass, `glass support` does the same.
+2. A Glass window shows a nine-digit code (in the terminal on Linux or over SSH). The first time, macOS asks them to allow Screen Recording and Accessibility for Glass; the window has buttons for both.
+3. You type the code at [glassdesk.dev/help](https://glassdesk.dev/help). They're asked before you can see anything, and your viewer says "You're helping …".
+4. They click **Stop sharing** (or press Ctrl+C, or close the window) when you're done.
+
+Nothing stays on their computer: Glass runs from a temporary folder with its own temporary settings, token and keys, not as a background service and not at login, and stopping deletes all of it. The connection is the same as `glass link --anywhere`: direct, end-to-end encrypted, no ports opened. Each code works once, for an hour; glassdesk.dev keeps only a salted hash of it, and a code typed wrong too often is locked out for that browser. **New code** in the window (or `n` in the terminal) replaces it. A downloadable app for the same thing needs Apple notarization and is coming; for now it's the one line.
+
 ## Links with limits
 
 `glass link` takes options that limit what the device may do:
@@ -151,35 +168,43 @@ Devices that aren't on your tailnet, or belong to another tailnet user, are aske
 
 ## Using Glass
 
-The toolbar (top right) has:
+The toolbar (top right) groups its buttons: machines and displays, keyboard, sound, files, things for everyone connected (chat, drawing, recording), tools (terminal, ports), and the view (this device, fullscreen, the **…** menu, hide). It has:
 
 - **Displays:** pick one display, or **All displays** to show every screen side by side in the same arrangement as System Settings → Displays.
 - **⌘ (Mac shortcuts):** one-tap app switcher, Spotlight, Mission Control, Hide, Quit, Close window, screenshot, Force Quit, and Lock Screen. Also keyboard remapping options (see below).
 - **Keyboard:** brings up the iPad's on-screen keyboard.
 - **Send files to Mac:** uploads to `~/Downloads` (drag and drop also works, folders included).
 - **Get files from Mac:** opens a file chooser on the Mac's screen; chosen files arrive with a Save button.
-- **Audio:** turns Mac system audio on or off for this device.
-- **Fullscreen** (hidden when running as a Home Screen app) and **Stats**.
+- **Files** (the computer's owner only): browse the home folder from the viewer, with previews of images, PDFs and videos. Filter as you type, download (or drag a file onto your desktop in Chrome), upload into the folder you're in (button, or drop files and folders on it), make folders, rename (F2) and move to the Trash (Delete). Arrow keys, Enter to open, Backspace to go up.
+- **Audio:** turns Mac system audio on or off for this device. Your browser's media controls (Chrome's media hub, the iPhone or iPad lock screen, media keys) show what the computer is playing, with its artwork, and play, pause, skip and seek it there.
+- **Fullscreen** (hidden when running as a Home Screen app).
+- **… (More):** **Stats** (latency, frame rate, bitrate; Ctrl+Shift+H) for everyone, and for the computer's owner the privacy screen, restarts and the console.
 - **Hide toolbar** (last button): slides it away for an unobstructed screen; the small tab at the top brings it back. Remembered.
 
 **Display previews.** With two or more displays, a strip of small live previews of each one (and **All**) sits in the empty band below the picture whenever there's room; the one being shown is outlined, and tapping another switches to it. Without room it waits behind a small tab at the bottom. Hide it with its ⌄ button; that's remembered. Live previews of displays not being shown need macOS 14 or newer.
 
 Touch gestures: tap = click, drag = drag, long-press = right-click, two fingers = scroll.
 
+Apple Pencil and other styluses draw with pressure and tilt: the Mac sees a pen tablet, so Photoshop, Affinity, Krita and other drawing apps vary the stroke. Hovering (Pencil hover on newer iPads) moves the pointer without clicking.
+
 More in the toolbar:
 
 - **Displays › Sharp text:** for code and documents. See *Sharp text* below.
 - **Displays › Apps:** show one app's window on its own (macOS).
+- **Displays › Use as a second display** (macOS, owner): this screen becomes one more display of the Mac's, to the right of its main one (Retina on an iPad), so the desktop extends onto it like Sidecar, from any browser. Drag windows onto it from the Mac; turn it off to go back to what you were watching. It goes away when you disconnect. Everyone viewing sees the same display, so it's best used alone.
 - **Draw on the screen:** annotate; the drawing also shows on the computer's screen.
 - **Chat:** messages with the person at the computer (`glass chat "…"` from there).
 - **Terminal:** a shell on the computer, in the viewer. Drag its top edge to resize it, or use **Full screen** (or double-click its title bar); both are remembered.
 - **Forwarded ports:** open the computer's local web servers (only ports allowed with `glass config forward-ports 3000,8888`, and only for your own devices).
 - **Record on the host:** records this session to `~/Movies/Glass` (`~/Videos/Glass` on Linux). `glass config record on` records every session.
-- **Microphone:** sends your microphone to the computer (Linux hosts).
-- **Computer:** **Privacy screen** (blanks the computer's screen and ignores its keyboard and mouse while you're connected; `glass privacy on|off` from there), **Restart Glass**, **Restart computer** (Glass reconnects once someone is logged in) and **Console**.
+- **Microphone:** sends your microphone to the computer, where apps pick it like any other mic.
+  - **Mac:** it comes in as **Glass Microphone**, a small audio driver included with Glass, made the Mac's default input while your mic is on and put back after. Install it once: tap the mic in the viewer (owner), the Glass app (Home or Settings › Microphone from your devices), or `glass mic install`; it asks for the Mac's password. BlackHole works too if it's already installed. `glass mic uninstall` removes the driver.
+  - **Linux:** it comes in as a "Glass microphone" input while your mic is on, through PipeWire or PulseAudio. It needs `pactl`; `glass mic install` adds it with your package manager if it's missing.
+- **… (More), for the owner:** **Privacy screen** (blanks the computer's screen and ignores its keyboard and mouse while you're connected; `glass privacy on|off` from there), **Restart Glass**, **Restart computer** (Glass reconnects once someone is logged in) and **Console**.
 - **Machines:** sleeping machines Glass has seen before can be woken with Wake-on-LAN (also `glass wake <name|mac>`).
 - **This device** (the bell): what this browser does for Glass.
   - **Notifications:** messages, questions (an agent asking before it acts or needing your help, someone asking to connect) and activity (someone joined, an update is ready), even with Glass closed. On iPhone and iPad, add Glass to the Home Screen first. `glass notifications` lists the devices that get them (`test`, `off <id>`), as does the Glass app's Settings.
+  - **Smooth motion:** on a screen faster than 60 Hz, up to 120 frames a second (on by default there; macOS hosts, when the Mac's display is that fast too). Every viewer shares the stream, so with a 60 Hz viewer connected everyone gets 60. The stats overlay shows the frame rate. Browsers that hold pages to 60 Hz (Safari, by default) stay at 60.
   - **Keep screen awake** while connected (on by default).
   - **Picture in picture:** the screen in a floating window while you do something else.
   - **Use all my screens:** with several monitors here and several displays there, one display on each (Chrome and Edge).
@@ -208,9 +233,11 @@ Everything else, including ⌘C, ⌘V, ⌘Q, ⌘W, and arrows, works directly fr
 
 ### Clipboard
 
-- ⌘C or ⌘X on the Mac (from the iPad keyboard) puts the Mac's copied text on the iPad's clipboard.
-- ⌘V pastes the iPad's clipboard into the Mac.
-- Any Mac clipboard change is sent to connected devices.
+- ⌘C or ⌘X on the Mac (from the iPad keyboard) puts what the Mac copied on the iPad's clipboard: text, rich text (formatting and links) and images. Safari asks for a tap before taking an image; tap **Copy here** in the message that appears.
+- ⌘V pastes the iPad's clipboard into the Mac, images and rich text included (a photo copied in Photos pastes into a Mac document).
+- Any Mac clipboard change is sent to connected devices. Images (up to 8 MB) are only sent when you copy them, so a big screenshot never slows the stream.
+- On Linux hosts, images work both ways but rich text arrives as plain text.
+- Links made with `--no-clipboard` get none of this.
 
 ### Sharp text
 
@@ -277,6 +304,8 @@ glass kick [id]          End one session, or every one
 glass requests / allow [id] / deny [id]   Connection requests waiting for an answer
 glass chat "…"           Message everyone viewing
 glass notifications      Devices that get notifications (test, off <id>)
+glass mic [install|uninstall]  Viewers' microphones here: status, set up, or remove the driver
+glass support            Get help: a code for someone at glassdesk.dev/help (nothing stays afterwards)
 glass privacy on|off     Blank this screen and block local input while viewed
 glass log [-n 20] [--json]   Connection history
 glass wake <name|mac>    Wake a machine with Wake-on-LAN
@@ -356,6 +385,7 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 - With Tailscale, traffic stays on your private tailnet and goes directly between devices when possible.
 - Access control: a device is let in if Tailscale reports it belongs to the same user as the Mac, or if it presents the access token. Glass sends nothing to a session (video, audio, clipboard, input) until it is authenticated. Links, single sign-on, LDAP, access rules, posture checks and passkeys can narrow that further; see above.
 - Glass runs as your user (a LaunchAgent on macOS, a systemd user service on Linux), never as root.
+- The file browser is for the computer's owner only (not links or guests), sees only the home folder (no `..`, no symlinks out), and moves to the Trash rather than deleting.
 - Notifications are the one thing that leaves your network: the computer sends them through your browser's push service (Apple, Google, Mozilla or Microsoft), encrypted end to end (RFC 8291), so the push service can't read them. Only devices you turn them on for get them; guests only ever get messages.
 - The glassdesk.dev website uses Google Analytics on its pages (not on the remote viewer at glassdesk.dev/app), counts downloads using a salted hash of the IP address (no raw IPs stored) and stores feedback you choose to send. The Glass app itself sends nothing to glassdesk.dev except feedback you submit.
 
@@ -376,6 +406,8 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 - **iPad leaves fullscreen when swiping down:** a Safari fullscreen rule; use Add to Home Screen instead.
 - **⌘Tab or ⌘Space doesn't reach the Mac:** iPadOS reserves them; use Ctrl+Tab / Ctrl+Space (Ctrl as ⌘) or the ⌘ menu.
 - **"connecting…" forever:** both devices must be on Tailscale, and the URL must use the Mac's `.ts.net` name (not an IP), because the certificate is issued for that name.
+- **The mic needs setting up:** run `glass mic` to check and `glass mic install` to set it up (Glass Microphone on a Mac, `pactl` on Linux). Another loopback driver works too on a Mac: set `GLASS_MIC_DEVICE` to part of its name in the service's environment.
+- **The Mac's input is still Glass Microphone (or BlackHole):** Glass puts your previous input back when the mic turns off, and at its next start if it stopped while a mic was on. Or pick it in System Settings › Sound › Input.
 - **Displays missing:** sleeping displays aren't capturable; Glass keeps displays awake while running and wakes them on start.
 
 ## FAQ
