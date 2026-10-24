@@ -112,6 +112,11 @@ writeFileSync(
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="${ogImageAlt}">
+  <meta property="og:video" content="${SITE}/og.mp4">
+  <meta property="og:video:secure_url" content="${SITE}/og.mp4">
+  <meta property="og:video:type" content="video/mp4">
+  <meta property="og:video:width" content="1200">
+  <meta property="og:video:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="${SITE}/og.png">
   <meta name="twitter:image:alt" content="${ogImageAlt}">
