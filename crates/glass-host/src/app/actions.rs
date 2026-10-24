@@ -165,9 +165,26 @@ pub fn uninstall() -> Result<String> {
     Ok("Glass is off and removed from login items.".into())
 }
 
-pub fn update() -> Result<String> {
-    crate::update::start_self_update()?;
-    Ok("Updating. Glass restarts on the new version in a moment.".into())
+/// Installs the newest release (the installer restarts the service on it) and waits for
+/// it; the version now installed.
+pub fn update_now() -> Result<String> {
+    crate::update::run_logged()?;
+    let out = std::process::Command::new(glass_path()).arg("--version").output()?;
+    let version = String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1).unwrap_or_default().to_string();
+    anyhow::ensure!(!version.is_empty(), "the update didn't finish; see update.log in Glass's logs");
+    Ok(version)
+}
+
+/// Opens Glass.app again in a moment, once this one has quit (so it's the new version).
+pub fn relaunch() {
+    use std::os::unix::process::CommandExt;
+    let app = super::bundle::path();
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("sleep 1; open \"$0\"")
+        .arg(&app)
+        .process_group(0)
+        .spawn();
 }
 
 pub fn feedback(text: &str) -> Result<String> {
