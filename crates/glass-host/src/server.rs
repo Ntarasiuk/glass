@@ -22,7 +22,7 @@ use wtransport::{Endpoint, Identity, RecvStream, SendStream, ServerConfig};
 
 use crate::audio::AudioPackets;
 use crate::clock::now_us;
-use crate::control::{self, ClientMsg, STREAM_FILE, STREAM_INPUT, ServerMsg};
+use crate::control::{self, ClientMsg, STREAM_CLIPBOARD, STREAM_FILE, STREAM_INPUT, ServerMsg};
 use crate::files;
 use crate::media::EncodedFrame;
 use crate::media::{Clipboard, InputSink, Layout, VideoSource};
@@ -830,11 +830,30 @@ async fn control(
             ClientMsg::Clipboard { .. } if !perms.clipboard => {
                 warn!("{peer}: clipboard is off for this link; ignored")
             }
-            ClientMsg::Clipboard { text, paste } => {
-                shared.clipboard.set_text(&text);
+            ClientMsg::ClipboardImage if !perms.clipboard => {}
+            ClientMsg::Clipboard { text, html, paste } => {
+                match crate::clip::html_for_viewer(html) {
+                    Some(html) => shared.clipboard.set(&crate::clip::Clip { text, html: Some(html), image: None }),
+                    None => shared.clipboard.set_text(&text),
+                }
                 if paste && perms.input {
                     shared.injector.lock().unwrap().paste();
                 }
+            }
+            ClientMsg::ClipboardImage => {
+                let (clipboard, conn) = (shared.clipboard.clone(), ctx.conn.clone());
+                let ctl = ctx.ctl_tx.clone();
+                tokio::spawn(async move {
+                    let png = tokio::task::spawn_blocking(move || clipboard.image_png()).await.ok().flatten();
+                    let result = match png {
+                        Some(png) if png.len() <= crate::clip::MAX_IMAGE => crate::clip::send_image(&conn, &png).await,
+                        Some(_) => Err(anyhow::anyhow!("The image on the clipboard is too big to send (over 8 MB).")),
+                        None => Err(anyhow::anyhow!("There's no image on the clipboard any more.")),
+                    };
+                    if let Err(e) = result {
+                        let _ = ctl.send(ServerMsg::Error { msg: format!("{e:#}") });
+                    }
+                });
             }
             ClientMsg::Video { on } => {
                 ctx.video_on.store(on, Ordering::Relaxed);
@@ -1415,6 +1434,23 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
                 "{}: input stream closed after {events} events",
                 ctx.conn.remote_address()
             );
+        }
+        STREAM_CLIPBOARD if !perms.clipboard => {
+            warn!("{}: clipboard is off for this link; ignored", ctx.conn.remote_address());
+        }
+        STREAM_CLIPBOARD => {
+            let (clip, paste) = crate::clip::receive(&mut stream).await?;
+            info!(
+                "{}: clipboard with an image ({} bytes){}",
+                ctx.conn.remote_address(),
+                clip.image.as_ref().map_or(0, Vec::len),
+                if paste { ", pasting" } else { "" }
+            );
+            let clipboard = ctx.shared.clipboard.clone();
+            tokio::task::spawn_blocking(move || clipboard.set(&clip)).await?;
+            if paste && perms.input {
+                ctx.shared.injector.lock().unwrap().paste();
+            }
         }
         STREAM_FILE if !perms.files => {
             let _ = ctx.ctl_tx.send(ServerMsg::Error {

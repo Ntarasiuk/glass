@@ -70,6 +70,23 @@ test.describe('scoped links', () => {
     await pa.waitForTimeout(1000);
     await expect(pa.locator('#auth')).toBeHidden();
   });
+
+  it('a link without the clipboard can\'t paste an image either', async ({ browser, host }) => {
+    const made = await makeLink(host, '--no-clipboard');
+    const guest = await (await browser.newContext()).newPage();
+    await guest.goto(made.url);
+    await expectVideo(guest);
+    await guest.evaluate(() => {
+      const data = new DataTransfer();
+      data.setData('text/plain', 'from a guest');
+      data.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], 'x.png', { type: 'image/png' }));
+      document.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    });
+    // The host hears it and drops it.
+    const hostLog = () => require('node:fs').readFileSync(`${host.dir}/logs/host.log`, 'utf8');
+    await expect.poll(() => hostLog().includes('clipboard is off for this link')).toBe(true);
+    expect(await host.get('/test/clipboard/rich')).toEqual({ text: '', html: null, image: null });
+  });
 });
 
 test.describe('asking first', () => {

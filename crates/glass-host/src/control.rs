@@ -17,6 +17,8 @@ pub const STREAM_INPUT: u8 = b'I';
 pub const STREAM_FILE: u8 = b'F';
 /// host -> client: a lossless (PNG) picture of part of a stream, see `lossless`.
 pub const STREAM_LOSSLESS: u8 = b'P';
+/// Either way: a clipboard with an image, see `clip` (header, then the image bytes).
+pub const STREAM_CLIPBOARD: u8 = b'C';
 
 const MAX_MESSAGE: usize = 16 << 20;
 
@@ -87,12 +89,17 @@ pub enum ClientMsg {
     SelectDisplay { id: u32 },
     /// Stream every display side by side.
     ShowAll,
-    /// Client clipboard text; with `paste`, the host also presses Cmd+V after setting it.
+    /// Client clipboard text (and rich text); with `paste`, the host also presses Cmd+V
+    /// after setting it. One with an image comes as a `STREAM_CLIPBOARD` stream instead.
     Clipboard {
         text: String,
         #[serde(default)]
+        html: Option<String>,
+        #[serde(default)]
         paste: bool,
     },
+    /// Send the host clipboard's image (a `STREAM_CLIPBOARD` stream back).
+    ClipboardImage,
     /// Opens a file chooser on the Mac; chosen files are streamed back.
     PickFiles,
     /// Start or stop sending system audio to this session.
@@ -201,8 +208,14 @@ pub enum ServerMsg {
         current: &'static str,
         version: String,
     },
+    /// The host clipboard changed: its text, rich text (HTML) if any, and whether it holds
+    /// an image (fetched on demand with `clipboardImage`: it can be large).
     Clipboard {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        html: Option<String>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        image: bool,
     },
     FileSaved {
         name: String,

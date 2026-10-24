@@ -49,7 +49,7 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Every display.** Switch screens from live previews along the bottom, or show them all side by side, arranged like your desk.
 - **A toolbar that stays put.** Hide it from its last button for an unobstructed screen; a small tab brings it back.
 - **Every machine.** All your computers in one menu; switch without leaving the page.
-- **Sound, clipboard, files.** System audio, copy and paste both ways, and direct file transfer.
+- **Sound, clipboard, files.** System audio, copy and paste both ways (text, rich text and images), and direct file transfer.
 - **From anywhere.** `glass link --anywhere` makes a one-time link that connects any browser straight to your computer over WebRTC: end-to-end encrypted, no ports opened, no Tailscale needed on the viewer.
 - **Links that work once.** Let a phone or a friend's laptop in without sharing a password. Each device gets its own pass; `glass link --revoke` cuts them all off.
 - **Steady on bad Wi-Fi.** Adapts bitrate, reconnects after sleep or tab suspension, and never shows a corrupted frame.

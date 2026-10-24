@@ -11,7 +11,7 @@ function storage(fn) {
   try { return fn(localStorage); } catch { return undefined; }
 }
 
-export function createDevice({ ui, push, control, log, input, screens, streams, displays, onPause, onPressure, standalone }) {
+export function createDevice({ ui, push, control, log, input, screens, streams, displays, onPause, onPressure, standalone, sendClip = (c) => control({ t: 'clipboard', text: c.text }) }) {
   const touch = matchMedia('(hover: none)').matches;
   let connected = false;
   let installPrompt; // Chromium's beforeinstallprompt, kept for the menu
@@ -136,15 +136,28 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
   // ---- Send this device's clipboard when coming back (Chromium) ----
 
   let clipboardSync = storage((s) => s.getItem(CLIPBOARD_KEY)) === '1';
-  let lastSent;
+  let lastSent; // a fingerprint of the last clipboard sent, so an unchanged one isn't resent
+  /** This device's clipboard: text, rich text and an image, where present. */
+  async function readClipboard() {
+    if (!navigator.clipboard.read) return { text: await navigator.clipboard.readText() };
+    const clip = { text: '' };
+    for (const item of await navigator.clipboard.read()) {
+      const get = (type) => (item.types.includes(type) ? item.getType(type) : undefined);
+      if (!clip.text) clip.text = await (await get('text/plain'))?.text() ?? '';
+      clip.html ??= await (await get('text/html'))?.text();
+      clip.image ??= await get('image/png');
+    }
+    return clip;
+  }
+  const fingerprint = (c) => `${c.text}\u0000${c.html ?? ''}\u0000${c.image?.size ?? ''}`;
   async function sendClipboard() {
     if (!clipboardSync || !connected || !document.hasFocus()) return;
     try {
-      const text = await navigator.clipboard.readText();
-      if (!text || text === lastSent) return;
-      lastSent = text;
-      control({ t: 'clipboard', text });
-      log('info', 'clipboard sent on return', { length: text.length });
+      const clip = await readClipboard();
+      if ((!clip.text && !clip.image) || fingerprint(clip) === lastSent) return;
+      lastSent = fingerprint(clip);
+      sendClip(clip);
+      log('info', 'clipboard sent on return', { length: clip.text.length, html: Boolean(clip.html), image: clip.image?.size });
     } catch {}
   }
   addEventListener('focus', () => setTimeout(sendClipboard, 50));
@@ -278,7 +291,7 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
           clipboardSync = !clipboardSync;
           storage((s) => s.setItem(CLIPBOARD_KEY, clipboardSync ? '1' : '0'));
           // Ask for permission now, in the tap.
-          if (clipboardSync) await navigator.clipboard.readText().then((t) => { lastSent = t; }).catch(() => {});
+          if (clipboardSync) await readClipboard().then((c) => { lastSent = fingerprint(c); }).catch(() => {});
           render();
         },
       }));

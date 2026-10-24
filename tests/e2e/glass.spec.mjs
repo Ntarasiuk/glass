@@ -521,6 +521,60 @@ test.describe('clipboard and files', () => {
     expect((await host.input()).pastes).toBe(1);
   });
 
+  // A 1×1 PNG.
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+  it('pastes rich text and an image on the host', async ({ page, host }) => {
+    await open(page, host);
+    await host.clearInput();
+    await page.evaluate((png) => {
+      const data = new DataTransfer();
+      data.setData('text/plain', 'a caption');
+      data.setData('text/html', '<b>a caption</b>');
+      const bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0));
+      data.items.add(new File([bytes], 'image.png', { type: 'image/png' }));
+      document.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    }, PNG);
+    await expect.poll(async () => (await host.get('/test/clipboard/rich')).image).toBe(PNG);
+    expect(await host.get('/test/clipboard/rich')).toMatchObject({ text: 'a caption', html: '<b>a caption</b>' });
+    await expect.poll(async () => (await host.input()).pastes).toBe(1);
+
+    // Rich text alone rides the control channel.
+    await page.evaluate(() => {
+      const data = new DataTransfer();
+      data.setData('text/plain', 'plain');
+      data.setData('text/html', '<i>plain</i>');
+      document.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    });
+    await expect.poll(() => host.get('/test/clipboard/rich')).toEqual({ text: 'plain', html: '<i>plain</i>', image: null });
+  });
+
+  it('copies rich text and an image from the host with ⌘C', async ({ page, host }) => {
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: host.base });
+    await open(page, host);
+    await fetch(`${host.base}/test/clipboard/rich`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'a caption', html: '<b>a caption</b>', image: PNG }),
+    });
+    await expect.poll(() => host.clientLog('mac clipboard changed').some((e) => e.data?.image)).toBe(true);
+    await page.locator('#screens canvas').first().click();
+    await page.keyboard.press('ControlOrMeta+KeyC');
+    await expect.poll(() => host.clientLog('rich clipboard copied').length, { timeout: 10_000 }).toBeGreaterThan(0);
+    const here = await page.evaluate(async () => {
+      const [item] = await navigator.clipboard.read();
+      const image = item.types.includes('image/png') ? await createImageBitmap(await item.getType('image/png')) : null;
+      return {
+        types: [...item.types].sort(),
+        html: await (await item.getType('text/html')).text(),
+        size: image && [image.width, image.height],
+      };
+    });
+    expect(here.types).toEqual(['image/png', 'text/html', 'text/plain']);
+    expect(here.html).toContain('<b>a caption</b>');
+    expect(here.size).toEqual([1, 1]);
+  });
+
   it('uploads files to the host', async ({ page, host }) => {
     await open(page, host);
     const body = Buffer.alloc(3 * 1024 * 1024, 7);

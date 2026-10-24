@@ -20,7 +20,7 @@ Features:
 - **Unlocks a locked Mac.** Type the password at the lock screen from the remote device.
 - **Multiple displays.** Show one display, switch between them, or show all of them side by side in their macOS arrangement.
 - **Audio.** Streams Mac system audio to the browser.
-- **Clipboard sync.** Copy on the Mac, paste on the iPad, and the reverse.
+- **Clipboard sync.** Copy on the Mac, paste on the iPad, and the reverse: text, rich text and images.
 - **File transfer.** Send files from the iPad to the Mac's Downloads folder, or pick files on the Mac and save them on the iPad. Transfers are direct and peer-to-peer.
 - **Auto-reconnect.** Survives iPad tab suspension, network changes, and host restarts.
 - **Notifications.** On your phone, iPad or laptop, even with Glass closed: an agent needs you, someone asks to connect (Allow or Deny right from the notification), or a message. End-to-end encrypted, per device, and off until you turn them on.
@@ -208,9 +208,11 @@ Everything else, including ⌘C, ⌘V, ⌘Q, ⌘W, and arrows, works directly fr
 
 ### Clipboard
 
-- ⌘C or ⌘X on the Mac (from the iPad keyboard) puts the Mac's copied text on the iPad's clipboard.
-- ⌘V pastes the iPad's clipboard into the Mac.
-- Any Mac clipboard change is sent to connected devices.
+- ⌘C or ⌘X on the Mac (from the iPad keyboard) puts what the Mac copied on the iPad's clipboard: text, rich text (formatting and links) and images. Safari asks for a tap before taking an image; tap **Copy here** in the message that appears.
+- ⌘V pastes the iPad's clipboard into the Mac, images and rich text included (a photo copied in Photos pastes into a Mac document).
+- Any Mac clipboard change is sent to connected devices. Images (up to 8 MB) are only sent when you copy them, so a big screenshot never slows the stream.
+- On Linux hosts, images work both ways but rich text arrives as plain text.
+- Links made with `--no-clipboard` get none of this.
 
 ### Sharp text
 
