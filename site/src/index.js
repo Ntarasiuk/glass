@@ -79,12 +79,39 @@ export default {
       return out;
     }
 
+    if (url.pathname.endsWith('.mp4')) return ranged(await env.ASSETS.fetch(request), request);
+
     if (url.pathname.startsWith('/releases/') && url.pathname.endsWith('.tar.gz')) {
       ctx.waitUntil(recordDownload(env, request, 'release', url.pathname.slice('/releases/'.length)));
     }
     return env.ASSETS.fetch(request);
   },
 };
+
+/** Answers `Range: bytes=…` from a whole (small) asset: static assets ignore Range. */
+export async function ranged(res, request) {
+  const range = request.headers.get('range');
+  const headers = new Headers(res.headers);
+  headers.set('accept-ranges', 'bytes');
+  if (!res.ok || !range) return new Response(res.body, { status: res.status, headers });
+  const body = new Uint8Array(await res.arrayBuffer());
+  const size = body.length;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+  let start = m && m[1] !== '' ? Number(m[1]) : NaN;
+  let end = m && m[2] !== '' ? Number(m[2]) : size - 1;
+  if (m && m[1] === '' && m[2] !== '') {
+    start = Math.max(0, size - Number(m[2])); // the last N bytes
+    end = size - 1;
+  }
+  if (!m || !(start >= 0) || start >= size || end < start) {
+    headers.set('content-range', `bytes */${size}`);
+    return new Response(null, { status: 416, headers });
+  }
+  end = Math.min(end, size - 1);
+  headers.set('content-range', `bytes ${start}-${end}/${size}`);
+  headers.set('content-length', String(end - start + 1));
+  return new Response(request.method === 'HEAD' ? null : body.slice(start, end + 1), { status: 206, headers });
+}
 
 async function feedback(request, env) {
   let body;

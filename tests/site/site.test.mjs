@@ -64,6 +64,20 @@ test('the remote-access client is served at /app/, where its relative URLs resol
   assert.equal(new URL(bare.headers.get('location')).pathname, '/app/');
 });
 
+test('videos answer byte ranges (Safari and link-card players need them)', async () => {
+  const whole = await fetch(`${BASE}/og.mp4`);
+  assert.equal(whole.status, 200);
+  assert.equal(whole.headers.get('accept-ranges'), 'bytes');
+  const size = (await whole.arrayBuffer()).byteLength;
+  const part = await fetch(`${BASE}/og.mp4`, { headers: { range: 'bytes=0-99' } });
+  assert.equal(part.status, 206);
+  assert.equal(part.headers.get('content-range'), `bytes 0-99/${size}`);
+  assert.equal((await part.arrayBuffer()).byteLength, 100);
+  const tail = await fetch(`${BASE}/og.mp4`, { headers: { range: 'bytes=-10' } });
+  assert.equal(tail.headers.get('content-range'), `bytes ${size - 10}-${size - 1}/${size}`);
+  assert.equal((await fetch(`${BASE}/og.mp4`, { headers: { range: `bytes=${size}-` } })).status, 416);
+});
+
 test('docs exist in every format and agree', async () => {
   const md = await (await get('/docs.md')).text();
   const full = await (await get('/llms-full.txt')).text();
