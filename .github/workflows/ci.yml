@@ -11,8 +11,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Builds once per OS in the `ci` profile (Cargo.toml): optimized, no LTO, parallel codegen.
-  CARGO_PROFILE: ci
 
 jobs:
   # Only run what a change can affect: docs and site edits skip the host builds.
@@ -35,12 +33,32 @@ jobs:
               - 'site/src/**'
               - 'site/package*.json'
               - 'Cargo.*'
-              - '.github/workflows/ci.yml'
+              - '.github/workflows/**'
             site:
               - 'site/**'
               - 'web/**'
               - 'tests/site/**'
-              - '.github/workflows/ci.yml'
+              - '.github/workflows/**'
+
+  # Each OS builds once, then its e2e shards start as soon as its own build is done (Linux
+  # doesn't wait for the slower macOS build). Both use the reusable workflow below.
+  macos:
+    needs: changes
+    if: needs.changes.outputs.host == 'true'
+    uses: ./.github/workflows/host.yml
+    with: { os: macos-latest, name: macOS }
+
+  linux:
+    needs: changes
+    if: needs.changes.outputs.host == 'true'
+    uses: ./.github/workflows/host.yml
+    with: { os: ubuntu-latest, name: Linux }
+
+  site:
+              - 'site/**'
+              - 'web/**'
+              - 'tests/site/**'
+              - '.github/workflows/**'
 
   build:
     needs: changes
