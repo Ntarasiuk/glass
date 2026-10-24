@@ -74,6 +74,9 @@ pub enum ClientMsg {
     AnnotateClear,
     /// Start or stop sending this viewer's microphone (KIND_MIC datagrams).
     Mic { on: bool },
+    /// Install the Mac's microphone driver (BlackHole): its installer opens on the Mac's
+    /// screen. Owner only.
+    MicInstall,
     /// A shell on the host. Owner only.
     Term(crate::terminal::ClientTerm),
     /// Start or stop recording this session's video on the host. Owner only.
@@ -145,6 +148,8 @@ pub enum ServerMsg {
     Denied { msg: String },
     /// Something worth a (non-error) toast.
     Notice { msg: String },
+    /// The microphone driver just got installed: the mic works now.
+    MicReady,
     /// Notifications are on for this device: `key` lets its service worker answer from a
     /// notification (owner only). `None`: subscribing failed.
     Push { key: Option<String>, owner: bool },
@@ -249,6 +254,8 @@ pub struct Features {
     pub privacy: bool,
     pub gamepad: bool,
     pub mic: bool,
+    /// No mic yet, but the owner can install its driver (`MicInstall`, macOS).
+    pub mic_install: bool,
     pub windows: bool,
     pub terminal: bool,
     pub restart: bool,

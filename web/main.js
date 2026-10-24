@@ -717,7 +717,11 @@ function onControl(msg) {
         const canInput = msg.perms?.input ?? true;
         gamepads.setEnabled(Boolean(msg.features?.gamepad) && canInput);
         gamepads.resend();
-        ui.setMicAvailable(Boolean(msg.features?.mic) && canInput);
+        // On a Mac without its driver yet, the owner still gets the button: it offers to
+        // install it.
+        micReady = Boolean(msg.features?.mic);
+        micInstallable = Boolean(msg.features?.mic_install);
+        ui.setMicAvailable((micReady || micInstallable) && canInput);
         if (!canInput && micStream) stopMic();
       }
       terminal.reset();
@@ -748,6 +752,10 @@ function onControl(msg) {
         showStatus('connecting', 'Connecting', machineName(currentHost));
         worker.postMessage({ type: 'askAgain' });
       } } });
+      break;
+    case 'micReady':
+      micReady = true;
+      ui.toast({ text: `The microphone works on ${machineName(currentHost)} now.`, timeout: 6000, action: { label: 'Turn on', run: () => toggleMic() } });
       break;
     case 'notice':
       ui.toast({ text: msg.msg });
@@ -1220,8 +1228,24 @@ function toggleAudio() {
 }
 
 // The viewer's microphone, as a microphone on the host.
+let micReady = false;
+let micInstallable = false;
 async function toggleMic() {
   if (micStream) return stopMic();
+  if (!micReady) {
+    ui.toast({
+      text: `Your microphone on ${machineName(currentHost)} needs BlackHole, a free audio driver. Its installer opens on that Mac's screen and asks for its password.`,
+      timeout: 0,
+      action: {
+        label: 'Install',
+        run: () => {
+          control({ t: 'micInstall' });
+          ui.toast({ text: 'Opening the installer on the Mac. Follow it there; the mic is ready when it finishes.', timeout: 8000 });
+        },
+      },
+    });
+    return;
+  }
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
