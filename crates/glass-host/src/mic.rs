@@ -71,6 +71,7 @@ pub fn uninstall(ask: Ask) -> anyhow::Result<String> {
             return Ok("Glass Microphone isn't installed.".into());
         }
         as_admin(&format!("rm -rf {} && killall -9 coreaudiod 2>/dev/null; true", sh_quote(&dest.display().to_string())), ask, "remove Glass Microphone")?;
+        restart_for_audio();
         return Ok("Removed Glass Microphone.".into());
     }
     #[allow(unreachable_code)]
@@ -103,6 +104,27 @@ fn as_admin(script: &str, ask: Ask, why: &str) -> anyhow::Result<()> {
 
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Restarting the Mac's audio server (to load or unload the driver) ends the system-audio
+/// capture of a running Glass: restart Glass so sound comes back. In the service itself
+/// (a viewer asked), after a moment so the answer reaches the viewer; elsewhere (the CLI,
+/// the app), the background service.
+#[cfg(target_os = "macos")]
+fn restart_for_audio() {
+    if crate::testmode::enabled() {
+        return;
+    }
+    if crate::server::shared().is_some() {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let _ = crate::power::restart_glass();
+        });
+    } else if crate::agent::is_installed() {
+        if let Err(e) = crate::restart_and_wait() {
+            tracing::warn!("microphone: restarting Glass after the driver change: {e:#}");
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -140,7 +162,8 @@ fn mac_install(ask: Ask) -> anyhow::Result<String> {
         // The audio server takes a moment to come back with the new device.
         for _ in 0..40 {
             if mac::device().is_some_and(|(_, name)| name == "Glass Microphone") {
-                return Ok("Glass Microphone is installed. Turn on the mic in the viewer.".into());
+                restart_for_audio();
+                return Ok("Glass Microphone is installed. Glass restarts to pick it up; turn on the mic in the viewer once it's back.".into());
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
