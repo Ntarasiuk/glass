@@ -285,12 +285,13 @@ test.describe('displays', () => {
     await open(page, host);
     await toolbarClick(page, 'btn-displays');
     const items = page.locator('#displays-panel button');
-    // Two displays, "All displays", the resolution choices (Auto, This Mac), Sharp text,
-    // then the test host's two windows (Apps).
-    await expect(items).toHaveCount(8);
+    // Two displays, "All displays", "Use as a second display", the resolution choices
+    // (Auto, This Mac), Sharp text, then the test host's two windows (Apps).
+    await expect(items).toHaveCount(9);
     await expect(items.nth(2)).toContainText('All displays');
-    await expect(items.nth(3)).toContainText('Auto');
-    await expect(items.nth(4)).toContainText('This Mac');
+    await expect(items.nth(3)).toContainText('Use as a second display');
+    await expect(items.nth(4)).toContainText('Auto');
+    await expect(items.nth(5)).toContainText('This Mac');
     await items.nth(2).click();
     await expectVideo(page, 2);
     await expect(page.locator('#screens canvas:not(.hidden)')).toHaveCount(2);

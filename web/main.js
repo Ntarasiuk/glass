@@ -401,6 +401,7 @@ const ui = createUI({
     onConnectionStatus('restarting');
   },
   onTerminal: () => terminal.toggle(),
+  onExtend: (on) => setExtended(on),
   onOpenDevice: () => {
     storage((s) => s.setItem('glass.deviceSeen', '1'));
     ui.setDeviceHint(false);
@@ -767,6 +768,9 @@ function onControl(msg) {
       // Remote: other machines aren't reachable from here, so no machines menu either.
       ui.setGuest(guest || Boolean(remoteKey));
       ui.setCanFit(!guest);
+      // A new session has no second display (the host removed it when the last one ended).
+      extended = undefined;
+      ui.setExtend({ available: Boolean(msg.features?.extend && (msg.perms ? msg.perms.owner : !guest)), on: false });
       session = msg.session ?? 0;
       perms = msg.perms ?? perms;
       features = msg.features ?? {};
@@ -1123,6 +1127,27 @@ function sendViewport() {
   if (msg === lastViewport) return;
   lastViewport = msg;
   control({ t: 'viewport', streams });
+}
+
+// "Use as a second display": the host adds a display in this screen's shape beside its main
+// one and streams it here. `extended` keeps what was shown before, to go back to it.
+let extended;
+function setExtended(on) {
+  if (on && !extended) {
+    extended = { before: streamIds.length > 1 ? 'all' : streamIds[0] };
+    const dpr = devicePixelRatio;
+    const size = [Math.round(innerWidth * dpr), Math.round(innerHeight * dpr)];
+    control({ t: 'extend', size, hidpi: dpr >= 1.5 });
+    log('info', 'second display', { size, dpr });
+  } else if (!on && extended) {
+    const { before } = extended;
+    extended = undefined;
+    control({ t: 'extend', size: null });
+    if (before === 'all') control({ t: 'showAll' });
+    else if (before != null) control({ t: 'selectDisplay', id: before });
+    log('info', 'second display off');
+  }
+  ui.setExtend({ on: Boolean(extended) });
 }
 
 function setResolution(mode) {

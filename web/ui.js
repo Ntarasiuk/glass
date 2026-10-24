@@ -19,7 +19,7 @@ const storageSet = (key, value) => {
 };
 
 
-export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, onOpenDevice = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, onOpenDevice = () => {}, onExtend = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -356,6 +356,16 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
         }),
       );
     }
+    // This screen as one more display of the Mac's, beside its main one.
+    if (extendAvailable) {
+      items.push(
+        document.createElement('hr'),
+        menuItem('Use as a second display', extended ? 'on' : 'extends the desktop', {
+          checked: extended,
+          onSelect: () => { setMenuOpen('displays', false); onExtend(!extended); },
+        }),
+      );
+    }
     // Resolution: sized to this screen (sharper and faster), or the Mac's full size.
     const native = displays.find((d) => d.id === streamed[0]) ?? displays[0];
     items.push(
@@ -464,6 +474,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     menus.more.panel.replaceChildren(...items);
   }
   let consoleUrl; // the owner's console (/admin/), from the Computer menu
+  let extendAvailable = false; // owner, and the host can add a display
+  let extended = false; // this device is a second display now
   let canFit = true;
   let sharpAvailable = false;
   let sharpOn = false;
@@ -568,6 +580,12 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       $('btn-keyboard').classList.toggle('hidden', !input);
       if (!input) $('btn-shortcuts').classList.add('hidden');
       renderBar();
+    },
+    /** "Use as a second display": offered (`available`) and on (`on`). */
+    setExtend({ available = extendAvailable, on = extended } = {}) {
+      extendAvailable = available;
+      extended = on;
+      if (lastDisplays) renderDisplays(...lastDisplays);
     },
     /** Only the owner can reshape the host's display (guests get an error). */
     setCanFit(on) {

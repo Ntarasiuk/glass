@@ -118,6 +118,14 @@ pub enum ClientMsg {
     /// "Fit this device": give the Mac a desktop of this size (the viewer's shape), or
     /// `null` to put its displays back.
     Fit { size: Option<[u32; 2]> },
+    /// "Use as a second display": a new display of this size (the viewer's screen, in
+    /// pixels; Retina with `hidpi`) beside the main one, streamed to this viewer, or `null`
+    /// to remove it. Owner only.
+    Extend {
+        size: Option<[u32; 2]>,
+        #[serde(default)]
+        hidpi: bool,
+    },
     /// Notifications on this device (Web Push), or new choices of what to hear about.
     PushSubscribe { subscription: crate::push::NewSubscription },
     PushUnsubscribe { endpoint: String },
@@ -299,6 +307,8 @@ pub struct Features {
     pub push: Option<String>,
     /// The file browser (owners with files allowed).
     pub browse: bool,
+    /// The viewer can become a second display ("Use as a second display").
+    pub extend: bool,
 }
 
 /// Header that follows the `STREAM_FILE` tag in either direction.
