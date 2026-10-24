@@ -597,6 +597,8 @@ worker.postMessage({
   pass: savedPass,
   rtcPort,
   device: deviceLabel(),
+  // A wide-colour screen: a Display P3 stream is drawn in P3, not clipped to sRGB.
+  wideColor: matchMedia('(color-gamut: p3)').matches,
   decoderStep: Number(storage((s) => s.getItem(DECODER_STEP_KEY)) ?? 0),
 }, rtcPort ? [rtcPort] : []);
 armMachineTimeout();

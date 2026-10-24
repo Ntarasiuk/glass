@@ -142,11 +142,17 @@ pub struct TestVideo {
     shown: Mutex<Vec<u32>>,
     /// Per display: the width to encode at (dynamic resolution).
     widths: Vec<Arc<std::sync::atomic::AtomicUsize>>,
+    /// `--fps`: the test displays' refresh rate.
+    refresh: u32,
 }
+
+/// The test pattern's frame rate now: `--fps`, or less if viewers want fewer.
+static PATTERN_FPS: AtomicU32 = AtomicU32::new(30);
 
 impl TestVideo {
     pub fn new(frames: broadcast::Sender<Arc<EncodedFrame>>, fps: u32, bitrate: u32) -> Self {
         BITRATE.store(bitrate, Ordering::Relaxed);
+        PATTERN_FPS.store(fps.min(crate::refresh::DEFAULT), Ordering::Relaxed);
         let displays: Vec<DisplayInfo> = (0..DISPLAYS)
             .map(|i| DisplayInfo {
                 id: i as u32,
@@ -187,7 +193,7 @@ impl TestVideo {
             let (slot, keyframe, frames) = (slots[i].clone(), keyframes[i].clone(), frames.clone());
             let width = widths[i].clone();
             let size = (displays[i].width, displays[i].height);
-            std::thread::spawn(move || pattern_loop(i, size, slot, keyframe, width, frames, fps));
+            std::thread::spawn(move || pattern_loop(i, size, slot, keyframe, width, frames));
         }
         Self {
             sources: displays,
@@ -195,6 +201,7 @@ impl TestVideo {
             keyframes,
             shown: Mutex::new(Vec::new()),
             widths,
+            refresh: fps,
         }
     }
 }
@@ -211,6 +218,10 @@ impl TestVideo {
 impl VideoSource for TestVideo {
     fn supports_lossless(&self) -> bool {
         true
+    }
+
+    fn set_max_fps(&self, fps: u32) {
+        PATTERN_FPS.store(self.refresh.min(fps).max(1), Ordering::Relaxed);
     }
 
     fn set_full_colour(&self, on: bool) {
@@ -337,26 +348,27 @@ fn pattern_loop(
     keyframe: Arc<AtomicBool>,
     width: Arc<std::sync::atomic::AtomicUsize>,
     frames: broadcast::Sender<Arc<EncodedFrame>>,
-    fps: u32,
 ) {
     let mut applied = BITRATE.load(Ordering::Relaxed);
     let mut encoded_width = w;
+    let mut fps = PATTERN_FPS.load(Ordering::Relaxed);
     let mut encoder = Encoder::new(w, h, fps, applied, 1.0).expect("test encoder");
-    let interval = Duration::from_secs_f64(1.0 / fps as f64);
     let mut next = Instant::now();
     // The pattern's position: frozen while paused, so frames repeat the same picture.
     let mut shown = 0u64;
     let mut last_encoded = None;
     loop {
-        next += interval;
+        next += Duration::from_secs_f64(1.0 / fps as f64);
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
         let s = slot.load(Ordering::Relaxed);
         if s < 0 {
             continue;
         }
-        // Dynamic resolution: a new size means a new encoder, starting on a keyframe.
+        // Dynamic resolution or a new frame rate: a new encoder, starting on a keyframe.
         let want = width.load(Ordering::Relaxed);
-        if want != encoded_width {
+        let want_fps = PATTERN_FPS.load(Ordering::Relaxed);
+        if want != encoded_width || want_fps != fps {
+            fps = want_fps;
             let scale = want as f64 / w as f64;
             if let Ok(e) = Encoder::new(w, h, fps, applied, scale) {
                 encoder = e;

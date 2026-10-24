@@ -34,6 +34,7 @@ mod sharp;
 mod terminal;
 mod wol;
 mod rate;
+mod refresh;
 mod remote;
 mod resolution;
 mod rtp;
@@ -88,8 +89,8 @@ struct Args {
     /// Port for WebTransport (UDP).
     #[arg(long, default_value_t = 4433)]
     wt_port: u16,
-    /// Capture frame rate cap.
-    #[arg(long, default_value_t = 60)]
+    /// Capture frame rate cap. Viewers get 60, or up to 120 on a fast screen (macOS).
+    #[arg(long, default_value_t = 120)]
     fps: i32,
     /// Target bitrate in Mbps.
     #[arg(long, default_value_t = 30)]
@@ -981,7 +982,8 @@ async fn run_host(args: Args) -> Result<()> {
         let awake = platform::keep_awake();
         let video = Arc::new(video::Video::new(
             video::VideoConfig {
-                fps: args.fps,
+                // Linux encodes in software: 60 at most.
+                fps: if cfg!(target_os = "linux") { args.fps.min(60) } else { args.fps },
                 bitrate: args.mbps * 1_000_000,
                 scale: args.scale,
             },

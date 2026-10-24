@@ -34,6 +34,7 @@ let device; // e.g. "Safari on iPad", shown on the host
 let rtcPort; // remote access: WebRTC over the main thread instead of WebTransport
 let link; // magic link code; traded for a guest pass on first sign-in
 let pass; // guest pass
+let wideColor = false; // the screen shows Display P3: draw video in it
 let codecs = ['h264']; // what this browser decodes, offered in hello (HEVC if hardware)
 let rejected = false;
 let controlWriter;
@@ -78,6 +79,7 @@ function videoStream(index) {
 self.onmessage = async ({ data }) => {
   if (data.type === 'init') {
     ({ url, certHash, token, link, pass, rtcPort, device } = data);
+    wideColor = Boolean(data.wideColor);
     setDecoderStep(data.decoderStep ?? 0);
     await probeDecoders(log);
     codecs = await probeCodecs();
@@ -85,7 +87,7 @@ self.onmessage = async ({ data }) => {
     setInterval(tick, 1000);
     run();
   } else if (data.type === 'canvas') {
-    videoStream(data.stream).setCanvas(data.canvas);
+    videoStream(data.stream).setCanvas(data.canvas, wideColor);
   } else if (data.type === 'streams') {
     // Streams the host no longer sends give up their decoders.
     for (const s of streams.slice(data.count)) s?.release();

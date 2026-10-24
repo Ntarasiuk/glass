@@ -4,6 +4,7 @@
 // and installing Glass as an app.
 
 const AWAKE_KEY = 'glass.awake';
+const SMOOTH_KEY = 'glass.smooth';
 const CLIPBOARD_KEY = 'glass.clipboardSync';
 const AWAY_KEY = 'glass.pauseAway';
 
@@ -15,6 +16,36 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
   const touch = matchMedia('(hover: none)').matches;
   let connected = false;
   let installPrompt; // Chromium's beforeinstallprompt, kept for the menu
+
+  // ---- Smooth motion: a fast screen (120 Hz) asks the host for more frames ----
+
+  let smooth = storage((s) => s.getItem(SMOOTH_KEY)) !== '0';
+  let refreshHz = 0; // measured; 0 until known
+  /** Times animation frames for about a second: the screen's refresh rate. */
+  function measureRefresh() {
+    if (document.visibilityState !== 'visible') return;
+    const times = [];
+    const tick = (t) => {
+      times.push(t);
+      if (times.length < 40) return requestAnimationFrame(tick);
+      const gaps = times.slice(1).map((t, i) => t - times[i]).sort((a, b) => a - b);
+      const median = gaps[gaps.length >> 1];
+      const hz = median > 0 ? 1000 / median : 0;
+      if (Math.abs(hz - refreshHz) < 3) return;
+      refreshHz = hz;
+      log('info', `screen refresh ${hz.toFixed(0)} Hz`);
+      sendRefresh();
+      render();
+    };
+    requestAnimationFrame(tick);
+  }
+  const fast = () => refreshHz > 68;
+  /** The panel rate a measurement means (as the host snaps it), at most 120. */
+  const snapHz = (hz) => Math.min(120, [60, 75, 90, 100, 120, 144, 165, 240].reduce((a, b) => (Math.abs(b - hz) < Math.abs(a - hz) ? b : a)));
+  function sendRefresh() {
+    if (connected && fast()) control({ t: 'refresh', hz: smooth ? refreshHz : 60 });
+  }
+  measureRefresh();
 
   // ---- Keep the screen awake while watching ----
 
@@ -256,6 +287,17 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
         : 'When a message comes, even with Glass closed.'));
     }
     items.push(hr());
+    if (fast()) {
+      items.push(ui.menuItem('Smooth motion', `${snapHz(refreshHz)} Hz`, {
+        checked: smooth,
+        onSelect: () => {
+          smooth = !smooth;
+          storage((s) => s.setItem(SMOOTH_KEY, smooth ? '1' : '0'));
+          sendRefresh();
+          render();
+        },
+      }));
+    }
     if ('wakeLock' in navigator) {
       items.push(ui.menuItem('Keep screen awake', 'while connected', {
         checked: awake,
@@ -328,6 +370,8 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
+      // Possibly on another screen now (a window dragged to a 60 Hz monitor).
+      measureRefresh();
       holdAwake();
       push.seen();
     }
@@ -338,6 +382,7 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
     /** The session is live (welcome) or gone. */
     setConnected(on) {
       connected = on;
+      if (on) sendRefresh();
       if (on) holdAwake();
       else releaseAwake();
       render();

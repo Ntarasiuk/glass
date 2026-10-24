@@ -113,6 +113,65 @@ pub fn encode_png(frame: &RawFrame, [x, y, w, h]: Rect) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The PNG with a colour profile (iCCP chunk, right after IHDR), so a browser shows a
+/// wide-colour (Display P3) picture as captured instead of reading it as sRGB.
+pub fn with_icc(png: &[u8], icc: &[u8]) -> Vec<u8> {
+    // Signature (8) + IHDR chunk (4 length + 4 type + 13 data + 4 CRC).
+    const AFTER_IHDR: usize = 8 + 25;
+    if png.len() < AFTER_IHDR || &png[12..16] != b"IHDR" {
+        return png.to_vec();
+    }
+    let mut data = b"Display P3\0\0".to_vec(); // profile name, then compression method 0
+    data.extend_from_slice(&zlib_stored(icc));
+    let mut chunk = Vec::with_capacity(data.len() + 12);
+    chunk.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let typed_start = chunk.len();
+    chunk.extend_from_slice(b"iCCP");
+    chunk.extend_from_slice(&data);
+    let crc = crc32(&chunk[typed_start..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    let mut out = Vec::with_capacity(png.len() + chunk.len());
+    out.extend_from_slice(&png[..AFTER_IHDR]);
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[AFTER_IHDR..]);
+    out
+}
+
+/// A zlib stream of `bytes` in stored (uncompressed) blocks: a profile is a few hundred
+/// bytes, so compressing it isn't worth a dependency.
+fn zlib_stored(bytes: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let mut blocks = bytes.chunks(65_535).peekable();
+    if blocks.peek().is_none() {
+        out.extend_from_slice(&[1, 0, 0, 0xff, 0xff]);
+    }
+    while let Some(block) = blocks.next() {
+        out.push(u8::from(blocks.peek().is_none()));
+        let len = block.len() as u16;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in bytes {
+        a = (a + x as u32) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    out.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    out
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
 /// The bytes of one lossless stream: tag, header length, header, PNG.
 pub fn stream_bytes(header: &Header, png: &[u8]) -> Vec<u8> {
     let json = serde_json::to_vec(header).expect("header serializes");
@@ -186,7 +245,11 @@ pub async fn run(
             let video = shared.video.clone();
             let now = Instant::now();
             let Some((frame, rect)) = step(t, generation, || video.raw_frame(i as u8), now) else { continue };
-            let encoded = tokio::task::spawn_blocking(move || encode_png(&frame, rect).map(|png| (frame, png))).await;
+            let icc = video.icc(i as u8);
+            let encoded = tokio::task::spawn_blocking(move || {
+                encode_png(&frame, rect).map(|png| (frame, match icc { Some(icc) => with_icc(&png, &icc), None => png }))
+            })
+            .await;
             let Ok(Ok((frame, png))) = encoded else { continue };
             if png.len() > MAX_BYTES {
                 t.sent = None; // try again whole next time, once it's smaller
@@ -290,6 +353,17 @@ mod tests {
             assert_eq!(px, &[src[2], src[1], src[0]], "pixel {x},{y}");
         }
         assert!(encode_png(&f, [30, 0, 20, 10]).is_err());
+    }
+
+    #[test]
+    fn a_colour_profile_rides_along_and_the_png_still_reads() {
+        let f = RawFrame { width: 32, height: 16, bgra: vec![200; 32 * 16 * 4], capture_us: 0 };
+        let png = encode_png(&f, [0, 0, 32, 16]).unwrap();
+        let icc: Vec<u8> = (0..600u32).map(|i| (i * 7) as u8).collect();
+        let tagged = with_icc(&png, &icc);
+        let reader = png::Decoder::new(std::io::Cursor::new(&tagged)).read_info().unwrap();
+        assert_eq!(reader.info().icc_profile.as_deref(), Some(&icc[..]));
+        assert_eq!(reader.info().width, 32);
     }
 
     #[test]

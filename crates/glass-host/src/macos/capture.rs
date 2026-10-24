@@ -207,6 +207,8 @@ impl StreamOutput {
 /// Keeps the stream and its output alive; capture stops when dropped.
 pub struct Capture {
     stream: Retained<SCStream>,
+    /// Kept to change the frame interval later (`set_max_fps`).
+    config: Retained<SCStreamConfiguration>,
     state: Arc<FrameState>,
     _output: Retained<StreamOutput>,
     queue: dispatch2::DispatchRetained<DispatchQueue>,
@@ -215,6 +217,36 @@ pub struct Capture {
 
 // SCStream is safe to stop from any thread; the manager serializes access.
 unsafe impl Send for Capture {}
+
+impl Capture {
+    /// Delivers up to `fps` frames a second from now on (a viewer with a faster or slower
+    /// screen came or went), without restarting the stream.
+    pub fn set_max_fps(&self, fps: u32) {
+        unsafe {
+            self.config.setMinimumFrameInterval(CMTime::new(1, fps.max(1) as i32));
+            self.stream.updateConfiguration_completionHandler(&self.config, None);
+        }
+    }
+}
+
+/// A display's refresh rate (60 when it doesn't say).
+pub fn refresh_rate(display: CGDirectDisplayID) -> u32 {
+    let mode = objc2_core_graphics::CGDisplayCopyDisplayMode(display);
+    let hz = objc2_core_graphics::CGDisplayMode::refresh_rate(mode.as_deref());
+    if hz >= 1.0 { hz.round() as u32 } else { 60 }
+}
+
+/// Whether a display shows wide colour (Display P3), so capture shouldn't clip to sRGB.
+pub fn wide_colour(display: CGDirectDisplayID) -> bool {
+    objc2_core_graphics::CGDisplayCopyColorSpace(display).is_wide_gamut_rgb()
+}
+
+/// The Display P3 ICC profile, for tagging lossless pictures of a wide-colour display.
+pub fn p3_icc() -> Option<Vec<u8>> {
+    let space = objc2_core_graphics::CGColorSpace::with_name(Some(unsafe { objc2_core_graphics::kCGColorSpaceDisplayP3 }))?;
+    let data = objc2_core_graphics::CGColorSpace::icc_data(Some(&space))?;
+    Some(data.to_vec())
+}
 
 impl Capture {
     /// Re-encodes the last captured frame (on the capture queue, so it stays ordered with
@@ -495,6 +527,8 @@ pub fn start(
     audio: Option<Arc<std::sync::Mutex<Packetizer>>>,
     // Full colour: for the 4:2:2 encoder, or for lossless refreshes (sharp text).
     bgra: bool,
+    // Capture in Display P3 (a wide-colour display) instead of sRGB.
+    p3: bool,
 ) -> Result<Capture> {
     let captures_audio = audio.is_some();
     let (filter, source_id) = match source {
@@ -525,6 +559,9 @@ pub fn start(
         } else {
             PIXEL_FORMAT_420V
         });
+        if p3 {
+            config.setColorSpaceName(objc2_core_graphics::kCGColorSpaceDisplayP3);
+        }
         config.setShowsCursor(true);
         // One buffer is held as the last frame, so leave the pool room for new ones.
         config.setQueueDepth(4);
@@ -582,6 +619,7 @@ pub fn start(
 
     Ok(Capture {
         stream,
+        config,
         state,
         _output: output,
         queue,

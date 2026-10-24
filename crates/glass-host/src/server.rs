@@ -657,11 +657,14 @@ async fn control(
     impl Drop for ViewportGuard {
         fn drop(&mut self) {
             crate::resolution::set(self.0, None);
+            crate::refresh::set(self.0, None);
             end_fit(self.0, self.1.clone());
             end_extend(self.0, self.1.clone());
         }
     }
     let _viewport = ViewportGuard(viewport_id, ctx.shared.clone());
+    // 60 fps until the viewer says its screen is faster.
+    crate::refresh::set(viewport_id, Some(crate::refresh::DEFAULT));
     let _codec = crate::codec::joined(
         session_id,
         codecs.iter().any(|c| c == "hevc"),
@@ -902,6 +905,11 @@ async fn control(
             }
             ClientMsg::PushSeen { endpoint } => {
                 tokio::task::spawn_blocking(move || crate::push::seen(&endpoint));
+            }
+            ClientMsg::Refresh { hz } => {
+                let fps = crate::refresh::snap(hz);
+                info!("{peer}: screen refreshes at {hz:.0} Hz; asks for {fps} fps");
+                crate::refresh::set(viewport_id, Some(fps));
             }
             ClientMsg::Fit { .. } if guest => {
                 refuse("Only this computer's owner can change its display shape.")

@@ -118,6 +118,8 @@ pub enum ClientMsg {
     /// The device pixels each stream covers on this viewer's screen (`null`: full
     /// resolution), for dynamic resolution.
     Viewport { streams: Vec<Option<[u32; 2]>> },
+    /// This viewer's screen refresh rate (measured), so a fast screen gets more frames.
+    Refresh { hz: f64 },
     /// "Fit this device": give the Mac a desktop of this size (the viewer's shape), or
     /// `null` to put its displays back.
     Fit { size: Option<[u32; 2]> },
