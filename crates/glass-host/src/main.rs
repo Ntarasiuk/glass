@@ -42,6 +42,7 @@ mod server;
 mod setup;
 mod soft_encode;
 mod status;
+mod support;
 mod tailscale;
 mod testmode;
 mod thumbs;
@@ -147,6 +148,19 @@ enum Command {
         /// Just (re)create Glass.app in ~/Applications.
         #[arg(long)]
         install: bool,
+    },
+    /// Get help from someone: shows a code they type at glassdesk.dev/help to see and
+    /// control this computer, after you allow them. Nothing stays once you stop it.
+    Support {
+        /// No window: the code and questions in this terminal.
+        #[arg(long)]
+        no_window: bool,
+        /// One JSON line {code, url, http_port, dir}, then wait (scripts and tests).
+        #[arg(long)]
+        json: bool,
+        /// Test mode host (a test pattern, recorded input).
+        #[arg(long, hide = true)]
+        test: bool,
     },
     /// Show whether the background service is running and what it can do.
     Status {
@@ -583,7 +597,35 @@ const FEEDBACK_URL: &str = "https://glassdesk.dev/api/feedback";
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    // Quick support keeps everything in its own temporary config, chosen before anything
+    // (or any thread) reads the environment.
+    let support_dir = match &args.command {
+        Some(Command::Support { .. }) => {
+            let dir = support::new_dir()?;
+            // SAFETY: still single-threaded; nothing has read the environment yet.
+            unsafe { std::env::set_var("GLASS_CONFIG_DIR", &dir) };
+            Some(dir)
+        }
+        _ => None,
+    };
     let rt = tokio::runtime::Runtime::new()?;
+    if let (Some(dir), Some(Command::Support { no_window, json, test })) = (support_dir, &args.command) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let session = match support::Session::start(dir.clone(), *test) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
+        };
+        // On the Mac's own screen: a window. Over SSH, with --no-window or --json: here.
+        #[cfg(target_os = "macos")]
+        if !no_window && !json && std::env::var_os("SSH_CONNECTION").is_none() {
+            return app::run_support(rt, session);
+        }
+        let _ = no_window;
+        return rt.block_on(support::run_terminal(session, *json));
+    }
     // The app: `glass app`, or Glass.app (whose executable is this binary).
     #[cfg(target_os = "macos")]
     match &args.command {
@@ -819,6 +861,7 @@ async fn async_main(args: Args) -> Result<()> {
         Some(Command::Restart) => restart_service(),
         #[cfg(target_os = "macos")]
         Some(Command::App { .. }) => unreachable!("handled before the runtime starts"),
+        Some(Command::Support { .. }) => unreachable!("handled before the runtime starts"),
         Some(Command::Uninstall) => {
             agent::uninstall()?;
             println!(
@@ -905,6 +948,10 @@ async fn run_host(args: Args) -> Result<()> {
     if args.test {
         testmode::enable();
         info!("TEST MODE: test pattern, recorded input, in-memory clipboard");
+    }
+    if support::is_host() {
+        info!("quick support session: {}", config_dir().display());
+        support::watch_parent();
     }
     if let Some(dir) = &args.downloads_dir {
         files::set_downloads_dir(dir.clone());

@@ -318,6 +318,8 @@ pub struct Features {
     pub browse: bool,
     /// The viewer can become a second display ("Use as a second display").
     pub extend: bool,
+    /// A quick-support session (`glass support`): the viewer is someone helping.
+    pub support: bool,
 }
 
 /// Header that follows the `STREAM_FILE` tag in either direction.

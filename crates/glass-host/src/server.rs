@@ -745,6 +745,7 @@ async fn control(
         push: crate::push::public_key(),
         browse: perms.owner && perms.files,
         extend: cfg!(target_os = "macos") || crate::testmode::enabled(),
+        support: crate::support::is_host(),
     };
     // Someone other than the owner is in: worth a notification on the owner's devices.
     if !perms.owner {
