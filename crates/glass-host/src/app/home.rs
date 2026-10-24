@@ -274,7 +274,7 @@ impl GlassApp {
                 I::Mic,
                 theme.primary,
                 "Microphone from your devices",
-                "Talk through your iPad or phone into this Mac's apps. Needs BlackHole, a free audio driver; installing asks for your password once.",
+                "Talk into this Mac's apps from your iPad or phone. Needs BlackHole, a free driver.",
                 Button::new("home-install-mic")
                     .small()
                     .icon(I::Download)
