@@ -655,6 +655,7 @@ async fn control(
         fn drop(&mut self) {
             crate::resolution::set(self.0, None);
             end_fit(self.0, self.1.clone());
+            end_extend(self.0, self.1.clone());
         }
     }
     let _viewport = ViewportGuard(viewport_id, ctx.shared.clone());
@@ -735,6 +736,7 @@ async fn control(
         lossless: shared.video.supports_lossless()
             && !ctx.relayed.as_ref().is_some_and(|r| r.rtp_video),
         push: crate::push::public_key(),
+        extend: cfg!(target_os = "macos") || crate::testmode::enabled(),
     };
     // Someone other than the owner is in: worth a notification on the owner's devices.
     if !perms.owner {
@@ -881,6 +883,8 @@ async fn control(
                 refuse("Only this computer's owner can change its display shape.")
             }
             ClientMsg::Fit { size } => fit(&ctx, viewport_id, size).await?,
+            ClientMsg::Extend { .. } if guest => refuse("Only this computer's owner can add a display."),
+            ClientMsg::Extend { size, hidpi } => extend(&ctx, viewport_id, size, hidpi).await?,
             // Sharp text keeps this viewer at native size, whatever its screen.
             ClientMsg::Viewport { .. } if sharp_on => {}
             ClientMsg::LosslessReset => lossless_reset.store(true, Ordering::Relaxed),
@@ -1211,6 +1215,113 @@ async fn fit(ctx: &SessionCtx, _session: u64, size: Option<[u32; 2]>) -> Result<
         let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
     }
     Ok(())
+}
+
+/// "Use as a second display" (macOS): a virtual display beside the main one, extending the
+/// desktop onto a viewer's screen. One per viewer; it ends with that viewer's session.
+#[cfg(target_os = "macos")]
+static EXTENDED: Mutex<Vec<(u64, crate::platform::virtual_display::VirtualDisplay)>> = Mutex::new(Vec::new());
+
+async fn extend(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>, hidpi: bool) -> Result<()> {
+    if crate::testmode::enabled() {
+        crate::testmode::record("extend", serde_json::json!({ "size": size, "hidpi": hidpi }));
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = session;
+        if size.is_some() {
+            let msg = "Using this device as a second display isn't available on Linux yet.".into();
+            let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let peer = ctx.conn.remote_address();
+        // This viewer's earlier one goes first (dropping it removes the display).
+        let old: Vec<_> = {
+            let mut list = EXTENDED.lock().unwrap();
+            let (mine, rest): (Vec<_>, Vec<_>) = list.drain(..).partition(|(s, _)| *s == session);
+            *list = rest;
+            mine
+        };
+        let had = !old.is_empty();
+        if had {
+            tokio::task::spawn_blocking(move || drop(old)).await?;
+        }
+        let Some([w, h]) = size else {
+            if had {
+                info!("{peer}: second display removed");
+                set_layout(ctx, Layout::Single(None)).await?;
+            }
+            return Ok(());
+        };
+        // Even sizes (and even points, for Retina).
+        let (w, h) = if hidpi { (w & !3, h & !3) } else { (w & !1, h & !1) };
+        let created = tokio::task::spawn_blocking(move || {
+            let display = crate::platform::virtual_display::VirtualDisplay::create_scaled(w, h, hidpi)?;
+            display.place_right_of_main()?;
+            anyhow::Ok(display)
+        })
+        .await?;
+        let display = match created {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("{peer}: second display {w}×{h} failed: {e:#}");
+                let msg = format!("Couldn't add a display: {e:#}");
+                let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
+                return Ok(());
+            }
+        };
+        let id = display.id;
+        info!("{peer}: second display {w}×{h}{} (virtual display {id})", if hidpi { " Retina" } else { "" });
+        EXTENDED.lock().unwrap().push((session, display));
+        // Screen capture sees a new display a moment after it appears.
+        for _ in 0..30 {
+            let shared = ctx.shared.clone();
+            let listed = tokio::task::spawn_blocking(move || shared.video.displays())
+                .await?
+                .is_ok_and(|ds| ds.iter().any(|d| d.id == id));
+            if listed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        set_layout(ctx, Layout::Single(Some(id))).await
+    }
+}
+
+/// When a session ends, the display it added goes too.
+fn end_extend(session: u64, shared: Arc<Shared>) {
+    #[cfg(target_os = "macos")]
+    {
+        let mine: Vec<_> = {
+            let mut list = EXTENDED.lock().unwrap();
+            let (mine, rest): (Vec<_>, Vec<_>) = list.drain(..).partition(|(s, _)| *s == session);
+            *list = rest;
+            mine
+        };
+        if mine.is_empty() {
+            return;
+        }
+        WINDOW_WATCH.fetch_add(1, Ordering::Relaxed);
+        tokio::task::spawn_blocking(move || {
+            let gone: Vec<u32> = mine.iter().map(|(_, d)| d.id).collect();
+            drop(mine);
+            // Only move the others off it if it was what they were watching.
+            let streaming_it = shared.video.streams().iter().any(|d| gone.contains(&d.id));
+            if streaming_it && let Ok(streams) = shared.video.set_layout(Layout::Single(None)) {
+                let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
+                shared.injector.lock().unwrap().set_displays(&ids);
+                let displays = shared.video.displays().ok();
+                let _ = shared.events.send(ServerMsg::Layout { streams, displays });
+            }
+            info!("second display removed (its viewer left)");
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (session, shared);
 }
 
 /// When a session ends, its "fit this device" display goes too.

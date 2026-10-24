@@ -170,6 +170,7 @@ More in the toolbar:
 
 - **Displays › Sharp text:** for code and documents. See *Sharp text* below.
 - **Displays › Apps:** show one app's window on its own (macOS).
+- **Displays › Use as a second display** (macOS, owner): this screen becomes one more display of the Mac's, to the right of its main one (Retina on an iPad), so the desktop extends onto it like Sidecar, from any browser. Drag windows onto it from the Mac; turn it off to go back to what you were watching. It goes away when you disconnect. Everyone viewing sees the same display, so it's best used alone.
 - **Draw on the screen:** annotate; the drawing also shows on the computer's screen.
 - **Chat:** messages with the person at the computer (`glass chat "…"` from there).
 - **Terminal:** a shell on the computer, in the viewer. Drag its top edge to resize it, or use **Full screen** (or double-click its title bar); both are remembered.
