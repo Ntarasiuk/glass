@@ -83,7 +83,6 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   on('btn-audio', onAudio);
   on('btn-mic', () => onMic?.());
   on('btn-fullscreen', onFullscreen);
-  on('btn-stats', onToggleStats);
   on('btn-terminal', onTerminal);
   on('btn-ports', () => toggleMenu('ports'));
   on('btn-hide-toolbar', () => setToolbarHidden(true));
@@ -431,11 +430,24 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   let resolutionMode = resolution;
   let lastDisplays;
 
-  // The computer menu (owner only): privacy screen and restarts.
+  // The … menu: stats for everyone; for the owner, the privacy screen, restarts and the
+  // console.
+  let statsOn = false;
+  let isOwner = false;
   let privacyAvailable = false;
   let privacyOn = false;
   function renderMore() {
-    const items = [];
+    const items = [
+      menuItem('Stats', 'Ctrl+Shift+H', {
+        checked: statsOn,
+        onSelect: () => { setMenuOpen('more', false); onToggleStats?.(); },
+      }),
+    ];
+    if (!isOwner) {
+      menus.more.panel.replaceChildren(...items);
+      return;
+    }
+    items.push(document.createElement('hr'));
     if (privacyAvailable) {
       const note = document.createElement('p');
       note.className = 'note';
@@ -612,12 +624,11 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       resolutionMode = mode;
       if (lastDisplays) renderDisplays(...lastDisplays);
     },
-    /** The computer menu: owners only; the privacy item only where the host supports it. */
-    setComputerControls({ isOwner, privacy, console: url }) {
+    /** The … menu: owner items only for the owner; the privacy item only where the host supports it. */
+    setComputerControls({ isOwner: owner, privacy, console: url }) {
       privacyAvailable = privacy;
-      consoleUrl = isOwner ? url : undefined;
-      $('btn-more').classList.toggle('hidden', !isOwner);
-      if (!isOwner) setMenuOpen('more', false);
+      isOwner = owner;
+      consoleUrl = owner ? url : undefined;
       renderMore();
     },
     setPrivacyOn(on) {
@@ -625,7 +636,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       renderMore();
     },
     setStatsPressed(on) {
-      $('btn-stats').setAttribute('aria-pressed', String(on));
+      statsOn = on;
+      renderMore();
     },
     /** The ⌘ menu (Mac shortcuts and key remaps) only applies to Mac hosts. */
     setHostOs(os) {

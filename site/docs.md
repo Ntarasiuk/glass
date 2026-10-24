@@ -168,7 +168,7 @@ Nothing stays on their computer: Glass runs from a temporary folder with its own
 
 ## Using Glass
 
-The toolbar (top right) has:
+The toolbar (top right) groups its buttons: machines and displays, keyboard, sound, files, things for everyone connected (chat, drawing, recording), tools (terminal, ports), and the view (this device, fullscreen, the **…** menu, hide). It has:
 
 - **Displays:** pick one display, or **All displays** to show every screen side by side in the same arrangement as System Settings → Displays.
 - **⌘ (Mac shortcuts):** one-tap app switcher, Spotlight, Mission Control, Hide, Quit, Close window, screenshot, Force Quit, and Lock Screen. Also keyboard remapping options (see below).
@@ -177,7 +177,8 @@ The toolbar (top right) has:
 - **Get files from Mac:** opens a file chooser on the Mac's screen; chosen files arrive with a Save button.
 - **Files** (the computer's owner only): browse the home folder from the viewer, with previews of images, PDFs and videos. Filter as you type, download (or drag a file onto your desktop in Chrome), upload into the folder you're in (button, or drop files and folders on it), make folders, rename (F2) and move to the Trash (Delete). Arrow keys, Enter to open, Backspace to go up.
 - **Audio:** turns Mac system audio on or off for this device.
-- **Fullscreen** (hidden when running as a Home Screen app) and **Stats**.
+- **Fullscreen** (hidden when running as a Home Screen app).
+- **… (More):** **Stats** (latency, frame rate, bitrate; Ctrl+Shift+H) for everyone, and for the computer's owner the privacy screen, restarts and the console.
 - **Hide toolbar** (last button): slides it away for an unobstructed screen; the small tab at the top brings it back. Remembered.
 
 **Display previews.** With two or more displays, a strip of small live previews of each one (and **All**) sits in the empty band below the picture whenever there's room; the one being shown is outlined, and tapping another switches to it. Without room it waits behind a small tab at the bottom. Hide it with its ⌄ button; that's remembered. Live previews of displays not being shown need macOS 14 or newer.
@@ -199,7 +200,7 @@ More in the toolbar:
 - **Microphone:** sends your microphone to the computer, where apps pick it like any other mic.
   - **Mac:** it comes in as **Glass Microphone**, a small audio driver included with Glass, made the Mac's default input while your mic is on and put back after. Install it once: tap the mic in the viewer (owner), the Glass app (Home or Settings › Microphone from your devices), or `glass mic install`; it asks for the Mac's password. BlackHole works too if it's already installed. `glass mic uninstall` removes the driver.
   - **Linux:** it comes in as a "Glass microphone" input while your mic is on, through PipeWire or PulseAudio. It needs `pactl`; `glass mic install` adds it with your package manager if it's missing.
-- **Computer:** **Privacy screen** (blanks the computer's screen and ignores its keyboard and mouse while you're connected; `glass privacy on|off` from there), **Restart Glass**, **Restart computer** (Glass reconnects once someone is logged in) and **Console**.
+- **… (More), for the owner:** **Privacy screen** (blanks the computer's screen and ignores its keyboard and mouse while you're connected; `glass privacy on|off` from there), **Restart Glass**, **Restart computer** (Glass reconnects once someone is logged in) and **Console**.
 - **Machines:** sleeping machines Glass has seen before can be woken with Wake-on-LAN (also `glass wake <name|mac>`).
 - **This device** (the bell): what this browser does for Glass.
   - **Notifications:** messages, questions (an agent asking before it acts or needing your help, someone asking to connect) and activity (someone joined, an update is ready), even with Glass closed. On iPhone and iPad, add Glass to the Home Screen first. `glass notifications` lists the devices that get them (`test`, `off <id>`), as does the Glass app's Settings.

@@ -55,6 +55,9 @@ it("doesn't offer the computer menu to guests", async ({ browser, host }) => {
   const guest = await context.newPage();
   await guest.goto(`${host.base}/#l=${code}`);
   await expectVideo(guest);
-  await expect(guest.locator('#btn-more')).toBeHidden();
+  // A guest's … menu has the stats, and none of the computer's controls.
+  await guest.locator('#btn-more').click();
+  await expect(guest.locator('#more-panel button', { hasText: 'Stats' })).toBeVisible();
+  await expect(guest.locator('#more-panel button', { hasText: /Privacy|Restart|Console/ })).toHaveCount(0);
   await context.close();
 });
