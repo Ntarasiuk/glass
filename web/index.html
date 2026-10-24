@@ -179,8 +179,12 @@
       .tb-group + .tb-group::before { margin: 0 2px; }
       .tb-group:not([data-n="1"]) .tb-trigger { display: grid !important; }
       .tb-group:has(.tb-items [aria-pressed="true"]) .tb-trigger { color: var(--accent); }
+      /* Anchored to the toolbar (fixed, at the right), not the group: a group near the
+         toolbar's left end would push its dropdown off the screen. */
+      .tb-group { position: static; }
       .tb-group:not([data-n="1"]) .tb-items {
-        display: none; position: absolute; top: calc(100% + 10px); right: -4px; z-index: 5;
+        display: none; position: absolute; top: calc(100% + 8px); right: 0; z-index: 5;
+        max-width: calc(100vw - 2 * var(--right)); max-height: calc(100dvh - var(--top) - 80px); overflow-y: auto;
         flex-direction: column; align-items: stretch; gap: 0; min-width: 200px; padding: 6px;
         border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow);
         -webkit-backdrop-filter: blur(24px) saturate(1.4); backdrop-filter: blur(24px) saturate(1.4);
