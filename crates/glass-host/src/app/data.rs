@@ -33,6 +33,8 @@ pub struct Snapshot {
     pub token: String,
     /// Devices that get notifications (Web Push).
     pub notify: Vec<NotifyDevice>,
+    /// The BlackHole device viewers' microphones play into, if installed.
+    pub mic: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -115,6 +117,7 @@ pub fn gather() -> Snapshot {
         remote: remote::enabled(),
         log: connlog::recent(200).into_iter().rev().collect(),
         token: std::fs::read_to_string(crate::default_token_file()).unwrap_or_default().trim().to_string(),
+        mic: crate::mic::device_name(),
         notify: crate::push::list()
             .into_iter()
             .map(|s| NotifyDevice {

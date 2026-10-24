@@ -100,6 +100,8 @@ pub async fn run(
     };
     info!("WebTransport listening on udp/{wt_port}");
     crate::remote::watch(wt_port);
+    // A mic left on when the host last stopped left BlackHole as the default input.
+    crate::mic::recover();
 
     let cert_hash = cert_hash.map(|h| serde_json::from_str::<Vec<u8>>(&h).unwrap());
     let version_dir = web_dir.clone();

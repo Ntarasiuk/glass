@@ -260,6 +260,12 @@ enum Command {
     Deny { id: Option<u64> },
     /// Send a message to everyone viewing.
     Chat { message: Vec<String> },
+    /// Viewers' microphones on this Mac (through BlackHole): status, or install BlackHole.
+    #[cfg(target_os = "macos")]
+    Mic {
+        #[arg(value_parser = ["status", "install"], default_value = "status")]
+        action: String,
+    },
     /// Devices that get notifications (turned on in each device's viewer): list, test, or
     /// turn one off.
     Notifications {
@@ -723,6 +729,22 @@ async fn async_main(args: Args) -> Result<()> {
         }
         Some(Command::Allow { id }) => decide_cli(*id, true),
         Some(Command::Deny { id }) => decide_cli(*id, false),
+        #[cfg(target_os = "macos")]
+        Some(Command::Mic { action }) => {
+            if action == "install" {
+                if let Some(name) = mic::device_name() {
+                    println!("{name} is already installed.");
+                } else {
+                    println!("{}", mic::install()?);
+                }
+                return Ok(());
+            }
+            match mic::device_name() {
+                Some(name) => println!("Ready: a viewer's microphone plays into {name}, which is the Mac's default input while it's on."),
+                None => println!("Not set up: viewers' microphones need BlackHole, a free audio driver. Install it: glass mic install"),
+            }
+            Ok(())
+        }
         Some(Command::Chat { message }) => {
             let reply = ipc::call(&ipc::Request::Chat {
                 text: message.join(" "),
