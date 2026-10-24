@@ -15,6 +15,8 @@ import { createTerminal } from './terminal.js';
 import { createAnnotator } from './annotate.js';
 import { createThumbs } from './thumbs.js';
 import { createAgent } from './agent.js';
+import { createPush } from './push.js';
+import { createDevice } from './device.js';
 
 // Shortcuts iPadOS keeps for itself (no web page or app can capture them), sent as one tap.
 const CMD = K.MetaLeft;
@@ -120,6 +122,18 @@ if (hashToken || link || ssoPass) history.replaceState(null, '', location.pathna
   });
 }
 const token = hashToken ?? storage((s) => s.getItem(tokenKey));
+// From the app's shortcuts, a share or opened files (see manifest.webmanifest), or "use all
+// my screens" (one window per Mac display).
+const query = new URLSearchParams(location.search);
+const openParam = query.get('open');
+const sharedParam = query.has('shared');
+const displayParam = query.get('display');
+// A machine to open: from a per-machine app shortcut (?machine=dns) or a web+glass:// link.
+const machineParam = query.get('machine') ?? (() => {
+  const l = query.get('link');
+  return l ? decodeURIComponent(l).replace(/^web\+glass:(\/\/)?/i, '').replace(/[/?#].*$/, '') || undefined : undefined;
+})();
+if (openParam || sharedParam || machineParam) history.replaceState(null, '', location.pathname + location.hash);
 const savedPass = (() => {
   try {
     const p = JSON.parse(storage((s) => s.getItem(passKey)) ?? 'null');
@@ -328,6 +342,11 @@ const ui = createUI({
     onConnectionStatus('restarting');
   },
   onTerminal: () => terminal.toggle(),
+  onOpenDevice: () => {
+    storage((s) => s.setItem('glass.deviceSeen', '1'));
+    ui.setDeviceHint(false);
+    device.render();
+  },
   onToken: (t) => {
     signedInToken = t;
     tokenTried = true;
@@ -394,16 +413,58 @@ function applyKeyboard(hostOs) {
 const chat = createChat({ onSend: (text) => control({ t: 'chat', text }), toast: (o) => ui.toast(o) });
 chat.setAvailable(false);
 
+const push = createPush({
+  control,
+  log,
+  toast: (o) => ui.toast(o),
+  // Where a notification opens: this page (remote: with the computer's key, not secret).
+  url: `${location.origin}${location.pathname}${remoteKey ? `#r=${remoteKey}` : ''}`,
+  actions: !remoteKey,
+});
+// A struggling device asks for a smaller picture (Compute Pressure).
+let pressureScale = 1;
+
 // Launched from the home screen there's no browser UI to leave, so fullscreen is moot.
 const standalone = matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches || navigator.standalone;
 if (standalone) document.getElementById('btn-fullscreen').classList.add('hidden');
 log('info', 'display mode', { standalone: !!standalone });
+
+const device = createDevice({
+  ui,
+  push,
+  control,
+  log,
+  input,
+  screens,
+  streams: () => (rtpVideo ? videos : canvases).slice(0, streamCount),
+  displays: () => displays,
+  onPause: (away) => worker.postMessage({ type: 'visible', visible: !away && document.visibilityState === 'visible' }),
+  onPressure: (scale) => {
+    if (scale === pressureScale) return;
+    pressureScale = scale;
+    log('info', `cpu pressure: picture at ${scale}×`);
+    queueViewport(true);
+  },
+  standalone,
+});
 
 // No token is fine on your own tailnet; the host asks for one only if it can't identify us.
 
 // The page can drive any Glass host on the tailnet: same client, different WebTransport
 // endpoint. Start on the machine picked last time, if any.
 const homeHost = config.wtHost ?? location.hostname;
+// A shortcut or link naming a machine: its full name (or name:port), or a short one
+// ("studio") looked up among this tailnet's machines.
+if (machineParam && !remoteKey) {
+  let id = machineParam;
+  if (!id.includes('.') && id !== 'localhost') {
+    const { machines = [] } = await fetch('machines.json').then((r) => r.json()).catch(() => ({}));
+    const want = id.toLowerCase();
+    const m = machines.find((x) => x.glass && (x.name.toLowerCase() === want || x.dns.split('.')[0].toLowerCase() === want));
+    id = m ? (m.wt_port && m.wt_port !== config.wtPort ? `${m.dns}:${m.wt_port}` : m.dns) : homeHost;
+  }
+  storage((s) => (id === homeHost ? s.removeItem(MACHINE_KEY) : s.setItem(MACHINE_KEY, id)));
+}
 let currentHost = storage((s) => s.getItem(MACHINE_KEY)) ?? homeHost;
 let machineFailures = 0;
 let machineTimer;
@@ -631,6 +692,12 @@ function onControl(msg) {
       ui.setPerms(perms);
       chat.setAvailable(true);
       restarting = undefined;
+      push.connected({ key: msg.features?.push, isOwner: Boolean(msg.perms ? msg.perms.owner : !guest) }).then(() => {
+        // Point out the new menu until it's been opened once (notifications are off).
+        if (push.state === 'off' && storage((s) => s.getItem('glass.deviceSeen')) !== '1') ui.setDeviceHint(true);
+      });
+      device.setConnected(true);
+      onFirstWelcome();
       ui.setComputerControls({
         isOwner: msg.perms ? msg.perms.owner : !guest,
         privacy: Boolean(msg.features?.privacy),
@@ -684,6 +751,9 @@ function onControl(msg) {
       break;
     case 'notice':
       ui.toast({ text: msg.msg });
+      break;
+    case 'push':
+      push.onMessage(msg);
       break;
     case 'chat':
       if (msg.sender !== session) chat.receive(msg);
@@ -809,8 +879,20 @@ function hideStatus() {
 }
 
 /** Maps the worker's status text to what the person should see. */
+// [title, detail] while another tab of this browser has the session (see navigator.locks).
+let elsewhere;
+
 function onConnectionStatus(text) {
-  if (text !== 'connected') thumbs.setConnected(false);
+  if (elsewhere) {
+    thumbs.setConnected(false);
+    device.setConnected(false);
+    showStatus('error', ...elsewhere);
+    return;
+  }
+  if (text !== 'connected') {
+    thumbs.setConnected(false);
+    device.setConnected(false);
+  }
   const name = machineName(currentHost);
   // Restarting: the connection drops and retries for a while; that's expected.
   if (restarting && text !== 'connected' && !text.startsWith('waiting for access token')) {
@@ -946,7 +1028,7 @@ function sendViewport() {
       streams.push(null);
       continue;
     }
-    const scale = devicePixelRatio * zoomScale;
+    const scale = devicePixelRatio * zoomScale * pressureScale;
     streams.push([Math.round(area[0] * scale), Math.round(area[1] * scale)]);
   }
   const msg = JSON.stringify(streams);
@@ -1077,6 +1159,18 @@ function onFileReceived({ id, file }) {
 }
 
 async function saveFile(file) {
+  // Desktop Chromium: a real Save dialog (pick the folder and name).
+  if (!mobile && window.showSaveFilePicker) {
+    try {
+      const handle = await showSaveFilePicker({ suggestedName: file.name });
+      const out = await handle.createWritable();
+      await out.write(file);
+      await out.close();
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+    }
+  }
   if (navigator.canShare?.({ files: [file] })) {
     try {
       await navigator.share({ files: [file] });
@@ -1115,6 +1209,7 @@ function toggleAudio() {
         node.connect(audioContext.destination);
         worker.postMessage({ type: 'audioPort', port: node.port }, [node.port]);
         worker.postMessage({ type: 'audioToggle' });
+        setMediaSession();
         log('info', 'audio started', { sampleRate: audioContext.sampleRate, baseLatency: audioContext.baseLatency });
       })
       .catch((e) => log('error', `audio init failed: ${e.message ?? e}`));
@@ -1195,3 +1290,118 @@ addEventListener('online', () => worker.postMessage({ type: 'wake' }));
 // connection open otherwise, and the host would list this device twice.
 addEventListener('pagehide', () => worker.postMessage({ type: 'leave' }));
 addEventListener('pageshow', (e) => e.persisted && worker.postMessage({ type: 'wake' }));
+
+// The Mac's sound in the system's media controls (lock screen, Control Center, media keys):
+// play and pause turn Glass's audio on and off.
+function setMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: machineName(currentHost),
+    artist: 'Glass',
+    artwork: [{ src: 'icon-512.png', sizes: '512x512', type: 'image/png' }],
+  });
+  const set = (on) => {
+    navigator.mediaSession.playbackState = on ? 'playing' : 'paused';
+  };
+  set(true);
+  for (const [action, on] of [['play', true], ['pause', false]]) {
+    try {
+      navigator.mediaSession.setActionHandler(action, () => {
+        if (on === (audioContext?.state === 'running')) return;
+        toggleAudio();
+        set(on);
+      });
+    } catch {}
+  }
+}
+
+// A new network (Wi-Fi to cellular, a VPN coming up): reconnect now instead of waiting.
+navigator.connection?.addEventListener?.('change', () => {
+  const c = navigator.connection;
+  log('info', 'network changed', { type: c.type, effectiveType: c.effectiveType, downlink: c.downlink, rtt: c.rtt });
+  worker.postMessage({ type: 'wake' });
+});
+
+// One viewer per browser: a second tab of this computer would be a second session (and
+// fight the first over the stream). The newest tab asks before taking over. Windows
+// opened for "use all my screens" each show their own display, so they don't count.
+if (navigator.locks && !displayParam) {
+  const name = `glass-viewer:${remoteKey ?? homeHost}`;
+  let waiting;
+  const away = (title, text) => {
+    elsewhere = [title, 'Glass is showing this computer in another tab of this browser.'];
+    worker.postMessage({ type: 'suspend' });
+    onConnectionStatus('elsewhere');
+    waiting = ui.toast({ text, timeout: 0, action: { label: 'Use it here', run: () => hold(true) } });
+  };
+  const hold = (steal) =>
+    navigator.locks.request(name, steal ? { steal: true } : { ifAvailable: true }, async (lock) => {
+      if (!lock) return away('Open in another tab', 'Glass is open in another tab.');
+      waiting?.dismiss();
+      if (elsewhere) {
+        elsewhere = undefined;
+        showStatus('connecting', 'Connecting', machineName(currentHost));
+        worker.postMessage({ type: 'resume' });
+      }
+      await new Promise(() => {}); // held until the tab closes or another takes it
+    }).catch((e) => {
+      if (e.name === 'AbortError') away('Moved to another tab', 'Glass moved to another tab.');
+    });
+  hold(false);
+}
+
+// Files opened with Glass (File Handling: "Open with" on the desktop), sent once connected.
+let pendingFiles = [];
+if ('launchQueue' in window) {
+  launchQueue.setConsumer(async (params) => {
+    const files = await Promise.all((params.files ?? []).map((h) => h.getFile()));
+    if (params.targetURL) {
+      const open = new URL(params.targetURL).searchParams.get('open');
+      if (open && open !== 'files') runOpen(open);
+    }
+    if (!files.length) return;
+    if (session) uploadFiles(files);
+    else pendingFiles.push(...files);
+  });
+}
+
+/** A shortcut from the app icon: open chat, the machines list, or send files. */
+function runOpen(what) {
+  if (what === 'chat') chat.open();
+  else if (what === 'machines') ui.openMenu('machines');
+  else if (what === 'send') {
+    // Choosing files needs a tap.
+    ui.toast({ text: 'Send files to the Mac', icon: 'file', timeout: 0, action: { label: 'Choose…', run: () => document.getElementById('file-input').click() } });
+  }
+}
+
+let welcomed = false;
+async function onFirstWelcome() {
+  if (displayParam) control({ t: 'selectDisplay', id: Number(displayParam) });
+  if (welcomed) return;
+  welcomed = true;
+  if (openParam && openParam !== 'files') runOpen(openParam);
+  if (pendingFiles.length) {
+    uploadFiles(pendingFiles);
+    pendingFiles = [];
+  }
+  // Shared to Glass from another app (Web Share Target), stashed by the service worker.
+  if (sharedParam && 'caches' in window) {
+    const cache = await caches.open('glass-share');
+    const files = [];
+    for (const req of await cache.keys()) {
+      const r = await cache.match(req);
+      const path = new URL(req.url).pathname;
+      if (path.endsWith('/shared/text')) {
+        const text = await r.text();
+        control({ t: 'clipboard', text });
+        ui.toast({ text: `On ${machineName(currentHost)}'s clipboard: ${text.length > 60 ? `${text.slice(0, 59)}…` : text}`, timeout: 5000 });
+      } else if (path.includes('/shared/file/')) {
+        const blob = await r.blob();
+        files.push(new File([blob], decodeURIComponent(r.headers.get('x-name') ?? 'file'), { type: blob.type }));
+      }
+    }
+    await caches.delete('glass-share');
+    if (files.length) uploadFiles(files);
+  }
+}

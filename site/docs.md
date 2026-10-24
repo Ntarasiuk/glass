@@ -23,6 +23,8 @@ Features:
 - **Clipboard sync.** Copy on the Mac, paste on the iPad, and the reverse.
 - **File transfer.** Send files from the iPad to the Mac's Downloads folder, or pick files on the Mac and save them on the iPad. Transfers are direct and peer-to-peer.
 - **Auto-reconnect.** Survives iPad tab suspension, network changes, and host restarts.
+- **Notifications.** On your phone, iPad or laptop, even with Glass closed: an agent needs you, someone asks to connect (Allow or Deny right from the notification), or a message. End-to-end encrypted, per device, and off until you turn them on.
+- **A real app on every device.** Install it from the browser (Add to Home Screen on iPhone and iPad): its own icon with a badge, a shortcut to each of your machines, sharing photos and files to the Mac from any app, and it opens even when the computer is asleep to say so.
 - **Self-updating client.** Open tabs reload when the Mac is updated.
 - **Secure by default.** Devices on your own Tailscale tailnet are let in automatically; anything else needs an access token.
 - **From anywhere.** `glass link --anywhere` makes a one-time link that connects any browser directly to the computer over WebRTC, end-to-end encrypted, with no ports opened. Off until you use it.
@@ -36,6 +38,7 @@ Features:
 - **Controllers and microphone.** Game controllers and your microphone reach the computer (Linux hosts).
 - **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps are remembered for each computer; an optional shortcut bar puts Mac shortcuts one tap away.
 - **Power.** Wake a sleeping machine (Wake-on-LAN), restart Glass or the whole computer and reconnect.
+- **The Glass app (macOS).** A native window for everything the command line does: setup, who's connected, links with QR codes, machines, history, AI agents, settings and teams. In Applications, Spotlight and the menu bar (**Open Glass…**).
 - **A console.** `https://<computer>/admin/`: who's connected, requests to allow, links with QR codes, devices, history, settings, access rules and an address book of your machines.
 - **For teams.** Single sign-on (any OpenID Connect provider), LDAP, SCIM provisioning, access rules per email, domain or group, and device posture checks.
 - **Self-hostable relay.** Run the remote-access introducer and TURN relay yourself.
@@ -53,13 +56,28 @@ The installer:
 1. Checks that this is macOS 13 or newer.
 2. Downloads the latest release (a universal binary for Apple Silicon and Intel) and verifies its SHA-256 checksum.
 3. Installs to `~/.glass` and links the `glass` command into `~/.local/bin` (adding that to your PATH if needed).
-4. Starts `glass setup`, the interactive setup guide.
+4. Adds **Glass.app** to `~/Applications` (macOS) and opens it, where setup takes a few clicks. Over SSH, or on Linux, it starts `glass setup` in the terminal instead.
 
 Running the same command again updates Glass in place (it says which version it updated from), restarts the background service, and skips the setup guide if Glass is already set up. Settings and macOS permissions carry over.
 
+## The Glass app (macOS)
+
+Open **Glass** from Applications or Spotlight, or choose **Open Glass…** from the menu bar icon. It does everything the `glass` command does, in a window:
+
+- **Home:** whether Glass is ready, the address to open with a QR code to scan, anything that needs fixing (a permission, Tailscale), and the switches used most.
+- **Connected:** who's viewing (end any session), connection requests to allow or deny, the chat with viewers (both sides, and reply), the privacy screen.
+- **Links:** one-time links with limits, shown as a QR code, and the devices they let in, to revoke.
+- **Machines:** your computers on Tailscale, to open or wake.
+- **History:** every session and refused attempt.
+- **AI agents:** add Glass to Claude Code, Claude Desktop or Cursor in one click; pause or stop an agent; answer its questions.
+- **Settings:** every `glass config` setting, the access token, restarting or turning off the service, updates and feedback.
+- **Teams & SSO:** single sign-on, access rules, LDAP, SCIM and device posture.
+
+The first time it opens, it walks through setup. It's a separate process from the background service, drawn on the GPU (with [GPUI](https://www.gpui.rs)), and quits when you close its window; Glass keeps running in the background.
+
 ## Setup (`glass setup`)
 
-The setup guide walks through four steps and checks each one live:
+The setup guide (in the app, or `glass setup` in a terminal) walks through four steps and checks each one live:
 
 1. **Tailscale (remote access).** Glass uses [Tailscale](https://tailscale.com) to reach the Mac securely from other devices, with no port forwarding. Setup checks that Tailscale is installed and signed in, and that **HTTPS Certificates** are enabled for your tailnet (one switch on https://login.tailscale.com/admin/dns; browsers require HTTPS for the APIs Glass uses). It then fetches a certificate for the Mac's tailnet name. Without Tailscale, skip this step: setup ends by offering a one-time link that connects your iPad from any network instead (see *From anywhere* below).
 2. **Background service.** Glass installs a per-user LaunchAgent (`dev.glassdesk.host`) so it runs in the background, optionally starts at login, and restarts if it crashes.
@@ -138,7 +156,7 @@ The toolbar (top right) has:
 - **Displays:** pick one display, or **All displays** to show every screen side by side in the same arrangement as System Settings → Displays.
 - **⌘ (Mac shortcuts):** one-tap app switcher, Spotlight, Mission Control, Hide, Quit, Close window, screenshot, Force Quit, and Lock Screen. Also keyboard remapping options (see below).
 - **Keyboard:** brings up the iPad's on-screen keyboard.
-- **Send files to Mac:** uploads to `~/Downloads` (drag and drop also works).
+- **Send files to Mac:** uploads to `~/Downloads` (drag and drop also works, folders included).
 - **Get files from Mac:** opens a file chooser on the Mac's screen; chosen files arrive with a Save button.
 - **Audio:** turns Mac system audio on or off for this device.
 - **Fullscreen** (hidden when running as a Home Screen app) and **Stats**.
@@ -160,6 +178,17 @@ More in the toolbar:
 - **Microphone:** sends your microphone to the computer (Linux hosts).
 - **Computer:** **Privacy screen** (blanks the computer's screen and ignores its keyboard and mouse while you're connected; `glass privacy on|off` from there), **Restart Glass**, **Restart computer** (Glass reconnects once someone is logged in) and **Console**.
 - **Machines:** sleeping machines Glass has seen before can be woken with Wake-on-LAN (also `glass wake <name|mac>`).
+- **This device** (the bell): what this browser does for Glass.
+  - **Notifications:** messages, questions (an agent asking before it acts or needing your help, someone asking to connect) and activity (someone joined, an update is ready), even with Glass closed. On iPhone and iPad, add Glass to the Home Screen first. `glass notifications` lists the devices that get them (`test`, `off <id>`), as does the Glass app's Settings.
+  - **Keep screen awake** while connected (on by default).
+  - **Picture in picture:** the screen in a floating window while you do something else.
+  - **Use all my screens:** with several monitors here and several displays there, one display on each (Chrome and Edge).
+  - **Capture mouse:** for games and 3D apps, the pointer stays in the picture and sends relative motion; Esc releases it.
+  - **Sync clipboard:** switching back to Glass puts this device's clipboard on the computer (Chrome and Edge).
+  - **Pause while away:** stops the video while this computer is locked or idle (Chrome and Edge).
+  - **Install Glass:** its own window and icon. On a desktop, the toolbar moves into the title bar.
+
+**As an installed app** (Home Screen, or **Install Glass**): long-press the icon for Chat, Machines, Send files and each of your other machines; share photos, files or text to Glass from other apps (Android, ChromeOS, desktop) to send them to the computer; open files with Glass on the desktop; `web+glass://<machine>` links open that machine. It opens even when the computer can't be reached, and says so. Only one tab of a browser shows a computer at a time; another tab asks before taking over.
 
 Game controllers connected to the viewing device work on Linux hosts as a virtual Xbox 360 controller.
 
@@ -234,6 +263,7 @@ A rule matches an email, `@domain`, `group:name` or `*`, and takes the same limi
 
 ```
 glass               Run the host in the foreground (the background service runs this)
+glass app           Open the Glass app (macOS); --install just adds Glass.app to ~/Applications
 glass setup         Guided setup: Tailscale, background service, permissions, connect
 glass setup --yes [--json]   Unattended setup for scripts and agents; reports what's left
 glass status [--json]        Is the service running? Capturing? Permissions? Connect URL
@@ -246,6 +276,7 @@ glass viewers [--json]   Who's connected now
 glass kick [id]          End one session, or every one
 glass requests / allow [id] / deny [id]   Connection requests waiting for an answer
 glass chat "…"           Message everyone viewing
+glass notifications      Devices that get notifications (test, off <id>)
 glass privacy on|off     Blank this screen and block local input while viewed
 glass log [-n 20] [--json]   Connection history
 glass wake <name|mac>    Wake a machine with Wake-on-LAN
@@ -325,6 +356,7 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 - With Tailscale, traffic stays on your private tailnet and goes directly between devices when possible.
 - Access control: a device is let in if Tailscale reports it belongs to the same user as the Mac, or if it presents the access token. Glass sends nothing to a session (video, audio, clipboard, input) until it is authenticated. Links, single sign-on, LDAP, access rules, posture checks and passkeys can narrow that further; see above.
 - Glass runs as your user (a LaunchAgent on macOS, a systemd user service on Linux), never as root.
+- Notifications are the one thing that leaves your network: the computer sends them through your browser's push service (Apple, Google, Mozilla or Microsoft), encrypted end to end (RFC 8291), so the push service can't read them. Only devices you turn them on for get them; guests only ever get messages.
 - The glassdesk.dev website uses Google Analytics on its pages (not on the remote viewer at glassdesk.dev/app), counts downloads using a salted hash of the IP address (no raw IPs stored) and stores feedback you choose to send. The Glass app itself sends nothing to glassdesk.dev except feedback you submit.
 
 ## Requirements
@@ -336,7 +368,7 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 ## Troubleshooting
 
 - **"Glass isn't running":** run `glass status`, then check `~/Library/Logs/Glass/agent.log` and `host.log`.
-- **Restarting Glass:** `glass restart` on the computer, or **Computer › Restart Glass** in the viewer. After turning on HTTPS Certificates for your tailnet (or moving the computer to another tailnet), run `glass setup` instead: it fetches the new certificate and restarts the service.
+- **Restarting Glass:** **Settings › Service › Restart** in the Glass app, `glass restart` on the computer, or **Computer › Restart Glass** in the viewer. After turning on HTTPS Certificates for your tailnet (or moving the computer to another tailnet), run `glass setup` instead: it fetches the new certificate and restarts the service.
 - **Asked for a token on someone else's computer:** Glass lets in only devices signed into Tailscale as the computer's owner. Ask them to run `glass link` and send you the link (or give you the token from `glass token`).
 - **Black screen after connecting:** Glass sends the current frame on connect; if it persists, check Screen Recording permission (`glass status`) and re-run `glass setup`.
 - **Mouse and keyboard don't work:** Accessibility permission is missing. Re-run `glass setup` or enable Glass under System Settings → Privacy & Security → Accessibility.

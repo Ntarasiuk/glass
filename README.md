@@ -59,6 +59,8 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Beyond the desktop.** Stream a single app's window, a resizable full-screen terminal in the viewer, open the computer's local web ports (`/fwd/3000/`) from your tailnet, record sessions to MP4, game controllers and your microphone (Linux), HEVC when every viewer can decode it.
 - **Sharp text.** A per-viewer mode for code and documents: native size, finer frames, HEVC 4:2:2 while things move, and a lossless full-colour (4:4:4) picture once the screen is still.
 - **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps are remembered for each computer; an optional shortcut bar puts Mac shortcuts one tap away on a touch screen.
+- **Notifications and a real app on every device.** Get notified when an agent needs you or someone asks to connect (answer from the notification), install Glass from the browser with a badge, per-machine shortcuts and sharing to the Mac, and it opens even when the computer is asleep.
+- **A real Mac app.** Glass.app does everything the CLI does in a native, GPU-drawn window: setup in a few clicks, who's connected, links with QR codes, machines, history, AI agents (added to Claude in one click), settings and teams.
 - **A console.** `https://<computer>/admin/` (or Computer › Console in the viewer): who's connected, requests to allow, links with QR codes, revoking devices, history, settings, access rules, and an address book of your machines in your own groups.
 - **Device posture.** Require tailnet devices to carry a Tailscale tag, allow only certain operating systems, a minimum browser version, or passkeys with Face ID / Touch ID / a PIN (`glass config posture-*`).
 - **Single sign-on.** Point `glass config oidc-issuer` at Google, Entra, Okta or any OpenID Connect provider, or `glass config ldap-url` at your directory, and accounts sign in without a token. Access rules (`glass acl`) pick what each email, domain or group may do; SCIM provisioning keeps users and groups in sync and cuts off deactivated accounts.
@@ -85,7 +87,7 @@ And the viewer is just a web page. No app to install, no account to create.
 - Linux x86_64 on Wayland with PipeWire (beta). Built on Hyprland/Omarchy; works on GNOME and KDE. Arch, Fedora 40+, Ubuntu 24.04+.
 
 ```sh
-curl -fsSL glassdesk.dev | sh   # installs to ~/.glass, verifies the checksum, starts `glass setup`
+curl -fsSL glassdesk.dev | sh   # installs to ~/.glass, verifies the checksum, opens the Glass app to set up
 ```
 
 Run it again any time to update. Prefer to read it first? [install.sh](site/public/install.sh). Release tarballs are on the [releases page](https://github.com/Ntarasiuk/glass/releases).
@@ -95,6 +97,7 @@ Run it again any time to update. Prefer to read it first? [install.sh](site/publ
 ## Usage
 
 ```sh
+glass app                # the Glass app (macOS): setup, connections, links, agents, settings
 glass setup              # guided setup: Tailscale, background service, permissions, QR code
 glass status             # running? capturing? permissions? connect URL
 glass restart            # restart the background service

@@ -116,6 +116,19 @@ pub fn control(op: &str) {
     broadcast(ServerMsg::AgentStatus { status });
 }
 
+pub fn status() -> Status {
+    with(|s| s.status)
+}
+
+/// Questions waiting for the owner, oldest first.
+pub fn asks() -> Vec<Value> {
+    with(|s| {
+        let mut asks: Vec<_> = s.asks.iter().map(|(id, a)| json!({ "id": id, "kind": a.kind, "text": a.text })).collect();
+        asks.sort_by_key(|a| a["id"].as_u64());
+        asks
+    })
+}
+
 /// The owner answered a question.
 pub fn answer(id: u64, answer: Answer) {
     if let Some(ask) = with(|s| s.asks.remove(&id)) {
@@ -391,6 +404,7 @@ pub async fn ask(kind: &'static str, text: &str) -> Result<Value, Refused> {
         if kind == "help" { "An agent needs your help" } else { "An agent asks before it acts" },
         &text,
     );
+    crate::push::agent_ask(id, kind == "help", &text);
     let answer = match tokio::time::timeout(ASK_WAIT, rx).await {
         Ok(Ok(a)) => a,
         _ => {

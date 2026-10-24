@@ -79,7 +79,11 @@ export function attachInput({
     return rect;
   }
 
+  // Pointer lock (Capture mouse): relative motion only, the local position means nothing.
+  let locked = false;
+
   function sendMove(x, y, canvas) {
+    if (locked) return;
     const rect = canvas && contentRect(canvas);
     if (!rect) return;
     send(Input.MOVE, { button: streamOf(canvas), a: (x - rect.left) / rect.width, b: (y - rect.top) / rect.height });
@@ -93,6 +97,10 @@ export function attachInput({
 
   const moveEvent = 'onpointerrawupdate' in window ? 'pointerrawupdate' : 'pointermove';
   screens.addEventListener(moveEvent, (e) => {
+    if (locked) {
+      if (e.movementX || e.movementY) send(Input.MOVE_BY, { a: e.movementX, b: e.movementY });
+      return;
+    }
     if (e.pointerType !== 'touch') sendMove(e.clientX, e.clientY, canvasOf(e));
   }, { passive: true });
 
@@ -103,7 +111,7 @@ export function attachInput({
     if (e.pointerType === 'touch') return touchDown(e, canvas);
     // Don't focus the key sink here: iPad Safari leaves fullscreen when a text field takes
     // focus, and hardware keys reach the window without it.
-    try { canvas.setPointerCapture(e.pointerId); } catch {}
+    if (!locked) try { canvas.setPointerCapture(e.pointerId); } catch {}
     sendMove(e.clientX, e.clientY, canvas);
     send(Input.DOWN, { button: e.button });
   });
@@ -385,6 +393,9 @@ export function attachInput({
   });
 
   return {
+    setPointerLocked(on) {
+      locked = on;
+    },
     /** Presses keys in order and releases them in reverse, e.g. [Cmd, Tab]. */
     sendCombo(keycodes) {
       for (const keycode of keycodes) send(Input.KEY_DOWN, { keycode });

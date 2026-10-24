@@ -13,7 +13,7 @@ bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
 cliclack = "0.5.6"
 console = "0.16.6"
-glass-proto = { version = "0.4.2", path = "../glass-proto" }
+glass-proto = { version = "0.5.0", path = "../glass-proto" }
 openh264 = "0.9"
 openh264-sys2 = "0.9"
 ring = "0.17.14"
@@ -40,6 +40,7 @@ ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-
 png = "0.17"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+gpui-kit = "0.8"
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
 objc2 = "0.6.5"

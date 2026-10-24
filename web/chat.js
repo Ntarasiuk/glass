@@ -102,5 +102,8 @@ export function createChat({ onSend, toast }) {
       button.classList.toggle('hidden', !on);
       if (!on) setOpen(false);
     },
+    open() {
+      setOpen(true);
+    },
   };
 }

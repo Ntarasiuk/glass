@@ -110,16 +110,23 @@ fn save_secret(p: &std::path::Path, secret: &str) -> Result<()> {
         let _ = std::fs::remove_file(p);
         return Ok(());
     }
+    write_private(p, secret.as_bytes())
+}
+
+/// Writes an owner-only file (mode 600), replacing it whole.
+pub fn write_private(p: &std::path::Path, bytes: &[u8]) -> Result<()> {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let _ = std::fs::remove_file(p);
+    let tmp = p.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp);
     use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    opts.open(p)?.write_all(secret.as_bytes())?;
+    opts.open(&tmp)?.write_all(bytes)?;
+    std::fs::rename(&tmp, p)?;
     Ok(())
 }
 

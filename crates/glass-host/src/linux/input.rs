@@ -36,6 +36,8 @@ pub struct Injector {
     held: HashSet<u16>,
     buttons: [bool; 3],
     wheel: (f32, f32),
+    /// Where the pointer is, in logical desktop coordinates (for relative moves).
+    pos: (f64, f64),
 }
 
 impl Injector {
@@ -48,6 +50,7 @@ impl Injector {
             held: HashSet::new(),
             buttons: [false; 3],
             wheel: (0.0, 0.0),
+            pos: (0.0, 0.0),
         };
         this.set_displays(&[display]);
         this.ensure_devices();
@@ -83,6 +86,11 @@ impl Injector {
     fn move_in(&mut self, r: video::Rect, x: f32, y: f32) {
         let gx = r.x + x.clamp(0.0, 1.0) as f64 * r.w;
         let gy = r.y + y.clamp(0.0, 1.0) as f64 * r.h;
+        self.move_to(gx, gy);
+    }
+
+    fn move_to(&mut self, gx: f64, gy: f64) {
+        self.pos = (gx, gy);
         let l = self.layout;
         let ax = (((gx - l.x) / l.w.max(1.0)) * ABS_MAX as f64).round() as i32;
         let ay = (((gy - l.y) / l.h.max(1.0)) * ABS_MAX as f64).round() as i32;
@@ -113,6 +121,12 @@ impl Injector {
                     return;
                 };
                 self.move_in(r, x, y);
+            }
+            Ev::MouseMoveBy { dx, dy } => {
+                let l = self.layout;
+                let x = (self.pos.0 + dx as f64).clamp(l.x, l.x + l.w - 1.0);
+                let y = (self.pos.1 + dy as f64).clamp(l.y, l.y + l.h - 1.0);
+                self.move_to(x, y);
             }
             // Routed to crate::gamepad by the server, never here.
             Ev::Gamepad { .. } => {}

@@ -20,8 +20,22 @@ pub enum Request {
     Decide { id: u64, allow: bool },
     /// A message to every viewer.
     Chat { text: String },
+    /// The conversation so far.
+    ChatLog,
     /// Turn privacy mode on or off for the current sessions.
     Privacy { on: bool },
+    /// An agent's status and its questions; with `op` (pause, resume, stop, allow), steer it.
+    Agent {
+        #[serde(default)]
+        op: Option<String>,
+    },
+    /// Answer an agent's question.
+    AgentAnswer {
+        id: u64,
+        ok: bool,
+        #[serde(default)]
+        note: Option<String>,
+    },
 }
 
 pub fn path() -> PathBuf {
@@ -92,10 +106,21 @@ async fn handle(req: Request) -> serde_json::Value {
             Ok(n) => json!({ "sent": n }),
             Err(e) => json!({ "error": format!("{e:#}") }),
         },
+        Request::ChatLog => json!({ "messages": crate::server::chat_log() }),
         Request::Privacy { on } => match crate::privacy::set_forced(on) {
             Ok(()) => json!({ "privacy": on }),
             Err(e) => json!({ "error": format!("{e:#}") }),
         },
+        Request::Agent { op } => {
+            if let Some(op) = op {
+                crate::computer::control(&op);
+            }
+            json!({ "status": crate::computer::status(), "asks": crate::computer::asks(), "privacy": crate::privacy::active() })
+        }
+        Request::AgentAnswer { id, ok, note } => {
+            crate::computer::answer(id, crate::computer::Answer { ok, note });
+            json!({ "ok": true })
+        }
     }
 }
 

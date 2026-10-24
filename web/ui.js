@@ -1,6 +1,7 @@
 // Toolbar, panels, toasts and the token prompt. DOM writes only; no layout reads.
 
 import { CUSTOM_KEY, comboFromEvent, parseCustom, serializeCustom } from './shortcuts.js';
+import { droppedFiles } from './device.js';
 
 const $ = (id) => document.getElementById(id);
 // localStorage can throw (private browsing, storage blocked).
@@ -18,7 +19,7 @@ const storageSet = (key, value) => {
 };
 
 
-export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, onOpenDevice = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -27,6 +28,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     shortcuts: { button: $('btn-shortcuts'), panel: $('shortcuts-panel') },
     more: { button: $('btn-more'), panel: $('more-panel') },
     ports: { button: $('btn-ports'), panel: $('ports-panel') },
+    device: { button: $('btn-device'), panel: $('device-panel') },
   };
   const fileInput = $('file-input');
   const toasts = $('toasts');
@@ -42,7 +44,9 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     if (hide) for (const name of Object.keys(menus)) setMenuOpen(name, false);
     storageSet(TOOLBAR_HIDDEN_KEY, hide ? '1' : '0');
   }
-  if (storageGet(TOOLBAR_HIDDEN_KEY) === '1') {
+  // In the title bar (an installed desktop app) there's nothing to tuck away.
+  const inTitleBar = matchMedia('(display-mode: window-controls-overlay)').matches;
+  if (storageGet(TOOLBAR_HIDDEN_KEY) === '1' && !inTitleBar) {
     toolbar.classList.add('tucked');
     toolbar.inert = true;
     toolbarShow.classList.remove('hidden');
@@ -83,6 +87,10 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   on('btn-terminal', onTerminal);
   on('btn-ports', () => toggleMenu('ports'));
   on('btn-hide-toolbar', () => setToolbarHidden(true));
+  on('btn-device', () => {
+    toggleMenu('device');
+    if (!menus.device.panel.classList.contains('hidden')) onOpenDevice();
+  });
 
   fileInput.addEventListener('change', () => {
     if (fileInput.files.length) onUploadFiles([...fileInput.files]);
@@ -91,9 +99,10 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
 
   // Drag-and-drop files from the client device onto the remote screen.
   addEventListener('dragover', (e) => e.preventDefault());
-  addEventListener('drop', (e) => {
+  // Folders too: their files keep their paths inside the folder.
+  addEventListener('drop', async (e) => {
     e.preventDefault();
-    const files = [...(e.dataTransfer?.files ?? [])];
+    const files = await droppedFiles(e.dataTransfer).catch(() => [...(e.dataTransfer?.files ?? [])]);
     if (files.length) onUploadFiles(files);
   });
 
@@ -637,6 +646,23 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     },
     setMicOn(on) {
       $('btn-mic').setAttribute('aria-pressed', String(on));
+    },
+    menuItem,
+    closeMenus() {
+      for (const name of Object.keys(menus)) setMenuOpen(name, false);
+    },
+    openMenu(name) {
+      setToolbarHidden(false);
+      for (const other of Object.keys(menus)) setMenuOpen(other, other === name);
+      if (name === 'machines') onOpenMachines();
+      if (name === 'device') onOpenDevice();
+    },
+    setDeviceItems(items) {
+      menus.device.panel.replaceChildren(...items);
+    },
+    /** A dot on the device button: something there wants a look (notifications are off). */
+    setDeviceHint(on) {
+      $('btn-device').classList.toggle('hint', on);
     },
   };
 }
