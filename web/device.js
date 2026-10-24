@@ -191,21 +191,21 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
       const STEPS = [1, 0.75, 0.5];
       let step = 0;
       let wanted = 0;
-      let since = 0;
+      let timer;
+      // The observer reports changes only, so a timer checks once the state has lasted.
+      const settle = () => {
+        clearTimeout(timer);
+        if (wanted === step) return;
+        timer = setTimeout(() => {
+          step += wanted > step ? 1 : -1;
+          onPressure(STEPS[step]);
+          settle(); // the next step waits its turn too
+        }, wanted > step ? 10_000 : 30_000);
+      };
       const observer = new PressureObserver((records) => {
         const state = records.at(-1)?.state;
-        const want = state === 'critical' ? 2 : state === 'serious' ? 1 : 0;
-        const now = performance.now();
-        if (want !== wanted) {
-          wanted = want;
-          since = now;
-        }
-        const held = now - since;
-        if (wanted > step && held >= 10_000) step += 1;
-        else if (wanted < step && held >= 30_000) step -= 1;
-        else return;
-        since = now; // the next step waits its turn too
-        onPressure(STEPS[step]);
+        wanted = state === 'critical' ? 2 : state === 'serious' ? 1 : 0;
+        settle();
       });
       observer.observe('cpu', { sampleInterval: 2000 }).catch(() => {});
     } catch {}
