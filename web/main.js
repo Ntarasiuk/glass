@@ -401,6 +401,7 @@ const ui = createUI({
     onConnectionStatus('restarting');
   },
   onTerminal: () => terminal.toggle(),
+  onTrackpad: () => setTrackpad(!trackpadOn, true),
   onExtend: (on) => setExtended(on),
   onOpenDevice: () => {
     storage((s) => s.setItem('glass.deviceSeen', '1'));
@@ -1212,6 +1213,7 @@ function fitSizes() {
 
 function onLayout(streams) {
   annotator.invalidate();
+  input.refreshCursor();
   for (const d of streams) if (!streamedWindows.has(d.id) && !displays.some((x) => x.id === d.id)) displays.push(d);
   // The host orders streams as arranged in macOS; lay them out the same way.
   screens.dataset.arrange = arrangement(streams);
@@ -1604,3 +1606,25 @@ async function onFirstWelcome() {
     if (files.length) uploadFiles(files);
   }
 }
+
+// Trackpad mode (touch screens): on by default on phones, where fingers are big next to
+// what they'd tap; remembered per device.
+const TRACKPAD_KEY = 'glass.trackpad';
+const touchScreen = matchMedia('(hover: none)').matches || navigator.maxTouchPoints > 0;
+const phone = touchScreen && Math.min(screen.width, screen.height) < 600;
+let trackpadOn = touchScreen && (storage((s) => s.getItem(TRACKPAD_KEY)) ?? (phone ? '1' : '0')) === '1';
+function setTrackpad(on, chosen = false) {
+  trackpadOn = on;
+  input.setTrackpad(on);
+  ui.setTrackpad({ available: touchScreen, on });
+  if (!chosen) return;
+  storage((s) => s.setItem(TRACKPAD_KEY, on ? '1' : '0'));
+  log('info', `trackpad mode ${on ? 'on' : 'off'}`);
+  ui.toast({
+    text: on
+      ? 'Trackpad: drag to move the pointer, tap to click, two-finger tap to right-click, double-tap and hold to drag, two fingers to scroll, pinch to zoom.'
+      : 'Touch: tap where you want to click.',
+    timeout: on ? 7000 : 2500,
+  });
+}
+setTrackpad(trackpadOn);

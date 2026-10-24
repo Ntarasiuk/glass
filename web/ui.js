@@ -19,7 +19,7 @@ const storageSet = (key, value) => {
 };
 
 
-export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, onOpenDevice = () => {}, onExtend = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, onOpenDevice = () => {}, onTrackpad = () => {}, onExtend = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -86,6 +86,50 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   on('btn-terminal', onTerminal);
   on('btn-ports', () => toggleMenu('ports'));
   on('btn-hide-toolbar', () => setToolbarHidden(true));
+  on('btn-trackpad', () => onTrackpad());
+
+  // Phones: each toolbar group is one button with a dropdown (CSS decides when). A group
+  // knows how many of its buttons show, so one with a single button shows it directly.
+  const groups = [...toolbar.querySelectorAll('.tb-group')];
+  function countGroups() {
+    for (const g of groups) {
+      // Dropdown labels: the button's title without its shortcut ("Fullscreen (Ctrl+…)").
+      for (const b of g.querySelectorAll('.tb-items > button')) {
+        const label = (b.title || '').replace(/\s*\(.*\)$/, '');
+        if (b.dataset.label !== label) b.dataset.label = label;
+      }
+      const n = String(g.querySelectorAll('.tb-items > button:not(.hidden)').length);
+      if (g.dataset.n !== n) g.dataset.n = n;
+    }
+  }
+  countGroups();
+  new MutationObserver(countGroups).observe(toolbar, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'title'] });
+  function setGroupOpen(group, open) {
+    group.classList.toggle('open', open);
+    group.querySelector('.tb-trigger')?.setAttribute('aria-expanded', String(open));
+  }
+  for (const g of groups) {
+    g.querySelector('.tb-trigger')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      const open = !g.classList.contains('open');
+      for (const other of groups) setGroupOpen(other, other === g && open);
+      if (open) for (const name of Object.keys(menus)) setMenuOpen(name, false);
+    });
+    // Picking something closes the dropdown (a button that opens a menu opens it after).
+    g.querySelector('.tb-items')?.addEventListener('click', () => setGroupOpen(g, false));
+  }
+  addEventListener('pointerdown', (e) => {
+    for (const g of groups) if (g.classList.contains('open') && !g.contains(e.target)) setGroupOpen(g, false);
+  }, { capture: true });
+  addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const open = groups.find((g) => g.classList.contains('open'));
+    if (!open) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    setGroupOpen(open, false);
+    open.querySelector('.tb-trigger')?.focus();
+  }, { capture: true });
   on('btn-device', () => {
     toggleMenu('device');
     if (!menus.device.panel.classList.contains('hidden')) onOpenDevice();
@@ -676,6 +720,11 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     },
     setMicOn(on) {
       $('btn-mic').setAttribute('aria-pressed', String(on));
+    },
+    /** Trackpad mode: offered on touch screens, and whether it's on. */
+    setTrackpad({ available, on }) {
+      if (available !== undefined) $('btn-trackpad').classList.toggle('hidden', !available);
+      if (on !== undefined) $('btn-trackpad').setAttribute('aria-pressed', String(on));
     },
     menuItem,
     closeMenus() {

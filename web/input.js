@@ -5,6 +5,14 @@ import { MAC_KEYCODES, charToKey, KVK_SHIFT } from './keymap.js';
 
 const LONG_PRESS_MS = 500;
 const TAP_SLOP_PX = 10;
+// Trackpad mode: a tap is shorter than this, a second tap this soon (and close) can drag.
+const TAP_MAX_MS = 250;
+const DOUBLE_TAP_MS = 300;
+const DOUBLE_TAP_SLOP_PX = 40;
+// Cursor speed: finger movement × gain × (1 + min(max, speed × accel)).
+const TRACKPAD_GAIN = 1.25;
+const TRACKPAD_ACCEL = 1.1;
+const TRACKPAD_ACCEL_MAX = 2.2;
 // A single touch waits this long before pressing, so a second finger can turn
 // the gesture into a scroll without a stray click.
 const TOUCH_PRESS_DELAY_MS = 120;
@@ -63,7 +71,10 @@ export function attachInput({
   // cached and dropped on resize, so pointer events never force a layout read.
   const videoSizes = []; // stream -> { width, height }
   const rects = new Map(); // canvas -> content rect
-  const resize = new ResizeObserver(() => rects.clear());
+  const resize = new ResizeObserver(() => {
+    rects.clear();
+    drawCursor();
+  });
   const streamOf = (canvas) => Number(canvas.dataset.stream);
   // A display is a canvas (WebTransport) or a <video> (remote, over WebRTC).
   const canvasOf = (e) => e.target?.closest?.('#screens > [data-stream]') ?? undefined;
@@ -163,7 +174,7 @@ export function attachInput({
     const canvas = canvasOf(e);
     if (!canvas) return;
     e.preventDefault();
-    if (e.pointerType === 'touch') return touchDown(e, canvas);
+    if (e.pointerType === 'touch') return trackpad ? tpDown(e, canvas) : touchDown(e, canvas);
     // Don't focus the key sink here: iPad Safari leaves fullscreen when a text field takes
     // focus, and hardware keys reach the window without it.
     if (!locked) try { canvas.setPointerCapture(e.pointerId); } catch {}
@@ -174,13 +185,13 @@ export function attachInput({
   });
   screens.addEventListener('pointerup', (e) => {
     e.preventDefault();
-    if (e.pointerType === 'touch') return touchUp(e);
+    if (e.pointerType === 'touch') return trackpad ? tpUp(e) : touchUp(e);
     if (e.pointerType === 'pen') sendPen(e);
     sendMove(e.clientX, e.clientY, canvasOf(e));
     send(Input.UP, { button: e.button });
   });
   screens.addEventListener('pointercancel', (e) => {
-    if (e.pointerType === 'touch') touchUp(e, true);
+    if (e.pointerType === 'touch') (trackpad ? tpUp : touchUp)(e, true);
     if (e.pointerType === 'pen') sendPen(null);
   });
   screens.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -270,6 +281,7 @@ export function attachInput({
     screens.style.transform = zoom.s === 1 ? '' : `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.s})`;
     rects.clear();
     onZoom?.(zoom.s);
+    drawCursor();
   }
 
   function resetZoom() {
@@ -278,6 +290,7 @@ export function attachInput({
   }
 
   screens.addEventListener('pointermove', (e) => {
+    if (trackpad && e.pointerType === 'touch') return tpMove(e);
     if (e.pointerType !== 'touch' || !touches.has(e.pointerId) || !gesture) return;
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (gesture.scrolling) {
@@ -324,6 +337,205 @@ export function attachInput({
       send(Input.UP, { button: 0 });
     }
     gesture = undefined;
+  }
+
+  // ---- Trackpad mode: the screen is a laptop trackpad for a cursor ----
+  //
+  // One finger moves the cursor (relative, with acceleration); tap clicks; double-tap and
+  // hold, or a long press, drags; two-finger tap right-clicks; two fingers scroll or pinch
+  // to zoom, and a zoomed view follows the cursor. The cursor is drawn here at once (the
+  // video's own follows a moment later), so moving it never feels behind.
+
+  let trackpad = false;
+  const cursorEl = document.getElementById('tp-cursor');
+  const cursor = { x: NaN, y: NaN }; // in the screens' own (unzoomed) coordinates
+  let tp; // the gesture in progress
+  let lastTap; // { t, x, y }: a second tap soon after, held, drags
+  let cursorFrame;
+
+  const toClient = (p) => ({ x: zoom.x + p.x * zoom.s, y: zoom.y + p.y * zoom.s });
+  const fromClient = (c) => ({ x: (c.x - zoom.x) / zoom.s, y: (c.y - zoom.y) / zoom.s });
+  const shown = () => [...screens.querySelectorAll('[data-stream]:not(.hidden)')];
+
+  /** Each visible display's picture, in unzoomed coordinates. */
+  function areasNow() {
+    return shown().flatMap((canvas) => {
+      const r = contentRect(canvas);
+      if (!r) return [];
+      const a = fromClient({ x: r.left, y: r.top });
+      return [{ canvas, x: a.x, y: a.y, w: r.width / zoom.s, h: r.height / zoom.s }];
+    });
+  }
+
+  /** The cursor kept on a picture: the one it's over, else the nearest. */
+  function placeCursor() {
+    const areas = areasNow();
+    if (!areas.length) return undefined;
+    if (Number.isNaN(cursor.x)) {
+      cursor.x = areas[0].x + areas[0].w / 2;
+      cursor.y = areas[0].y + areas[0].h / 2;
+    }
+    let best;
+    let bestD = Infinity;
+    for (const a of areas) {
+      const x = Math.min(a.x + a.w - 1, Math.max(a.x, cursor.x));
+      const y = Math.min(a.y + a.h - 1, Math.max(a.y, cursor.y));
+      const d = Math.hypot(x - cursor.x, y - cursor.y);
+      if (d < bestD) { bestD = d; best = { a, x, y }; }
+    }
+    cursor.x = best.x;
+    cursor.y = best.y;
+    return best.a.canvas;
+  }
+
+  function sendCursor() {
+    const canvas = placeCursor();
+    if (!canvas) return;
+    const c = toClient(cursor);
+    sendMove(c.x, c.y, canvas);
+  }
+
+  function drawCursor() {
+    if (!trackpad || Number.isNaN(cursor.x) || cursorFrame) return;
+    cursorFrame = requestAnimationFrame(() => {
+      cursorFrame = undefined;
+      const c = toClient(cursor);
+      cursorEl.style.transform = `translate(${c.x}px, ${c.y}px)`;
+    });
+  }
+
+  /** Zoomed in: pan so the cursor stays comfortably inside the view. */
+  function follow() {
+    if (zoom.s <= 1) return;
+    const w = screens.clientWidth;
+    const h = screens.clientHeight;
+    const m = Math.min(90, w * 0.18, h * 0.18);
+    const c = toClient(cursor);
+    let { x, y } = zoom;
+    if (c.x < m) x += m - c.x;
+    else if (c.x > w - m) x -= c.x - (w - m);
+    if (c.y < m) y += m - c.y;
+    else if (c.y > h - m) y -= c.y - (h - m);
+    x = Math.min(0, Math.max(w - w * zoom.s, x));
+    y = Math.min(0, Math.max(h - h * zoom.s, y));
+    if (x !== zoom.x || y !== zoom.y) {
+      zoom.x = x;
+      zoom.y = y;
+      applyZoom();
+    }
+  }
+
+  function moveCursorBy(dx, dy) {
+    placeCursor();
+    cursor.x += dx / zoom.s;
+    cursor.y += dy / zoom.s;
+    sendCursor();
+    follow();
+    drawCursor();
+  }
+
+  function tpClick(button) {
+    sendCursor();
+    send(Input.DOWN, { button });
+    send(Input.UP, { button });
+  }
+
+  function tpStartDrag() {
+    if (!tp || tp.dragging) return;
+    clearTimeout(tp.longTimer);
+    tp.dragging = true;
+    sendCursor();
+    send(Input.DOWN, { button: 0 });
+    cursorEl.classList.add('down');
+  }
+
+  function tpDown(e, canvas) {
+    try { canvas.setPointerCapture(e.pointerId); } catch {}
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const now = performance.now();
+    if (touches.size === 1) {
+      placeCursor();
+      drawCursor();
+      const again = lastTap && now - lastTap.t < DOUBLE_TAP_MS && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < DOUBLE_TAP_SLOP_PX;
+      tp = { startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY, lastT: now, startT: now, moved: false, dragging: false, multi: false, again };
+      // Hold still: press and hold, to drag.
+      tp.longTimer = setTimeout(() => { if (tp && !tp.moved && !tp.multi) tpStartDrag(); }, LONG_PRESS_MS);
+      return;
+    }
+    if (!tp) return;
+    clearTimeout(tp.longTimer);
+    tp.multi = true;
+    tp.two = { c: centroid(), spread: spread(), zoom: { ...zoom }, last: centroid(), mode: undefined };
+  }
+
+  function tpMove(e) {
+    if (!tp || !touches.has(e.pointerId)) return;
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (tp.two && touches.size >= 2) {
+      const c = centroid();
+      const two = tp.two;
+      if (!two.mode) {
+        const ratio = spread() / (two.spread || 1);
+        if (Math.abs(ratio - 1) > PINCH_THRESHOLD) two.mode = 'zoom';
+        else if (Math.hypot(c.x - two.c.x, c.y - two.c.y) > TAP_SLOP_PX) two.mode = 'scroll';
+      }
+      if (two.mode === 'zoom') {
+        zoomTo(two.zoom.s * (spread() / (two.spread || 1)), c, two);
+      } else if (two.mode === 'scroll') {
+        sendCursor();
+        send(Input.SCROLL, { a: two.last.x - c.x, b: two.last.y - c.y });
+      }
+      two.last = c;
+      return;
+    }
+    if (tp.multi) return; // a finger left over from a two-finger gesture
+    const now = performance.now();
+    if (!tp.moved && Math.hypot(e.clientX - tp.startX, e.clientY - tp.startY) > TAP_SLOP_PX) {
+      tp.moved = true;
+      clearTimeout(tp.longTimer);
+      if (tp.again) tpStartDrag(); // double-tap, hold and move: drag
+    }
+    if (!tp.moved) return;
+    // Acceleration: slow and precise when the finger is slow, quick when it flicks.
+    const dx = e.clientX - tp.lastX;
+    const dy = e.clientY - tp.lastY;
+    const dt = Math.max(1, now - tp.lastT);
+    const speed = Math.hypot(dx, dy) / dt; // px per ms
+    const gain = TRACKPAD_GAIN * (1 + Math.min(TRACKPAD_ACCEL_MAX, speed * TRACKPAD_ACCEL));
+    tp.lastX = e.clientX;
+    tp.lastY = e.clientY;
+    tp.lastT = now;
+    moveCursorBy(dx * gain, dy * gain);
+  }
+
+  function tpUp(e, cancelled = false) {
+    touches.delete(e.pointerId);
+    if (!tp || touches.size > 0) return;
+    clearTimeout(tp.longTimer);
+    const now = performance.now();
+    if (tp.dragging) {
+      sendCursor();
+      send(Input.UP, { button: 0 });
+      cursorEl.classList.remove('down');
+    } else if (!cancelled && !tp.multi && !tp.moved && now - tp.startT < TAP_MAX_MS) {
+      tpClick(0);
+      lastTap = { t: now, x: e.clientX, y: e.clientY };
+    } else if (!cancelled && tp.multi && !tp.two?.mode && now - tp.startT < TAP_MAX_MS * 1.5) {
+      tpClick(2); // two-finger tap
+    }
+    if (tp.two?.mode === 'zoom' && zoom.s < 1.05) resetZoom();
+    tp = undefined;
+  }
+
+  function setTrackpad(on) {
+    trackpad = on;
+    tp = undefined;
+    touches.clear();
+    cursorEl.classList.toggle('hidden', !on);
+    if (on) {
+      placeCursor();
+      drawCursor();
+    }
   }
 
   // ---- Keyboard ----
@@ -460,6 +672,13 @@ export function attachInput({
   });
 
   return {
+    setTrackpad,
+    /** The displays changed size or layout: keep the trackpad cursor on a picture. */
+    refreshCursor() {
+      if (!trackpad) return;
+      placeCursor();
+      drawCursor();
+    },
     setPointerLocked(on) {
       locked = on;
     },
@@ -471,6 +690,10 @@ export function attachInput({
     setVideoSize(stream, width, height) {
       videoSizes[stream] = { width, height };
       rects.clear();
+      if (trackpad) {
+        placeCursor();
+        drawCursor();
+      }
     },
     observeCanvas(canvas) {
       resize.observe(canvas);

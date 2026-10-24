@@ -12,7 +12,7 @@ export function createChat({ onSend, toast }) {
   button.setAttribute('aria-expanded', 'false');
   button.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.6A8 8 0 1 1 21 12z"/></svg><span class="dot hidden"></span>';
   // With drawing and recording: things for everyone connected.
-  document.getElementById('tb-together').prepend(button);
+  document.querySelector('#tb-together .tb-items').prepend(button);
 
   const panel = document.createElement('div');
   panel.id = 'chat-panel';
