@@ -18,6 +18,7 @@ Features:
 - **120 fps and wide colour.** A viewer on a fast screen (120 Hz and up) gets up to 120 frames a second from a Mac whose display refreshes that fast; a wide-colour (Display P3) Mac display arrives in P3 instead of being clipped to sRGB.
 - **Works in the browser.** Open a URL on the iPad; there's no app to install. Add it to the Home Screen for a true fullscreen app.
 - **Full control.** Mouse, trackpad, keyboard, and touch (tap to click, drag, long-press to right-click, two-finger scroll), plus an on-screen keyboard button.
+- **Trackpad mode on phones.** The screen works like a laptop trackpad: drag to move the pointer, tap to click, two-finger tap to right-click; zoomed in, the view follows the pointer. The toolbar folds into menus on small screens.
 - **Unlocks a locked Mac.** Type the password at the lock screen from the remote device.
 - **Apple Pencil.** Pressure and tilt reach the Mac as tablet input, so drawing apps (Photoshop, Affinity, Krita) respond as they do to a drawing tablet.
 - **Multiple displays.** Show one display, switch between them, or show all of them side by side in their macOS arrangement.
