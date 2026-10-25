@@ -124,4 +124,7 @@ it('hiding the toolbar keeps the keyboard up, and the zoom pill clears the toolb
   const pill = await page.locator('#zoom-pill').boundingBox();
   const bar = await page.locator('#toolbar').boundingBox();
   expect(pill.x + pill.width <= bar.x || pill.y >= bar.y + bar.height).toBe(true);
+  // With the toolbar hidden, the pill moves up into its place.
+  await page.locator('#btn-hide-toolbar').click();
+  await expect.poll(async () => (await page.locator('#zoom-pill').boundingBox()).y).toBeLessThan(pill.y - 30);
 });

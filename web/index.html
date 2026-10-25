@@ -247,7 +247,9 @@
     #zoom-pill button:hover { background: var(--surface-active); }
     /* Phones: the toolbar fills the top, so the pill sits just below it. */
     @media (max-width: 640px), (max-height: 500px) and (hover: none) {
-      #zoom-pill { top: calc(var(--top) + 54px); }
+      #zoom-pill { top: calc(var(--top) + 54px); transition: top 420ms var(--ease-out); }
+      /* With the toolbar hidden, up into its place. */
+      body:has(#toolbar.tucked) #zoom-pill { top: var(--top); }
     }
 
     #toasts {
