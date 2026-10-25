@@ -1442,11 +1442,20 @@ document.addEventListener('visibilitychange', () => {
     reloadIfUpdated('visible');
     return;
   }
+  // Floating in picture in picture: still on screen, so keep the video going.
+  if (floating()) return;
   const pause = () => worker.postMessage({ type: 'visible', visible: false });
   // Synchronously on mobile: the page may be frozen before a timer could run.
   if (mobile) pause();
   else pauseTimer = setTimeout(pause, PAUSE_HIDDEN_AFTER_MS);
 });
+function floating() {
+  return Boolean(document.pictureInPictureElement || window.documentPictureInPicture?.window);
+}
+// Back from picture in picture with the page still hidden: pause now.
+document.addEventListener('leavepictureinpicture', () => {
+  if (document.visibilityState === 'hidden') worker.postMessage({ type: 'visible', visible: false });
+}, true);
 addEventListener('online', () => worker.postMessage({ type: 'wake' }));
 // Leaving (a reload included): end the session now. Safari can keep a dead page's
 // connection open otherwise, and the host would list this device twice.

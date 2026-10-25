@@ -71,6 +71,33 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
   let pipVideo; // a <video> of the stream, for browsers with only video PiP
   const pipSupported = () => 'documentPictureInPicture' in window || document.pictureInPictureEnabled;
 
+  // A canvas floats as a <video> of its live picture. Safari starts picture in picture only
+  // within the tap and only once the video has a frame, so it's readied when the menu opens.
+  let pipIdle;
+  function preparePip() {
+    const el = streams()[0];
+    if ('documentPictureInPicture' in window || !document.pictureInPictureEnabled || !(el instanceof HTMLCanvasElement)) return;
+    clearTimeout(pipIdle);
+    if (!pipVideo) {
+      pipVideo = Object.assign(document.createElement('video'), { muted: true, playsInline: true, autoplay: true });
+      pipVideo.setAttribute('playsinline', '');
+      // In the page (iOS floats only attached videos) but out of sight.
+      pipVideo.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none';
+      document.body.append(pipVideo);
+      pipVideo.addEventListener('leavepictureinpicture', releasePip);
+    }
+    if (!pipVideo.srcObject) {
+      pipVideo.srcObject = el.captureStream(30);
+      pipVideo.play().catch(() => {});
+    }
+    // Opened the menu but didn't float it: stop copying frames.
+    pipIdle = setTimeout(() => { if (document.pictureInPictureElement !== pipVideo) releasePip(); }, 20_000);
+  }
+  function releasePip() {
+    pipVideo?.srcObject?.getTracks().forEach((t) => t.stop());
+    if (pipVideo) pipVideo.srcObject = null;
+  }
+
   async function pictureInPicture() {
     if (pipWindow) return pipWindow.close();
     if (document.pictureInPictureElement) return document.exitPictureInPicture();
@@ -96,18 +123,18 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
         el.disablePictureInPicture = false;
         await el.requestPictureInPicture();
       } else {
-        // A canvas: show its live picture in a video, which the browser can float.
-        pipVideo ??= Object.assign(document.createElement('video'), { muted: true, playsInline: true, autoplay: true });
-        pipVideo.srcObject = el.captureStream(30);
-        await pipVideo.play();
-        await pipVideo.requestPictureInPicture();
-        pipVideo.addEventListener('leavepictureinpicture', () => {
-          pipVideo.srcObject?.getTracks().forEach((t) => t.stop());
-          pipVideo.srcObject = null;
-        }, { once: true });
+        preparePip();
+        // No await before this: it must run inside the tap.
+        const started = pipVideo.readyState >= 1
+          ? pipVideo.requestPictureInPicture()
+          : pipVideo.play().then(() => pipVideo.requestPictureInPicture());
+        clearTimeout(pipIdle);
+        await started;
       }
       log('info', 'picture in picture on');
     } catch (e) {
+      log('warn', `picture in picture: ${e.name}: ${e.message ?? e}`);
+      if (el instanceof HTMLCanvasElement && document.pictureInPictureElement !== pipVideo) releasePip();
       ui.toast({ text: `Picture in picture didn't start: ${e.message ?? e}`, kind: 'error' });
     }
     render();
@@ -382,6 +409,10 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
     ui.setDeviceItems(items);
   }
   push.onChange(render);
+  // Opening the menu readies picture in picture, so the tap on it can start it at once.
+  for (const id of ['btn-device', 'tb-view']) {
+    document.getElementById(id)?.addEventListener('pointerdown', () => pipSupported() && preparePip(), true);
+  }
   document.addEventListener('enterpictureinpicture', render, true);
   document.addEventListener('leavepictureinpicture', render, true);
 

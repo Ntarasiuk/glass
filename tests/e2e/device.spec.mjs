@@ -1,7 +1,7 @@
 // "This device": notifications (Web Push, with a stand-in push service), one viewer tab per
 // browser, and capturing the mouse, against real `glass --test` hosts.
 
-import { Host, expectVideo, test, expect, toolbarClick } from './harness.mjs';
+import { Host, expectVideo, stats, test, expect, toolbarClick } from './harness.mjs';
 
 const it = test.extend({
   host: async ({}, use) => {
@@ -179,5 +179,42 @@ test.describe('installed app', () => {
       await host.stop();
       await other.stop();
     }
+  });
+});
+
+test.describe('picture in picture', () => {
+  it('floats the canvas within the tap, as Safari needs, and keeps it live while hidden', async ({ browser, host }) => {
+    // An iPhone, where a hidden page pauses at once.
+    const userAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1';
+    const page = await (await browser.newContext({ userAgent })).newPage();
+    // Safari: video picture in picture only (no Document Picture-in-Picture).
+    await page.addInitScript(() => {
+      delete window.documentPictureInPicture;
+      window.pip = [];
+      let el = null;
+      Object.defineProperty(Document.prototype, 'pictureInPictureElement', { get: () => el, configurable: true });
+      HTMLVideoElement.prototype.requestPictureInPicture = function () {
+        window.pip.push({ inTap: navigator.userActivation.isActive, ready: this.readyState, attached: this.isConnected });
+        el = this;
+        this.dispatchEvent(new Event('enterpictureinpicture', { bubbles: true }));
+        return Promise.resolve({});
+      };
+    });
+    await page.goto(host.url());
+    await expectVideo(page);
+    await toolbarClick(page, 'btn-device');
+    const item = page.locator('#device-panel button', { hasText: 'Picture in picture' });
+    await page.waitForFunction(() => document.querySelector('body > video')?.readyState >= 1);
+    await item.click();
+    await expect.poll(() => page.evaluate(() => window.pip)).toEqual([{ inTap: true, ready: expect.any(Number), attached: true }]);
+    expect((await page.evaluate(() => window.pip))[0].ready).toBeGreaterThanOrEqual(1);
+
+    // The page goes to the background (the float stays): the picture keeps coming.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { get: () => 'hidden', configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await page.waitForTimeout(3000);
+    expect((await stats(page)).fps).toBeGreaterThan(0);
   });
 });
