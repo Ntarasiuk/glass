@@ -190,6 +190,7 @@ pub(crate) fn tools() -> Value {
     let display = json!({ "type": "integer", "description": "Display id (from list_displays); the main display if left out." });
     let x = json!({ "type": "number", "description": "In pixels of the latest screenshot of this display." });
     let after = json!({ "type": "boolean", "description": "Take a screenshot once the screen settles, and return it." });
+    let wait = json!({ "type": "integer", "minimum": 0, "description": "How long to wait for the answer before returning (it stays pending after)." });
     let mut list = json!([
         { "name": "list_machines", "description": "The computers on the user's tailnet: which run Glass and are online. Use their name as `machine` in the other tools to work on them.",
           "inputSchema": schema(json!({}), &[]) },
@@ -214,10 +215,12 @@ pub(crate) fn tools() -> Value {
           "inputSchema": schema(json!({ "keys": { "type": "string" }, "screenshot_after": after }), &["keys"]) },
         { "name": "wait_for_change", "description": "Waits until the display changes and settles (a page loads, a dialog opens), or the timeout passes.",
           "inputSchema": schema(json!({ "display": display, "timeout_ms": { "type": "integer", "description": "Default 10000, at most 60000." } }), &[]) },
-        { "name": "request_help", "description": "Asks the person to do something you can't (sign in, a 2FA code, a CAPTCHA, a decision) and waits until they say it's done. Their note comes back.",
-          "inputSchema": schema(json!({ "message": { "type": "string", "description": "What you need them to do, in one or two sentences." } }), &["message"]) },
-        { "name": "confirm", "description": "Asks the person to approve an action before you take it (sending, buying, deleting, posting…). Waits for yes or no.",
-          "inputSchema": schema(json!({ "action": { "type": "string", "description": "Exactly what you're about to do." } }), &["action"]) },
+        { "name": "request_help", "description": "Asks the person to do something you can't (sign in, a 2FA code, a CAPTCHA, a decision) and waits until they say it's done. Their note comes back. If they haven't answered within wait_seconds, it says the question is pending: collect the answer later with check_answer.",
+          "inputSchema": schema(json!({ "message": { "type": "string", "description": "What you need them to do, in one or two sentences." }, "wait_seconds": wait }), &["message"]) },
+        { "name": "confirm", "description": "Asks the person to approve an action before you take it (sending, buying, deleting, posting…). Waits for yes or no. If they haven't answered within wait_seconds, it says the question is pending: don't take the action; collect the answer later with check_answer.",
+          "inputSchema": schema(json!({ "action": { "type": "string", "description": "Exactly what you're about to do." }, "wait_seconds": wait }), &["action"]) },
+        { "name": "check_answer", "description": "The person's answer to a question confirm or request_help left pending, waiting up to wait_seconds for it.",
+          "inputSchema": schema(json!({ "id": { "type": "integer", "description": "The question's id, from the pending reply." }, "wait_seconds": wait }), &["id"]) },
     ]);
     // Every tool but list_machines can work on another computer.
     for tool in list.as_array_mut().unwrap().iter_mut().skip(1) {
@@ -255,6 +258,12 @@ pub(crate) enum Show {
     Wait,
     Help,
     Confirm,
+    /// A pending question's answer: help or confirm, as it was asked.
+    Answer,
+}
+
+fn wait_ms(args: &Value) -> Value {
+    args["wait_seconds"].as_u64().map_or(Value::Null, |s| json!(s.saturating_mul(1000)))
 }
 
 /// A tool call as a step; `list_machines` is the stdio server's own.
@@ -275,8 +284,9 @@ pub(crate) fn plan(name: &str, args: &Value) -> Result<Step, String> {
         "type_text" => (json!({ "action": "type", "text": args["text"] }), Show::Done),
         "press_keys" => (json!({ "action": "key", "keys": args["keys"] }), Show::Done),
         "wait_for_change" => (json!({ "action": "wait_for_change", "display": display, "timeout_ms": args.get("timeout_ms") }), Show::Wait),
-        "request_help" => (json!({ "action": "request_help", "text": args["message"] }), Show::Help),
-        "confirm" => (json!({ "action": "confirm", "text": args["action"] }), Show::Confirm),
+        "request_help" => (json!({ "action": "request_help", "text": args["message"], "wait_ms": wait_ms(args) }), Show::Help),
+        "confirm" => (json!({ "action": "confirm", "text": args["action"], "wait_ms": wait_ms(args) }), Show::Confirm),
+        "check_answer" => (json!({ "action": "check_answer", "id": args["id"], "wait_ms": wait_ms(args) }), Show::Answer),
         other => return Err(format!("unknown tool {other}")),
     };
     let after = after && matches!(show, Show::Done);
@@ -290,6 +300,19 @@ pub(crate) fn looks_only(name: &str) -> bool {
 
 /// An action's result as MCP content.
 pub(crate) fn show(how: Show, v: &Value) -> Vec<Value> {
+    if v["pending"] == true {
+        let id = &v["id"];
+        return vec![text(if v["kind"] == "confirm" {
+            format!("The person hasn't answered yet (question {id}). Don't take the action. Work on something that doesn't depend on it, or call check_answer with id {id} in a while.")
+        } else {
+            format!("The person hasn't done it yet (question {id}). Call check_answer with id {id} in a while; carry on with anything that doesn't need it.")
+        })];
+    }
+    let how = match how {
+        Show::Answer if v["kind"] == "confirm" => Show::Confirm,
+        Show::Answer => Show::Help,
+        other => other,
+    };
     match how {
         Show::Done => vec![text("Done.")],
         Show::Shot => image_content(v),
@@ -315,6 +338,7 @@ pub(crate) fn show(how: Show, v: &Value) -> Vec<Value> {
                 format!("Not approved: don't do it.{note}")
             })]
         }
+        Show::Answer => unreachable!(),
     }
 }
 

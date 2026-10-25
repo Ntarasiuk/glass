@@ -4,6 +4,7 @@ Status: phases 1–3 built (2026-10-25). Differences from the draft below:
 
 - Access tokens are opaque (`gla_…`), not JWTs: the host is both the authorization server and the resource server, so it looks them up directly, and revoking takes effect at once.
 - Public reach is Tailscale Funnel on port 8443 (`glass agents public on`). It points at a separate listener on `127.0.0.1:18443` that serves only the OAuth and MCP routes, so the viewer, console and files are never published. The relay route isn't built.
+- Questions to the person don't hold a cloud agent's request open: `confirm` and `request_help` wait 20 s by default (50 s at most over HTTP), then return "pending", and `check_answer` collects the answer later (kept for an hour).
 - Not yet built:
   - the agent's own virtual display (`display: "own"`); agents use your screen, with the banner
   - "always allow this for this agent in this app"

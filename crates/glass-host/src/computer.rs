@@ -435,22 +435,112 @@ pub async fn wait_for_change(id: Option<u32>, timeout: Duration) -> Result<Value
 
 /// Asks the person something and waits for their answer: `help` (they do something, then
 /// say done) or `confirm` (yes or no).
-pub async fn ask(kind: &'static str, text: &str) -> Result<Value, Refused> {
+/// A question an agent asked, until the agent has its answer: who asked (only they may
+/// collect it), and the answer once there is one (`None` inside: nobody answered in time).
+struct Waiting {
+    kind: &'static str,
+    asker: String,
+    answer: Option<Option<Answer>>,
+    /// Kept this long after the answer comes, for the agent to collect.
+    until: Instant,
+}
+
+static WAITING: Mutex<Option<HashMap<u64, Waiting>>> = Mutex::new(None);
+
+fn waiting<R>(f: impl FnOnce(&mut HashMap<u64, Waiting>) -> R) -> R {
+    let mut w = WAITING.lock().unwrap();
+    let map = w.get_or_insert_with(HashMap::new);
+    map.retain(|_, x| x.until > Instant::now());
+    f(map)
+}
+
+/// Who's asking: an agent's grant, or the owner's own tools.
+fn asker() -> String {
+    match crate::grants::current() {
+        crate::grants::Actor::Agent(g) => g.id,
+        crate::grants::Actor::Owner => "owner".into(),
+    }
+}
+
+/// Asks the person and waits for their answer: `help` (they do something, then say done)
+/// or `confirm` (yes or no). With `wait` (agents in the cloud, whose requests can't stay
+/// open for long), gives up waiting after it and says the question is pending; the
+/// question stays up, and `check_answer` collects the answer later.
+pub async fn ask(kind: &'static str, text: &str, wait: Option<Duration>) -> Result<Value, Refused> {
     may_act().await?;
     let mut text: String = text.chars().take(500).collect();
     if let crate::grants::Actor::Agent(g) = crate::grants::current() {
         text = format!("{} ({}): {text}", g.client_name, g.domain);
     }
-    let answer = ask_owner(kind, &text, None, ASK_WAIT).await.ok_or_else(|| Refused("Nobody answered.".into()))?;
-    Ok(match kind {
-        "confirm" => json!({ "approved": answer.ok, "note": answer.note }),
-        _ => json!({ "done": answer.ok, "note": answer.note }),
-    })
+    let (id, rx) = post_ask(kind, &text, None);
+    waiting(|w| w.insert(id, Waiting { kind, asker: asker(), answer: None, until: Instant::now() + ASK_WAIT + KEEP_ANSWER }));
+    tokio::spawn(async move {
+        let answer = collect(id, rx, ASK_WAIT).await;
+        waiting(|w| {
+            if let Some(x) = w.get_mut(&id) {
+                x.answer = Some(answer);
+                x.until = Instant::now() + KEEP_ANSWER;
+            }
+        });
+    });
+    wait_answer(id, wait.unwrap_or(ASK_WAIT + Duration::from_secs(1))).await
+}
+
+/// How long an answer waits for the agent to collect it.
+const KEEP_ANSWER: Duration = Duration::from_secs(3600);
+
+/// The answer to an earlier question (`check_answer`), waiting up to `wait` for it.
+pub async fn check_answer(id: u64, wait: Duration) -> Result<Value, Refused> {
+    let mine = waiting(|w| w.get(&id).map(|x| x.asker == asker()));
+    match mine {
+        Some(true) => wait_answer(id, wait).await,
+        _ => Err(Refused(format!("No question {id} of yours is waiting; ask again if you still need to."))),
+    }
+}
+
+async fn wait_answer(id: u64, wait: Duration) -> Result<Value, Refused> {
+    let start = Instant::now();
+    loop {
+        let state = waiting(|w| w.get(&id).map(|x| (x.kind, x.answer.clone())));
+        match state {
+            Some((kind, Some(answer))) => {
+                waiting(|w| w.remove(&id));
+                let answer = answer.ok_or_else(|| Refused("Nobody answered.".into()))?;
+                return Ok(match kind {
+                    "confirm" => json!({ "kind": kind, "approved": answer.ok, "note": answer.note }),
+                    _ => json!({ "kind": kind, "done": answer.ok, "note": answer.note }),
+                });
+            }
+            Some((kind, None)) if start.elapsed() >= wait => {
+                return Ok(json!({ "kind": kind, "pending": true, "id": id }));
+            }
+            Some(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            None => return Err(Refused(format!("No question {id} is waiting."))),
+        }
+    }
 }
 
 /// Asks the owner (in viewers, the Glass app and a notification) and waits for the answer;
 /// `None` if nobody answers in time. `consent` asks show `choices` to pick from.
 pub async fn ask_owner(kind: &'static str, text: &str, choices: Option<Vec<String>>, wait: Duration) -> Option<Answer> {
+    let (id, rx) = post_ask(kind, text, choices);
+    collect(id, rx, wait).await
+}
+
+/// The answer, or `None` (and the question taken down) after `wait`.
+async fn collect(id: u64, rx: oneshot::Receiver<Answer>, wait: Duration) -> Option<Answer> {
+    match tokio::time::timeout(wait, rx).await {
+        Ok(Ok(a)) => Some(a),
+        _ => {
+            with(|s| s.asks.remove(&id));
+            broadcast(ServerMsg::AgentAnswered { id });
+            None
+        }
+    }
+}
+
+/// Puts a question up for the owner: viewers, the Glass app, a notification.
+fn post_ask(kind: &'static str, text: &str, choices: Option<Vec<String>>) -> (u64, oneshot::Receiver<Answer>) {
     let (tx, rx) = oneshot::channel();
     let id = with(|s| {
         s.next_ask += 1;
@@ -468,14 +558,7 @@ pub async fn ask_owner(kind: &'static str, text: &str, choices: Option<Vec<Strin
     };
     crate::notify::notify(title, text);
     crate::push::agent_ask(id, kind, text);
-    match tokio::time::timeout(wait, rx).await {
-        Ok(Ok(a)) => Some(a),
-        _ => {
-            with(|s| s.asks.remove(&id));
-            broadcast(ServerMsg::AgentAnswered { id });
-            None
-        }
-    }
+    (id, rx)
 }
 
 /// Withdraws a question nobody needs answered any more.
@@ -569,8 +652,9 @@ pub enum Action {
     Type { text: String },
     Key { keys: String },
     WaitForChange { display: Option<u32>, timeout_ms: Option<u64> },
-    RequestHelp { text: String },
-    Confirm { text: String },
+    RequestHelp { text: String, wait_ms: Option<u64> },
+    Confirm { text: String, wait_ms: Option<u64> },
+    CheckAnswer { id: u64, wait_ms: Option<u64> },
 }
 
 impl Action {
@@ -587,6 +671,7 @@ impl Action {
             Action::Key { .. } => ("key", false),
             Action::RequestHelp { .. } => ("request_help", false),
             Action::Confirm { .. } => ("confirm", false),
+            Action::CheckAnswer { .. } => ("check_answer", false),
         }
     }
 
@@ -603,7 +688,8 @@ impl Action {
             Action::Drag { from_x, from_y, to_x, to_y, .. } => format!("{from_x:.0}, {from_y:.0} → {to_x:.0}, {to_y:.0}"),
             Action::Type { text } => format!("{} characters", text.chars().count()),
             Action::Key { keys } => keys.clone(),
-            Action::RequestHelp { text } | Action::Confirm { text } => text.chars().take(200).collect(),
+            Action::RequestHelp { text, .. } | Action::Confirm { text, .. } => text.chars().take(200).collect(),
+            Action::CheckAnswer { id, .. } => format!("question {id}"),
         }
     }
 }
@@ -626,8 +712,11 @@ pub async fn act(action: Action) -> Result<Value, Refused> {
         Action::WaitForChange { display, timeout_ms } => {
             wait_for_change(display, Duration::from_millis(timeout_ms.unwrap_or(10_000).min(60_000))).await
         }
-        Action::RequestHelp { text } => ask("help", &text).await,
-        Action::Confirm { text } => ask("confirm", &text).await,
+        Action::RequestHelp { text, wait_ms } => ask("help", &text, wait_ms.map(Duration::from_millis)).await,
+        Action::Confirm { text, wait_ms } => ask("confirm", &text, wait_ms.map(Duration::from_millis)).await,
+        Action::CheckAnswer { id, wait_ms } => {
+            check_answer(id, Duration::from_millis(wait_ms.unwrap_or(0).min(ASK_WAIT.as_millis() as u64))).await
+        }
     }
 }
 

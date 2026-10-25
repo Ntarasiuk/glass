@@ -110,7 +110,7 @@ To make another computer the default instead of this one: `glass mcp --machine m
 
 Then ask, for example: "on my Mac, export the frames from the open Figma file to the Desktop". Any MCP client works the same way (command `glass`, argument `mcp`).
 
-Tools: `list_machines`, `screenshot`, `list_displays`, `click` (left, right, middle; double and triple), `move_pointer`, `drag`, `scroll`, `type_text` (any text), `press_keys` (`cmd+s`, `return`, `ctrl+c`…), `wait_for_change`, `request_help` and `confirm`. Coordinates are in the pixels of the latest screenshot (1280×800 at most unless the agent asks for more), so they work with computer-use models as is.
+Tools: `list_machines`, `screenshot`, `list_displays`, `click` (left, right, middle; double and triple), `move_pointer`, `drag`, `scroll`, `type_text` (any text), `press_keys` (`cmd+s`, `return`, `ctrl+c`…), `wait_for_change`, `request_help`, `confirm` and `check_answer`. `confirm` and `request_help` take an optional `wait_seconds`: when you haven't answered by then, they say the question is pending (it stays up for you), and `check_answer` collects your answer later. Coordinates are in the pixels of the latest screenshot (1280×800 at most unless the agent asks for more), so they work with computer-use models as is.
 
 Only the computer's owner can drive it: your own tailnet devices, or this computer's token (which `glass mcp` reads by itself on this computer). Guests and links can't. Under the hood it's an HTTP API at `https://<computer>/agent/v1/` (`POST /agent/v1/act` with `{"action": "click", "x": 640, "y": 400}` and so on), if you'd rather call it directly.
 
@@ -139,6 +139,8 @@ On your tailnet no publishing is needed: use `https://<computer>/mcp`.
 **Revoking is immediate**: in the Mac app (AI agents › Agents from other devices), with `glass agents revoke <id>` (or `all`), or from the agent's platform (Vercel's revoke calls Glass's). A refresh token used twice (a stolen copy) revokes its grant on the spot. `glass agents off` refuses every agent until `glass agents on`.
 
 **Every action is logged** to `agent-audit.jsonl`, each line chained to the one before by its hash: `glass agents log` shows the latest, `glass agents verify` checks nothing was changed.
+
+**Cloud agents never hang on you.** A question (`confirm`, `request_help`) holds the agent's request 20 seconds at most (it can ask for up to 50), then tells it the question is pending, so serverless functions don't time out. The question stays up in Glass and on your phone for 30 minutes; the agent does other work and collects your answer with `check_answer`. It's told not to take the action until it's approved.
 
 **Unattended agents** (Vercel Connect's `app` subject, OAuth client credentials) need installing once on the computer: when one asks, `glass agents` shows `glass agents install <client>`.
 

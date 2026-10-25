@@ -252,3 +252,42 @@ it('an app (client credentials, signed assertions) works only once the owner ins
   host.cli('agents', 'revoke', 'all');
   expect((await mcp(host, t.body.access_token, 'ping')).status).toBe(401);
 });
+
+it('a cloud agent never waits long for the person: questions go pending, and it collects the answer later', async ({ browser, page }) => {
+  const host = await new Host({ env: { GLASS_TEST_TRUST_LOOPBACK: '1' } }).start();
+  try {
+    const client = await register(host, { client_name: 'Cloud agent', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+    const { verifier, challenge } = pkce();
+    const signIn = await signInPage(browser, authorizeUrl(host, client.client_id, challenge));
+    await signIn.getByRole('button', { name: 'Approve' }).click();
+    await signIn.waitForURL(/127\.0\.0\.1:8765\/cb/);
+    const t = await token(host, { grant_type: 'authorization_code', code: new URL(signIn.url()).searchParams.get('code'), redirect_uri: REDIRECT, client_id: client.client_id, code_verifier: verifier });
+    const call = (name, args) => mcp(host, t.body.access_token, 'tools/call', { name, arguments: args });
+
+    await page.goto(host.url());
+    await expectVideo(page);
+
+    // Nobody answers within a second: pending, with the question's id.
+    const started = Date.now();
+    const asked = await call('confirm', { action: 'Send the invoice to Acme', wait_seconds: 1 });
+    expect(Date.now() - started).toBeLessThan(5000);
+    const text = asked.body.result.content[0].text;
+    expect(text).toMatch(/hasn't answered yet \(question \d+\)/);
+    const id = Number(text.match(/question (\d+)/)[1]);
+    expect((await call('check_answer', { id, wait_seconds: 0 })).body.result.content[0].text).toContain("hasn't answered yet");
+
+    // The question is still up; the person answers whenever.
+    const card = page.locator('.agent-ask', { hasText: 'Send the invoice to Acme' });
+    await expect(card).toContainText('Cloud agent');
+    await card.getByRole('button', { name: 'Allow' }).click();
+    expect((await call('check_answer', { id, wait_seconds: 5 })).body.result.content[0].text).toBe('Approved.');
+    // Collected once.
+    expect((await call('check_answer', { id })).body.result.isError).toBe(true);
+
+    // The tool is listed for cloud agents.
+    const tools = (await mcp(host, t.body.access_token, 'tools/list')).body.result.tools.map((x) => x.name);
+    expect(tools).toContain('check_answer');
+  } finally {
+    await host.stop();
+  }
+});
