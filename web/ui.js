@@ -37,11 +37,22 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   // Hidden only when asked (its last button); a small tab at the top brings it back.
   const TOOLBAR_HIDDEN_KEY = 'glass.toolbarHidden';
   const toolbarShow = $('toolbar-show');
+  // Tapping the toolbar (or its tab) mustn't take focus from the field the on-screen
+  // keyboard types into: iOS would put the keyboard away (hiding the toolbar did).
+  const keys = $('keys');
+  for (const el of [toolbar, $('toolbar-show')]) {
+    el.addEventListener('mousedown', (e) => {
+      if (document.activeElement === keys && !e.target.closest('input, textarea')) e.preventDefault();
+    });
+  }
   function setToolbarHidden(hide) {
+    const typing = document.activeElement === keys;
     toolbar.classList.toggle('tucked', hide);
     toolbar.inert = hide;
     toolbarShow.classList.toggle('hidden', !hide);
     if (hide) for (const name of Object.keys(menus)) setMenuOpen(name, false);
+    // Keep typing: still in the tap, so focusing again keeps the keyboard up.
+    if (typing && document.activeElement !== keys) keys.focus({ preventScroll: true });
     storageSet(TOOLBAR_HIDDEN_KEY, hide ? '1' : '0');
   }
   // In the title bar (an installed desktop app) there's nothing to tuck away.

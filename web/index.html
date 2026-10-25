@@ -245,6 +245,10 @@
       color: var(--text); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
     }
     #zoom-pill button:hover { background: var(--surface-active); }
+    /* Phones: the toolbar fills the top, so the pill sits just below it. */
+    @media (max-width: 640px), (max-height: 500px) and (hover: none) {
+      #zoom-pill { top: calc(var(--top) + 54px); }
+    }
 
     #toasts {
       position: fixed; left: 50%; bottom: max(16px, env(safe-area-inset-bottom)); transform: translateX(-50%);

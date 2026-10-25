@@ -108,3 +108,20 @@ it('trackpad mode moves a cursor, clicks, right-clicks, drags and scrolls', asyn
   await page.locator('#btn-trackpad').click();
   await expect(page.locator('#tp-cursor')).toBeHidden();
 });
+
+it('hiding the toolbar keeps the keyboard up, and the zoom pill clears the toolbar', async ({ browser, host }) => {
+  const page = await (await browser.newContext(phone)).newPage();
+  await page.goto(host.url());
+  await expectVideo(page);
+  await page.locator('#keys').focus();
+  await page.locator('#btn-hide-toolbar').click();
+  await expect(page.locator('#toolbar-show')).toBeVisible();
+  expect(await page.evaluate(() => document.activeElement?.id)).toBe('keys');
+  await page.locator('#toolbar-show').click();
+  expect(await page.evaluate(() => document.activeElement?.id)).toBe('keys');
+
+  await page.evaluate(() => document.getElementById('zoom-pill').classList.remove('hidden'));
+  const pill = await page.locator('#zoom-pill').boundingBox();
+  const bar = await page.locator('#toolbar').boundingBox();
+  expect(pill.x + pill.width <= bar.x || pill.y >= bar.y + bar.height).toBe(true);
+});
