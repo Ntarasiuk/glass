@@ -95,6 +95,11 @@ pub fn snapshot() -> Vec<ServerMsg> {
 }
 
 /// The owner, from a viewer: `pause`, `resume`, `stop` or `allow` (after a stop).
+/// Someone connected through a link (not the owner).
+pub fn guest_connected() -> bool {
+    crate::viewers::subscribe().borrow().iter().any(|v| matches!(v.how, crate::viewers::How::Guest))
+}
+
 pub fn control(op: &str) {
     let status = with(|s| {
         match op {
@@ -103,13 +108,21 @@ pub fn control(op: &str) {
             "stop" => {
                 s.status = Status { paused: false, stopped: true };
                 // Nobody's waiting on answers from an agent that's been stopped.
-                for (id, ask) in s.asks.drain() {
-                    let _ = ask.reply.send(Answer { ok: false, note: Some("stopped by the user".into()) });
-                    broadcast(ServerMsg::AgentAnswered { id });
+                // (Agents asking to be let in are a separate matter: they stay.)
+                let ids: Vec<u64> = s.asks.iter().filter(|(_, a)| a.kind != "consent").map(|(id, _)| *id).collect();
+                for id in ids {
+                    if let Some(ask) = s.asks.remove(&id) {
+                        let _ = ask.reply.send(Answer { ok: false, note: Some("stopped by the user".into()) });
+                        broadcast(ServerMsg::AgentAnswered { id });
+                    }
                 }
             }
             "allow" => s.status = Status::default(),
             _ => {}
+        }
+        if matches!(op, "resume" | "allow") {
+            // Resuming also gives agents over their hourly limit a fresh hour.
+            crate::grants::reset_budgets();
         }
         s.status
     });
@@ -137,6 +150,32 @@ pub fn asks() -> Vec<Value> {
 
 /// The owner answered a question.
 pub fn answer(id: u64, answer: Answer) {
+    answer_from(id, answer, false);
+}
+
+/// When an agent under a grant last acted (ms since the epoch).
+static AGENT_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// An answer, from a viewer on this computer itself (`local`) or elsewhere. Letting an agent
+/// in is refused when the answer could have come from an agent: from this computer's own
+/// screen while an agent is acting or just acted, or while a guest is connected.
+pub fn answer_from(id: u64, mut answer: Answer, local: bool) {
+    let consent = with(|s| s.asks.get(&id).is_some_and(|a| a.kind == "consent"));
+    if consent && answer.ok {
+        let agent_busy = epoch_ms().saturating_sub(AGENT_AT.load(std::sync::atomic::Ordering::Relaxed)) < 10_000;
+        let why = if local && agent_busy {
+            Some("it came from this computer's own screen while an agent was working")
+        } else if guest_connected() {
+            Some("a guest is connected")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            tracing::warn!("agent: consent {id} denied: {why}");
+            crate::push::activity("An agent's request was denied", &format!("Approving it was refused because {why}. Try again."), "agent-consent");
+            answer = Answer { ok: false, note: None };
+        }
+    }
     if let Some(ask) = with(|s| s.asks.remove(&id)) {
         info!("agent: question {id} answered ({})", if answer.ok { "yes/done" } else { "no" });
         let _ = ask.reply.send(answer);
@@ -164,6 +203,7 @@ pub fn human_input() {
 
 fn human_busy() -> bool {
     epoch_ms().saturating_sub(HUMAN_AT.load(std::sync::atomic::Ordering::Relaxed)) < HUMAN_QUIET.as_millis() as u64
+        || crate::grants::local_input_recent()
 }
 
 /// Waits while paused or while a person is using the computer; refuses when stopped.
@@ -238,10 +278,20 @@ fn announce(kind: &str, detail: String, at: Option<(u32, f32, f32)>) {
     });
 }
 
+/// Where the pointer was last put (global points), for checking what a click there reaches.
+static POINTER: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+
 fn inject(events: impl IntoIterator<Item = InputEvent>) -> Result<(), Refused> {
+    use crate::grants::{Target, check_input};
     let events: Vec<InputEvent> = events.into_iter().collect();
-    let typing = events.iter().any(|e| matches!(e, InputEvent::KeyDown { .. }));
-    crate::grants::check_input(typing).map_err(Refused)?;
+    if events.iter().any(|e| matches!(e, InputEvent::KeyDown { .. })) {
+        check_input(Target::Keys).map_err(Refused)?;
+    }
+    if events.iter().any(|e| matches!(e, InputEvent::MouseDown { .. } | InputEvent::Scroll { .. })) {
+        // Checked again at the press: what's under the pointer may have changed.
+        let (x, y) = POINTER.lock().unwrap().unwrap_or((0.0, 0.0));
+        check_input(Target::Point(x, y)).map_err(Refused)?;
+    }
     let shared = shared()?;
     let mut sink = shared.injector.lock().unwrap();
     for ev in events {
@@ -251,7 +301,9 @@ fn inject(events: impl IntoIterator<Item = InputEvent>) -> Result<(), Refused> {
 }
 
 fn move_to(d: &DisplayInfo, x: f32, y: f32) -> Result<(), Refused> {
-    crate::grants::check_input(false).map_err(Refused)?;
+    let at = (d.x + x as f64 * d.points_width, d.y + y as f64 * d.points_height);
+    crate::grants::check_input(crate::grants::Target::Point(at.0, at.1)).map_err(Refused)?;
+    *POINTER.lock().unwrap() = Some(at);
     shared()?.injector.lock().unwrap().move_on_display(d.id, x, y);
     Ok(())
 }
@@ -362,7 +414,7 @@ pub async fn type_text(text: &str) -> Result<Value, Refused> {
     if text.chars().count() > 10_000 {
         return Err(Refused("too much text at once (10,000 characters at most)".into()));
     }
-    crate::grants::check_input(true).map_err(Refused)?;
+    crate::grants::check_input(crate::grants::Target::Keys).map_err(Refused)?;
     let typed = shared()?.injector.lock().unwrap().type_text(text);
     if !typed {
         // Key by key on a US layout.
@@ -395,7 +447,7 @@ pub async fn type_text(text: &str) -> Result<Value, Refused> {
 
 pub async fn key(keys: &str) -> Result<Value, Refused> {
     may_act().await?;
-    crate::grants::check_input(true).map_err(Refused)?;
+    crate::grants::check_input(crate::grants::Target::Keys).map_err(Refused)?;
     let codes = crate::keys::combo(keys).map_err(Refused)?;
     let mut events: Vec<InputEvent> = codes.iter().map(|&keycode| InputEvent::KeyDown { keycode }).collect();
     events.extend(codes.iter().rev().map(|&keycode| InputEvent::KeyUp { keycode }));
@@ -579,14 +631,28 @@ pub async fn act_as(grant: &crate::grants::Grant, action: Action) -> Result<Valu
         crate::grants::audit(grant, name, "refused: not allowed by its grant", None, false);
         return Err(Refused(format!("This agent isn't allowed to {name} (it needs {needed}).")));
     }
-    if !crate::grants::spend(grant) {
-        crate::grants::audit(grant, name, "refused: hourly limit", None, false);
-        control("pause");
-        return Err(Refused("This agent used its hourly limit of actions; the owner has to resume it.".into()));
+    match crate::grants::spend(grant) {
+        crate::grants::Spend::Ok => {}
+        over => {
+            if matches!(over, crate::grants::Spend::JustOver) {
+                crate::grants::audit(grant, name, "refused: hourly limit reached", None, false);
+                crate::push::activity(
+                    &format!("{} reached its hourly limit", grant.client_name),
+                    &format!("It's held until the hour ends. Resume agents in Glass to let it continue now ({} actions an hour).", crate::grants::HOURLY_BUDGET),
+                    "agent-budget",
+                );
+            }
+            return Err(Refused(format!(
+                "This agent used its {} actions for this hour. It can continue next hour, or when the owner resumes agents in Glass.",
+                crate::grants::HOURLY_BUDGET
+            )));
+        }
     }
+    AGENT_AT.store(epoch_ms(), std::sync::atomic::Ordering::Relaxed);
     let detail = action.audit_detail();
     let actor = crate::grants::Actor::Agent(grant.clone());
     let result = crate::grants::ACTOR.scope(actor, act(action)).await;
+    AGENT_AT.store(epoch_ms(), std::sync::atomic::Ordering::Relaxed);
     let app = crate::grants::frontmost_app();
     match &result {
         Ok(_) => crate::grants::audit(grant, name, &detail, app.as_deref(), true),

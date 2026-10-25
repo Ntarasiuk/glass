@@ -29,7 +29,7 @@ const CONSENT_WAIT: Duration = Duration::from_secs(600);
 /// An authorization code is good for this long, once.
 const CODE_SECS: u64 = 60;
 /// Requests waiting for the owner at once (more are refused: nobody gets to flood them).
-const MAX_PENDING: usize = 3;
+const MAX_PENDING: usize = 5;
 /// Registered clients kept.
 const MAX_CLIENTS: usize = 200;
 /// Client metadata documents and key sets are fetched again after this long.
@@ -51,6 +51,8 @@ pub fn routes() -> axum::Router {
         .route("/oauth/token", post(token))
         .route("/oauth/revoke", post(revoke))
         .route("/mcp", post(mcp).get(mcp_get).delete(mcp_get))
+        // Registrations, forms and MCP calls are small: nobody gets to store or parse more.
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .layer(axum::middleware::map_request(fill_host))
 }
 
@@ -95,18 +97,39 @@ pub fn serve_public() {
 }
 
 /// `glass agents public on|off`: publishes the agent routes to the internet with Tailscale
-/// Funnel (or stops). Returns the URL agents use.
+/// Funnel (or stops). Returns the URL agents use. Tailscale may first need Funnel allowed
+/// for this machine: its link is passed on, and the result is checked, not assumed.
 pub fn publish(on: bool) -> anyhow::Result<Option<String>> {
     let cli = crate::tailscale::cli();
-    let out = if on {
-        std::process::Command::new(cli)
-            .args(["funnel", "--bg", &format!("--https={FUNNEL_PORT}"), &format!("http://127.0.0.1:{PUBLIC_PORT}")])
-            .output()?
+    let args: Vec<String> = if on {
+        vec!["funnel".into(), "--bg".into(), format!("--https={FUNNEL_PORT}"), format!("http://127.0.0.1:{PUBLIC_PORT}")]
     } else {
-        std::process::Command::new(cli).args(["funnel", &format!("--https={FUNNEL_PORT}"), "off"]).output()?
+        vec!["funnel".into(), format!("--https={FUNNEL_PORT}"), "off".into()]
     };
+    let mut child = std::process::Command::new(cli)
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    // It can wait for an admin to allow Funnel: give it a while, then stop waiting.
+    let start = Instant::now();
+    while child.try_wait()?.is_none() && start.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = child.kill();
+    let out = child.wait_with_output()?;
     let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    anyhow::ensure!(out.status.success(), "tailscale funnel: {}", said.trim());
+    let enable_link = said.split_whitespace().find(|w| w.starts_with("https://login.tailscale.com/")).map(String::from);
+    let funneled = funnel_on();
+    if on != funneled {
+        grants::update(|s| s.public = funneled)?;
+        match (on, enable_link) {
+            (true, Some(link)) => anyhow::bail!("Funnel isn't allowed for this machine yet. Allow it here, then run this again:\n  {link}"),
+            (true, None) => anyhow::bail!("Tailscale didn't publish it:\n{}", said.trim()),
+            (false, _) => anyhow::bail!("Tailscale still publishes it:\n{}", said.trim()),
+        }
+    }
     grants::update(|s| s.public = on)?;
     if !on {
         return Ok(None);
@@ -116,6 +139,16 @@ pub fn publish(on: bool) -> anyhow::Result<Option<String>> {
         .and_then(|u| split_url(&u).map(|p| p.host))
         .ok_or_else(|| anyhow::anyhow!("Glass isn't running, or has no address yet"))?;
     Ok(Some(format!("https://{host}:{FUNNEL_PORT}/mcp")))
+}
+
+/// Funnel publishes the agents' port, per `tailscale funnel status`.
+fn funnel_on() -> bool {
+    std::process::Command::new(crate::tailscale::cli())
+        .args(["funnel", "status", "--json"])
+        .output()
+        .ok()
+        .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+        .is_some_and(|v| v["AllowFunnel"].as_object().is_some_and(|m| m.iter().any(|(k, on)| k.ends_with(&format!(":{FUNNEL_PORT}")) && on == true)))
 }
 
 // ---- Who we are ----
@@ -132,6 +165,22 @@ fn issuer(headers: &HeaderMap) -> Option<String> {
         .and_then(|s| s.url)
         .and_then(|u| split_url(&u).map(|p| p.host))?;
     (name == ours).then(|| format!("https://{}", host.trim_end_matches(":443")))
+}
+
+/// A request from this computer itself (loopback, one of its own addresses, or anything
+/// arriving through Funnel): never an "owner device", since an agent driving this screen
+/// could be the one asking.
+pub fn is_this_computer(ip: IpAddr) -> bool {
+    if crate::testmode::enabled() && std::env::var_os("GLASS_TEST_REMOTE_OWNER").is_some() {
+        return false;
+    }
+    let ip = ip.to_canonical();
+    ip.is_loopback() || std::net::UdpSocket::bind((ip, 0)).is_ok()
+}
+
+/// One of the owner's other devices: they can approve with one tap.
+async fn owner_device(peer: IpAddr, headers: &HeaderMap) -> bool {
+    !is_this_computer(peer) && crate::forward::is_owner(peer, headers).await
 }
 
 fn machine_name() -> String {
@@ -225,21 +274,37 @@ fn redirect_allowed(u: &str) -> bool {
         && split_url(u).is_some_and(|p| p.scheme == "https" || (p.scheme == "http" && loopback(&p.host)))
 }
 
-/// The redirect URI asked for is one the client registered (exactly; a loopback one may
-/// use any port).
+/// The redirect URI asked for is one the client registered: exactly, or, for a loopback
+/// one, the same but for its port (RFC 8252). Compared by parsed parts, so tricks like
+/// `http://127.0.0.1:1@evil.example/` never pass.
 fn redirect_matches(asked: &str, registered: &[String]) -> bool {
-    registered.iter().any(|r| {
-        r == asked
-            || (split_url(r).is_some_and(|p| p.scheme == "http" && loopback(&p.host))
-                && strip_port(r) == strip_port(asked))
-    })
+    if !redirect_allowed(asked) {
+        return false;
+    }
+    registered.iter().any(|r| r == asked || loopback_key(r).is_some_and(|k| Some(k) == loopback_key(asked)))
 }
 
-fn strip_port(u: &str) -> String {
-    let Some((scheme, rest)) = u.split_once("://") else { return u.to_string() };
-    let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
-    let host = authority.rsplit_once(':').filter(|(h, _)| !h.ends_with(']') || h.starts_with('[')).map_or(authority, |(h, _)| h);
-    format!("{scheme}://{host}{path}")
+/// A loopback http redirect URI without its port: scheme, host, path and query.
+fn loopback_key(u: &str) -> Option<String> {
+    let rest = u.strip_prefix("http://")?;
+    let (authority, tail) = rest.find(['/', '?']).map_or((rest, ""), |i| rest.split_at(i));
+    if authority.contains('@') {
+        return None;
+    }
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        let (h, after) = v6.split_once(']')?;
+        if !(after.is_empty() || (after.starts_with(':') && after[1..].bytes().all(|b| b.is_ascii_digit()))) {
+            return None;
+        }
+        h.to_string()
+    } else {
+        let (h, port) = authority.split_once(':').unwrap_or((authority, ""));
+        if !port.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        h.to_string()
+    };
+    loopback(&host.to_ascii_lowercase()).then(|| format!("http://{host}{tail}"))
 }
 
 /// Fetches a small public JSON document (a client's metadata or keys). Refuses private and
@@ -250,6 +315,9 @@ async fn fetch_json(url: &str) -> Result<Value, String> {
         && at.elapsed() < FETCH_TTL
     {
         return Ok(v.clone());
+    }
+    if !rate_ok("fetch".into(), 30) {
+        return Err("too many lookups right now; try again in a minute".into());
     }
     let parts = split_url(url).ok_or("bad URL")?;
     let test = crate::testmode::enabled();
@@ -275,7 +343,13 @@ async fn fetch_json(url: &str) -> Result<Value, String> {
     })
     .await
     .map_err(|e| e.to_string())??;
-    CACHE.lock().unwrap().get_or_insert_with(HashMap::new).insert(url.to_string(), (Instant::now(), value.clone()));
+    let mut cache = CACHE.lock().unwrap();
+    let cache = cache.get_or_insert_with(HashMap::new);
+    cache.retain(|_, (at, _)| at.elapsed() < FETCH_TTL);
+    if cache.len() >= 64 {
+        cache.clear();
+    }
+    cache.insert(url.to_string(), (Instant::now(), value.clone()));
     Ok(value)
 }
 
@@ -339,15 +413,17 @@ async fn client(id: &str) -> Result<ClientInfo, String> {
             return Err("a metadata-document client authenticates with none or private_key_jwt".into());
         }
         let domain = split_url(id).map(|p| p.host).unwrap_or_default();
+        // Installed for unattended use (client credentials): kept in the store by its URL.
+        let stored = grants::load().clients.into_iter().find(|c| c.id == id);
         return Ok(ClientInfo {
             id: id.to_string(),
-            name: doc["client_name"].as_str().map(|n| n.chars().take(60).collect()).unwrap_or_else(|| domain.clone()),
+            name: doc["client_name"].as_str().map(clean_name).filter(|n| !n.is_empty()).unwrap_or_else(|| domain.clone()),
             domain,
             redirect_uris,
             auth_method,
             jwks_uri: doc["jwks_uri"].as_str().map(String::from),
             jwks: doc.get("jwks").cloned(),
-            stored: None,
+            stored,
         });
     }
     let c = grants::load().clients.into_iter().find(|c| c.id == id).ok_or("unknown client")?;
@@ -361,6 +437,16 @@ async fn client(id: &str) -> Result<ClientInfo, String> {
         jwks: c.jwks.clone(),
         stored: Some(c),
     })
+}
+
+/// A client's name as people see it: one short line of plain text.
+fn clean_name(n: &str) -> String {
+    n.chars()
+        .filter(|c| !c.is_control() && !matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        .take(40)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn domain_of(redirect_uris: &[String]) -> String {
@@ -392,6 +478,12 @@ fn validate_registration(body: &Value) -> Result<(Vec<String>, String, Vec<Strin
     }
     if method == "private_key_jwt" && body["jwks_uri"].as_str().is_none() && body.get("jwks").is_none() {
         return Err(bad("private_key_jwt needs jwks_uri or jwks"));
+    }
+    if body["jwks_uri"].as_str().is_some_and(|u| !u.starts_with("https://") || u.len() > 512) {
+        return Err(bad("jwks_uri must be an https URL"));
+    }
+    if body.get("jwks").is_some_and(|j| j.to_string().len() > 8 * 1024 || !j["keys"].is_array()) {
+        return Err(bad("jwks must be a small key set"));
     }
     let grant_types: Vec<String> = body["grant_types"]
         .as_array()
@@ -443,7 +535,7 @@ async fn register(headers: HeaderMap, body: axum::body::Bytes) -> Response<Body>
     if !grants::load().enabled {
         return oauth_error(StatusCode::FORBIDDEN, "access_denied", "agents are turned off on this computer");
     }
-    if !rate_ok("register", 20) {
+    if !rate_ok("register".into(), 20) {
         return oauth_error(StatusCode::TOO_MANY_REQUESTS, "temporarily_unavailable", "too many registrations; try again in a minute");
     }
     let Ok(body) = serde_json::from_slice::<Value>(&body) else {
@@ -457,7 +549,7 @@ async fn register(headers: HeaderMap, body: axum::body::Bytes) -> Response<Body>
     let registration = grants::random("glreg_");
     let c = grants::Client {
         id: grants::random("glc_")[..24].to_string(),
-        name: body["client_name"].as_str().map(|n| n.chars().take(60).collect()).unwrap_or_else(|| domain_of(&redirect_uris)),
+        name: body["client_name"].as_str().map(clean_name).filter(|n| !n.is_empty()).unwrap_or_else(|| domain_of(&redirect_uris)),
         redirect_uris,
         auth_method: method,
         grant_types,
@@ -474,7 +566,8 @@ async fn register(headers: HeaderMap, body: axum::body::Bytes) -> Response<Body>
         if s.clients.len() >= MAX_CLIENTS {
             // Make room: the oldest client nothing was ever granted to goes.
             let used: Vec<String> = s.grants.iter().map(|g| g.client_id.clone()).collect();
-            if let Some(i) = s.clients.iter().position(|x| !x.installed && !used.contains(&x.id)) {
+            let now = grants::now();
+            if let Some(i) = s.clients.iter().position(|x| !x.installed && !used.contains(&x.id) && now.saturating_sub(x.created) > 3600) {
                 s.clients.remove(i);
             } else {
                 return false;
@@ -527,8 +620,8 @@ async fn client_update(headers: HeaderMap, Path(id): Path<String>, body: axum::b
     }
     c.redirect_uris = redirect_uris;
     c.grant_types = grant_types;
-    if let Some(n) = body["client_name"].as_str() {
-        c.name = n.chars().take(60).collect();
+    if let Some(n) = body["client_name"].as_str().map(clean_name).filter(|n| !n.is_empty()) {
+        c.name = n;
     }
     c.logo_uri = body["logo_uri"].as_str().filter(|l| l.starts_with("https://")).map(String::from);
     if let Some(j) = body["jwks_uri"].as_str() {
@@ -564,11 +657,13 @@ async fn client_delete(headers: HeaderMap, Path(id): Path<String>) -> Response<B
 }
 
 /// At most `per_minute` of `what` a minute, for everyone together.
-fn rate_ok(what: &'static str, per_minute: u32) -> bool {
-    static SEEN: Mutex<Option<HashMap<&'static str, (u64, u32)>>> = Mutex::new(None);
+fn rate_ok(what: String, per_minute: u32) -> bool {
+    static SEEN: Mutex<Option<HashMap<String, (u64, u32)>>> = Mutex::new(None);
     let minute = grants::now() / 60;
     let mut seen = SEEN.lock().unwrap();
-    let e = seen.get_or_insert_with(HashMap::new).entry(what).or_insert((minute, 0));
+    let seen = seen.get_or_insert_with(HashMap::new);
+    seen.retain(|_, (m, _)| *m == minute);
+    let e = seen.entry(what).or_insert((minute, 0));
     if e.0 != minute {
         *e = (minute, 0);
     }
@@ -601,6 +696,8 @@ struct Consent {
     issuer: String,
     /// The text of the question in Glass, to withdraw it.
     ask_text: String,
+    /// The page last asked whether it's decided; a page that's gone stops counting.
+    last_poll: Instant,
 }
 
 #[derive(Clone)]
@@ -616,10 +713,22 @@ struct Code {
 static CONSENTS: Mutex<Option<HashMap<String, Consent>>> = Mutex::new(None);
 static CODES: Mutex<Option<HashMap<String, Code>>> = Mutex::new(None);
 
+/// A sign-in page that stopped asking for this long has been closed: its request goes.
+const ABANDONED: Duration = Duration::from_secs(45);
+
 fn consents<R>(f: impl FnOnce(&mut HashMap<String, Consent>) -> R) -> R {
     let mut c = CONSENTS.lock().unwrap();
     let map = c.get_or_insert_with(HashMap::new);
-    map.retain(|_, x| x.created.elapsed() < CONSENT_WAIT + Duration::from_secs(60));
+    let gone: Vec<String> = map
+        .iter()
+        .filter(|(_, x)| x.created.elapsed() > CONSENT_WAIT + Duration::from_secs(60) || (x.decision == Decision::Waiting && x.last_poll.elapsed() > ABANDONED))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in gone {
+        if let Some(x) = map.remove(&id) {
+            crate::computer::withdraw(&x.ask_text);
+        }
+    }
     f(map)
 }
 
@@ -684,7 +793,15 @@ async fn authorize(peer: Peer, headers: HeaderMap, Query(q): Query<HashMap<Strin
     let Some(client_id) = q.get("client_id") else {
         return page(StatusCode::BAD_REQUEST, "Can't sign in", "<p>The request didn't say which agent it's for.</p>", None);
     };
-    let c = match client(client_id).await {
+    // Cheap checks first: nothing is fetched or shown while agents are off, or for a flood.
+    if !grants::load().enabled {
+        return page(StatusCode::FORBIDDEN, "Agents are turned off", "<p>The owner turned agents off on this computer.</p>", None);
+    }
+    let owner_here = owner_device(peer.0.ip(), &headers).await;
+    if !owner_here && (!rate_ok(format!("authorize:{client_id}"), 3) || !rate_ok("authorize".into(), 20)) {
+        return page(StatusCode::TOO_MANY_REQUESTS, "Try again soon", "<p>Too many sign-in requests right now. Try again in a minute.</p>", None);
+    }
+    let mut c = match client(client_id).await {
         Ok(c) => c,
         Err(e) => return page(StatusCode::BAD_REQUEST, "Can't sign in", &format!("<p>{}</p>", esc(&e)), None),
     };
@@ -694,6 +811,13 @@ async fn authorize(peer: Peer, headers: HeaderMap, Query(q): Query<HashMap<Strin
     };
     if !redirect_matches(&redirect_uri, &c.redirect_uris) {
         return page(StatusCode::BAD_REQUEST, "Can't sign in", "<p>The agent asked to be sent back somewhere it didn't register.</p>", None);
+    }
+    // Who the owner is told it is: where the code will actually go.
+    let back_to = domain_of(std::slice::from_ref(&redirect_uri));
+    if c.stored.is_some() || c.domain.is_empty() {
+        c.domain = back_to;
+    } else if back_to != c.domain && !back_to.starts_with("an app on") {
+        c.domain = format!("{}, returning to {back_to}", c.domain);
     }
     let state = q.get("state").cloned();
     if q.get("response_type").map(String::as_str) != Some("code") {
@@ -708,18 +832,14 @@ async fn authorize(peer: Peer, headers: HeaderMap, Query(q): Query<HashMap<Strin
     {
         return redirect_error(&redirect_uri, "invalid_target", state.as_deref(), &iss);
     }
-    if !grants::load().enabled {
-        return redirect_error(&redirect_uri, "access_denied", state.as_deref(), &iss);
-    }
-    // Each request can notify the owner: a few a minute at most, from anyone together.
-    if !rate_ok("authorize", 6) {
-        return page(StatusCode::TOO_MANY_REQUESTS, "Try again soon", "<p>Too many sign-in requests right now. Try again in a minute.</p>", None);
-    }
     let (scopes, apps) = requested(&q);
+    if apps.is_some() && !grants::app_guard_available() {
+        // Glass can't tell apps apart here, so a limit to some apps couldn't be kept.
+        return redirect_error(&redirect_uri, "invalid_request", state.as_deref(), &iss);
+    }
     let id = grants::random("")[..22].to_string();
     let cookie = grants::random("");
     let number = format!("{:02}", 10 + random_below(90));
-    let owner_here = crate::forward::is_owner(peer.0.ip(), &headers).await;
     let ask_text = format!(
         "{} ({}) wants to {}. Tap {} if its sign-in page shows it.",
         c.name,
@@ -740,9 +860,17 @@ async fn authorize(peer: Peer, headers: HeaderMap, Query(q): Query<HashMap<Strin
         decision: Decision::Waiting,
         issuer: iss.clone(),
         ask_text: format!("{ask_text} [{id}]"),
+        last_poll: Instant::now(),
     };
     let accepted = consents(|m| {
-        if m.values().filter(|x| x.decision == Decision::Waiting).count() >= MAX_PENDING {
+        // One request per agent: a new one (a retry, a reload) replaces the one before.
+        let older: Vec<String> = m.iter().filter(|(_, x)| x.client.id == c.id && x.decision == Decision::Waiting).map(|(k, _)| k.clone()).collect();
+        for k in older {
+            if let Some(x) = m.remove(&k) {
+                crate::computer::withdraw(&x.ask_text);
+            }
+        }
+        if !owner_here && m.values().filter(|x| x.decision == Decision::Waiting).count() >= MAX_PENDING {
             return false;
         }
         m.insert(id.clone(), consent.clone());
@@ -849,6 +977,10 @@ fn finish(id: &str, c: &Consent) -> Option<String> {
     }
 }
 
+fn allow_requested(f: &HashMap<String, String>) -> bool {
+    f.get("allow").map(String::as_str) == Some("yes")
+}
+
 /// The owner, on this page from their own device: Approve or Deny.
 async fn decide(peer: Peer, headers: HeaderMap, axum::Form(f): axum::Form<HashMap<String, String>>) -> Response<Body> {
     let Some(id) = f.get("id") else { return StatusCode::BAD_REQUEST.into_response() };
@@ -860,8 +992,11 @@ async fn decide(peer: Peer, headers: HeaderMap, axum::Form(f): axum::Form<HashMa
     let Some(_) = own_consent(&headers, id) else {
         return page(StatusCode::FORBIDDEN, "Request expired", "<p>Start again from the agent.</p>", None);
     };
-    if !crate::forward::is_owner(peer.0.ip(), &headers).await {
-        return page(StatusCode::FORBIDDEN, "Not your computer", "<p>Only the computer's owner can approve an agent.</p>", None);
+    if !owner_device(peer.0.ip(), &headers).await {
+        return page(StatusCode::FORBIDDEN, "Approve in Glass", "<p>Approve agents from one of your other devices, or tap the number in Glass.</p>", None);
+    }
+    if allow_requested(&f) && crate::computer::guest_connected() {
+        return page(StatusCode::FORBIDDEN, "Not now", "<p>A guest is connected to this computer. Approve the agent once they've left.</p>", None);
     }
     let allow = f.get("allow").map(String::as_str) == Some("yes");
     let who = crate::tailscale::device_name(peer.0.ip()).await.unwrap_or_else(|| "this computer's owner".into());
@@ -884,6 +1019,7 @@ async fn wait(headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> R
     let Some(c) = own_consent(&headers, id) else {
         return Json(json!({ "state": "expired" })).into_response();
     };
+    consents(|m| m.get_mut(id).map(|x| x.last_poll = Instant::now()));
     if c.created.elapsed() > CONSENT_WAIT {
         consents(|m| m.remove(id));
         return Json(json!({ "state": "expired" })).into_response();
@@ -1061,7 +1197,7 @@ async fn token(headers: HeaderMap, axum::Form(f): axum::Form<HashMap<String, Str
                 id: grants::random("grant_")[..20].to_string(),
                 client_id: c.id.clone(),
                 client_name: c.name.clone(),
-                domain: c.domain.clone(),
+                domain: con.client.domain.clone(),
                 subject: "user".into(),
                 scopes: con.scopes.clone(),
                 apps: con.apps.clone(),
@@ -1071,6 +1207,7 @@ async fn token(headers: HeaderMap, axum::Form(f): axum::Form<HashMap<String, Str
                 revoked: false,
                 refresh: None,
                 retired: Vec::new(),
+                rotated: 0,
                 access: Vec::new(),
             });
             match made {
@@ -1107,26 +1244,48 @@ async fn token(headers: HeaderMap, axum::Form(f): axum::Form<HashMap<String, Str
             }
         }
         Some("client_credentials") => {
-            let Some(stored) = c.stored.clone().filter(|s| s.auth_method != "none") else {
-                return oauth_error(StatusCode::BAD_REQUEST, "unauthorized_client", "client credentials need a registered client with a secret or keys");
-            };
-            if !stored.installed {
-                let _ = grants::update(|s| {
-                    if let Some(x) = s.clients.iter_mut().find(|x| x.id == stored.id) {
-                        x.install_requested = true;
+            if c.auth_method == "none" {
+                return oauth_error(StatusCode::BAD_REQUEST, "unauthorized_client", "client credentials need a client that authenticates (a secret or keys)");
+            }
+            let Some(stored) = c.stored.clone().filter(|s| s.installed) else {
+                // Not installed: ask the owner once (a stub keeps a metadata-document client's
+                // place, so `glass agents install <its URL>` works).
+                let stub = grants::Client {
+                    id: c.id.clone(),
+                    name: c.name.clone(),
+                    redirect_uris: c.redirect_uris.clone(),
+                    auth_method: c.auth_method.clone(),
+                    grant_types: vec!["client_credentials".into()],
+                    secret_hash: None,
+                    jwks_uri: c.jwks_uri.clone(),
+                    jwks: c.jwks.clone(),
+                    logo_uri: None,
+                    registration_hash: String::new(),
+                    created: grants::now(),
+                    installed: false,
+                    install_requested: true,
+                };
+                let first = grants::update(|s| match s.clients.iter_mut().find(|x| x.id == c.id) {
+                    Some(x) => !std::mem::replace(&mut x.install_requested, true),
+                    None => {
+                        s.clients.push(stub);
+                        true
                     }
-                });
-                crate::push::activity(
-                    &format!("{} asks for unattended access", c.name),
-                    &format!("To allow it, run on this computer: glass agents install {}", stored.id),
-                    "agent-install",
-                );
+                })
+                .unwrap_or(false);
+                if first && install_push_due() {
+                    crate::push::activity(
+                        &format!("An agent asks for unattended access: {}", c.name),
+                        &format!("From {} (not verified by Glass). See glass agents on this computer.", c.domain),
+                        "agent-install",
+                    );
+                }
                 return oauth_error(
                     StatusCode::BAD_REQUEST,
                     "unauthorized_client",
-                    &format!("not installed on this computer; its owner can allow it with: glass agents install {}", stored.id),
+                    "not installed on this computer; its owner can allow it with glass agents install",
                 );
-            }
+            };
             match grants::app_token(&stored, &c.domain) {
                 Ok((g, issued)) => token_response(&g, issued),
                 Err(e) => oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", &e.to_string()),
@@ -1134,6 +1293,17 @@ async fn token(headers: HeaderMap, axum::Form(f): axum::Form<HashMap<String, Str
         }
         _ => oauth_error(StatusCode::BAD_REQUEST, "unsupported_grant_type", "authorization_code, refresh_token or client_credentials"),
     }
+}
+
+/// At most one "asks for unattended access" notification every 10 minutes.
+fn install_push_due() -> bool {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    if last.is_some_and(|t| t.elapsed() < Duration::from_secs(600)) {
+        return false;
+    }
+    *last = Some(Instant::now());
+    true
 }
 
 /// RFC 7009. Always 200 (the token's validity isn't revealed).
@@ -1224,16 +1394,17 @@ async fn mcp(headers: HeaderMap, body: axum::body::Bytes) -> Response<Body> {
                 Value::Null => json!({}),
                 a => a,
             };
-            if !crate::mcp::looks_only(name) && !g.has(grants::USE) {
+            if !g.has(needed(name)) {
+                let need = needed(name);
                 // Step-up: the client can ask the owner for more.
                 return Response::builder()
                     .status(StatusCode::FORBIDDEN)
                     .header(
                         header::WWW_AUTHENTICATE,
-                        format!("Bearer error=\"insufficient_scope\", scope=\"{} {}\", resource_metadata=\"{iss}/.well-known/oauth-protected-resource/mcp\"", grants::VIEW, grants::USE),
+                        format!("Bearer error=\"insufficient_scope\", scope=\"{}\", resource_metadata=\"{iss}/.well-known/oauth-protected-resource/mcp\"", [g.scopes.join(" "), need.to_string()].join(" ").trim()),
                     )
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32001, "message": "this agent may only look; it needs computer:use" } }).to_string()))
+                    .body(Body::from(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32001, "message": format!("this agent's grant doesn't include {need}") } }).to_string()))
                     .unwrap();
             }
             match run_tool(&g, name, &args).await {
@@ -1250,6 +1421,11 @@ async fn mcp(headers: HeaderMap, body: axum::body::Bytes) -> Response<Body> {
 
 /// The tools this grant can use: this computer only (no `machine`), and only looking for a
 /// view-only grant.
+/// The scope a tool needs.
+fn needed(tool: &str) -> &'static str {
+    if crate::mcp::looks_only(tool) { grants::VIEW } else { grants::USE }
+}
+
 fn tools_for(g: &Grant) -> Vec<Value> {
     crate::mcp::tools()
         .as_array()
@@ -1257,7 +1433,7 @@ fn tools_for(g: &Grant) -> Vec<Value> {
         .unwrap_or_default()
         .into_iter()
         .filter(|t| t["name"] != "list_machines")
-        .filter(|t| g.has(grants::USE) || crate::mcp::looks_only(t["name"].as_str().unwrap_or("")))
+        .filter(|t| g.has(needed(t["name"].as_str().unwrap_or(""))))
         .map(|mut t| {
             if let Some(p) = t["inputSchema"]["properties"].as_object_mut() {
                 p.remove("machine");
@@ -1318,18 +1494,27 @@ fn consent_page(c: &Consent, id: &str, owner_here: bool) -> String {
     let common = format!(
         "<p class=who><b>{name}</b><span>{domain}</span></p>\
          <p>wants to use <b>{machine}</b>.</p>\
-         <ul>{scopes}{apps}<li>It asks you before anything risky, and can't use passwords or security settings</li></ul>",
+         <ul>{scopes}{apps}<li>{guard}</li><li>It's told to ask you before anything risky</li></ul>",
         name = esc(&c.client.name),
         domain = esc(&c.client.domain),
         machine = esc(&machine_name()),
+        guard = if grants::app_guard_available() {
+            "It can't use passwords, terminals or security settings"
+        } else {
+            "On Linux, Glass can't keep it out of particular apps or password fields"
+        },
     );
     if owner_here {
         format!(
             "{common}<form method=post action=/oauth/authorize/decide>\
              <input type=hidden name=id value=\"{id}\">\
-             <button name=allow value=yes class=primary autofocus>Approve</button>\
+             <button name=allow value=yes class=primary disabled>Approve</button>\
              <button name=allow value=no>Deny</button></form>\
-             <p class=dim>You can revoke it any time in Glass.</p>",
+             <p class=dim>You can revoke it any time in Glass.</p>\
+             <script>/* Approve works a moment after the page is seen, so a stray key or click can't. */\
+             (()=>{{const b=document.querySelector('.primary');let t;const arm=()=>{{clearTimeout(t);b.disabled=true;\
+             if(document.visibilityState==='visible'&&document.hasFocus())t=setTimeout(()=>b.disabled=false,1000)}};\
+             addEventListener('focus',arm);addEventListener('blur',arm);document.addEventListener('visibilitychange',arm);arm()}})()</script>",
             id = esc(id)
         )
     } else {
@@ -1358,7 +1543,7 @@ fn page(status: StatusCode, title: &str, body: &str, waiting: Option<&str>) -> R
          <meta name=referrer content=same-origin><title>{t} · Glass</title><style>\
          :root{{color-scheme:dark;font:16px/1.5 -apple-system,system-ui,sans-serif}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f2f2f4}}\
          main{{max-width:380px;padding:32px 24px}}h1{{font-size:20px;margin:0 0 16px}}.who{{display:flex;flex-direction:column;margin:0}}.who span,.dim{{color:#9a9aa3;font-size:14px}}\
-         ul{{padding-left:18px;color:#c9c9cf}}button{{font:inherit;padding:10px 18px;border-radius:10px;border:1px solid #333;background:#1c1c20;color:inherit;margin-right:8px;cursor:pointer}}\
+         ul{{padding-left:18px;color:#c9c9cf}}button:disabled{{opacity:.5}}button{{font:inherit;padding:10px 18px;border-radius:10px;border:1px solid #333;background:#1c1c20;color:inherit;margin-right:8px;cursor:pointer}}\
          .primary{{background:#f2f2f4;color:#0b0b0d;border-color:#f2f2f4}}.number{{font-size:56px;font-weight:600;letter-spacing:4px;margin:4px 0}}</style>\
          <main><h1>{t}</h1>{body}</main>{poll}",
         t = esc(title)
@@ -1424,6 +1609,10 @@ mod tests {
         assert_eq!((u.scheme.as_str(), u.host.as_str()), ("https", "mac-mini.tail1234.ts.net"));
         assert!(split_url("https://a@b.example/").is_none());
         assert_eq!(split_url("http://[::1]:80/").unwrap().host, "::1");
-        assert_eq!(strip_port("http://127.0.0.1:4000/cb?x"), "http://127.0.0.1/cb?x");
+        assert_eq!(loopback_key("http://127.0.0.1:4000/cb?x").as_deref(), Some("http://127.0.0.1/cb?x"));
+        assert_eq!(loopback_key("http://127.0.0.1:1@evil.example/cb"), None);
+        assert_eq!(loopback_key("http://127.0.0.1:4000x/cb"), None);
+        assert_eq!(loopback_key("http://[::1]:9/cb").as_deref(), Some("http://::1/cb"));
+        assert!(!redirect_matches("http://127.0.0.1:1@evil.example/cb", &["http://127.0.0.1/cb".to_string()]));
     }
 }

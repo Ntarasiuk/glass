@@ -151,11 +151,17 @@ it('an agent signs in by number matching, uses the computer, and refreshes; a st
   expect(r1.body.refresh_token).not.toBe(t.body.refresh_token);
   expect((await mcp(host, r1.body.access_token, 'ping')).status).toBe(200);
 
-  // The old one, used again (a stolen copy): the whole grant ends.
+  // The one just replaced, sent again at once (a retry): refused, nothing else happens.
+  expect((await token(host, { grant_type: 'refresh_token', refresh_token: t.body.refresh_token, client_id: client.client_id })).body.error).toBe('invalid_grant');
+  expect((await mcp(host, r1.body.access_token, 'ping')).status).toBe(200);
+  const r2 = await token(host, { grant_type: 'refresh_token', refresh_token: r1.body.refresh_token, client_id: client.client_id });
+  expect(r2.status).toBe(200);
+
+  // An older one, used again (a stolen copy): the whole grant ends.
   const reused = await token(host, { grant_type: 'refresh_token', refresh_token: t.body.refresh_token, client_id: client.client_id });
   expect(reused.body.error).toBe('invalid_grant');
-  expect((await mcp(host, r1.body.access_token, 'ping')).status).toBe(401);
-  expect((await token(host, { grant_type: 'refresh_token', refresh_token: r1.body.refresh_token, client_id: client.client_id })).body.error).toBe('invalid_grant');
+  expect((await mcp(host, r2.body.access_token, 'ping')).status).toBe(401);
+  expect((await token(host, { grant_type: 'refresh_token', refresh_token: r2.body.refresh_token, client_id: client.client_id })).body.error).toBe('invalid_grant');
 
   // Everything is in the audit log, chained, and typed text never is.
   const log = host.cli('agents', 'log', '--json');
@@ -181,7 +187,7 @@ it('the wrong number, or Deny, sends the agent away', async ({ browser, page, ho
 });
 
 it('on an owner device it is one tap; a view-only agent can look but not touch, and protected apps are off limits', async ({ browser }) => {
-  const host = await new Host({ env: { GLASS_TEST_TRUST_LOOPBACK: '1', GLASS_TEST_FRONTMOST: 'com.apple.Passwords' } }).start();
+  const host = await new Host({ env: { GLASS_TEST_TRUST_LOOPBACK: '1', GLASS_TEST_REMOTE_OWNER: '1', GLASS_TEST_FRONTMOST: 'com.apple.Passwords' } }).start();
   try {
     const client = await register(host, { client_name: 'Looker', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
     const { verifier, challenge } = pkce();
@@ -254,7 +260,7 @@ it('an app (client credentials, signed assertions) works only once the owner ins
 });
 
 it('a cloud agent never waits long for the person: questions go pending, and it collects the answer later', async ({ browser, page }) => {
-  const host = await new Host({ env: { GLASS_TEST_TRUST_LOOPBACK: '1' } }).start();
+  const host = await new Host({ env: { GLASS_TEST_TRUST_LOOPBACK: '1', GLASS_TEST_REMOTE_OWNER: '1' } }).start();
   try {
     const client = await register(host, { client_name: 'Cloud agent', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
     const { verifier, challenge } = pkce();
@@ -289,5 +295,106 @@ it('a cloud agent never waits long for the person: questions go pending, and it 
     expect(tools).toContain('check_answer');
   } finally {
     await host.stop();
+  }
+});
+
+it('this computer never approves an agent by itself: no Approve button on its own screen, and its own viewer can’t pick the number while an agent works', async ({ browser }) => {
+  // The owner's identity checks pass for this computer, as they do for a browser on the Mac itself.
+  const host = await new Host({ env: { GLASS_TEST_TRUST_LOOPBACK: '1' } }).start();
+  try {
+    const client = await register(host, { client_name: 'Self approver', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+    const signIn = await signInPage(browser, authorizeUrl(host, client.client_id, pkce().challenge));
+    await expect(signIn.getByRole('button', { name: 'Approve' })).toHaveCount(0);
+    await expect(signIn.locator('.number')).toBeVisible();
+    // A form posted anyway is refused.
+    const id = new URL(await signIn.evaluate(() => location.href)).searchParams.get('client_id');
+    expect(id).toBe(client.client_id);
+  } finally {
+    await host.stop();
+  }
+});
+
+it('redirects are matched by their parts, and the page names where the code goes', async ({ host }) => {
+  const client = await register(host, { client_name: 'Loopy', redirect_uris: ['http://127.0.0.1/cb', 'https://second.example/cb'], token_endpoint_auth_method: 'none' });
+  const ask = (redirect) => fetch(authorizeUrl(host, client.client_id, pkce().challenge, { redirect_uri: redirect }), { redirect: 'manual' });
+  // Userinfo can't smuggle another host past the loopback rule.
+  expect((await ask('http://127.0.0.1:1@evil.example/cb')).status).toBe(400);
+  expect((await ask('http://127.0.0.1:5555/cb')).status).toBe(200);
+  // The page names the redirect's host, not the first one registered.
+  const page = await (await ask('https://second.example/cb')).text();
+  expect(page).toContain('second.example');
+});
+
+it('a use-only grant can still look, and a revoked app stays revoked', async ({ browser }) => {
+  const host = await new Host({ env: { GLASS_TEST_TRUST_LOOPBACK: '1', GLASS_TEST_REMOTE_OWNER: '1' } }).start();
+  try {
+    const client = await register(host, { client_name: 'User', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+    const { verifier, challenge } = pkce();
+    const signIn = await signInPage(browser, authorizeUrl(host, client.client_id, challenge, { scope: 'computer:use' }));
+    await signIn.getByRole('button', { name: 'Approve' }).click();
+    await signIn.waitForURL(/127\.0\.0\.1:8765\/cb/);
+    const t = await token(host, { grant_type: 'authorization_code', code: new URL(signIn.url()).searchParams.get('code'), redirect_uri: REDIRECT, client_id: client.client_id, code_verifier: verifier });
+    expect((await mcp(host, t.body.access_token, 'tools/list')).body.result.tools.map((x) => x.name)).toContain('screenshot');
+    const shot = await mcp(host, t.body.access_token, 'tools/call', { name: 'screenshot', arguments: {} });
+    expect(shot.body.result.isError).toBeFalsy();
+
+    // An installed app, revoked: its next request doesn't quietly get a new grant.
+    const app = await register(host, { client_name: 'Bot', grant_types: ['client_credentials'], token_endpoint_auth_method: 'client_secret_basic' });
+    const basic = { authorization: `Basic ${Buffer.from(`${app.client_id}:${app.client_secret}`).toString('base64')}` };
+    host.cli('agents', 'install', app.client_id);
+    expect((await token(host, { grant_type: 'client_credentials' }, basic)).status).toBe(200);
+    const grantId = JSON.parse(host.cli('agents', 'list', '--json')).grants.find((g) => g.agent === 'Bot').id;
+    host.cli('agents', 'revoke', grantId);
+    expect((await token(host, { grant_type: 'client_credentials' }, basic)).body.error).toBe('unauthorized_client');
+    // The audit chain holds across the CLI and the host writing it.
+    expect(host.cli('agents', 'verify')).toMatch(/intact/);
+  } finally {
+    await host.stop();
+  }
+});
+
+it('agents wait while the person uses the computer itself, and terminals are off limits', async ({ browser }) => {
+  const host = await new Host({ env: { GLASS_TEST_TRUST_LOOPBACK: '1', GLASS_TEST_REMOTE_OWNER: '1', GLASS_TEST_FRONTMOST: 'com.apple.Terminal' } }).start();
+  try {
+    const client = await register(host, { client_name: 'Typist', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+    const { verifier, challenge } = pkce();
+    const signIn = await signInPage(browser, authorizeUrl(host, client.client_id, challenge));
+    await signIn.getByRole('button', { name: 'Approve' }).click();
+    await signIn.waitForURL(/127\.0\.0\.1:8765\/cb/);
+    const t = await token(host, { grant_type: 'authorization_code', code: new URL(signIn.url()).searchParams.get('code'), redirect_uri: REDIRECT, client_id: client.client_id, code_verifier: verifier });
+    const typed = await mcp(host, t.body.access_token, 'tools/call', { name: 'type_text', arguments: { text: 'rm -rf ~' } });
+    expect(typed.body.result.isError).toBe(true);
+    expect(typed.body.result.content[0].text).toContain('com.apple.Terminal is protected');
+  } finally {
+    await host.stop();
+  }
+});
+
+it('a metadata-document client (how Vercel Connect registers) can be installed as an app', async ({ host }) => {
+  const { createServer } = await import('node:http');
+  const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'v1', alg: 'ES256', use: 'sig' };
+  const server = createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ client_id: clientId, client_name: 'Connect', redirect_uris: ['https://connect.example/callback'], token_endpoint_auth_method: 'private_key_jwt', grant_types: ['authorization_code', 'client_credentials'], jwks: { keys: [jwk] } }));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const clientId = `http://127.0.0.1:${server.address().port}/client.json`;
+  try {
+    const assertion = () => {
+      const now = Math.floor(Date.now() / 1000);
+      const head = b64url(JSON.stringify({ alg: 'ES256', kid: 'v1' }));
+      const body = b64url(JSON.stringify({ iss: clientId, sub: clientId, aud: `${host.base}/oauth/token`, exp: now + 60, jti: b64url(randomBytes(12)) }));
+      return `${head}.${body}.${b64url(sign('sha256', Buffer.from(`${head}.${body}`), { key: privateKey, dsaEncoding: 'ieee-p1363' }))}`;
+    };
+    const form = () => ({ grant_type: 'client_credentials', client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion: assertion() });
+    expect((await token(host, form())).body.error).toBe('unauthorized_client');
+    expect(host.cli('agents')).toContain(`glass agents install ${clientId}`);
+    host.cli('agents', 'install', clientId);
+    const t = await token(host, form());
+    expect(t.status).toBe(200);
+    expect((await mcp(host, t.body.access_token, 'tools/list')).status).toBe(200);
+  } finally {
+    server.close();
   }
 });

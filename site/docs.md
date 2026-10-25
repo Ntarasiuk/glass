@@ -123,17 +123,18 @@ glass agents public on       # publish it with Tailscale Funnel; prints the URL
 vercel connect create https://mac-mini.tail1234.ts.net:8443/mcp
 ```
 
-On your tailnet no publishing is needed: use `https://<computer>/mcp`.
+On your tailnet no publishing is needed: use `https://<computer>/mcp`. Publishing needs Funnel allowed for the machine in your tailnet's settings; if it isn't, `glass agents public on` prints the link to allow it.
 
-**Approving takes one tap.** The agent sends you to a sign-in page on your computer. Opened on one of your own devices, it has an **Approve** button. Anywhere else, it shows a number, and Glass (the viewer, the Mac app, a notification) asks you to tap the matching one of three. Picking the wrong one denies it, so an approval you didn't start can't slip through. After that, the agent works with no prompts: its access refreshes itself, and a grant ends after 30 days unused (180 days at most).
+**Approving takes one tap.** The agent sends you to a sign-in page on your computer. Opened through your tailnet address on one of your other devices (signed in to Tailscale as you), it has an **Approve** button, which works a moment after the page appears. Anywhere else (through the Funnel address, on the computer itself, behind `tailscale serve` on Linux) it shows a number, and Glass asks you to tap the matching one of three, in the viewer or the Mac app; the notification opens Glass. Picking the wrong one denies it, so an approval you didn't start can't slip through. The computer never approves on its own: not from a browser on its own screen, and not from its own viewer while an agent is working; nor while a guest is connected. After that, the agent works with no prompts: its access refreshes itself, and a grant ends after 30 days unused (180 days at most).
 
 **What an agent can do is checked on your computer, at every step:**
 
 - `computer:view` (screenshots) and `computer:use` (pointer and keyboard). A view-only agent that asks to click gets told to ask you for more.
-- It never drives Passwords, Keychain Access, System Settings or the system's password prompts, and never types into a password field. It's told to ask you instead.
-- An agent can limit itself to some apps (`authorization_details` of type `glass_computer` with `apps`); input outside them is refused.
-- When you click, type or scroll from a viewer, agents wait until you've stopped for a few seconds.
-- 1,500 actions an hour at most; then it pauses until you resume it.
+- It never drives password managers (Passwords, 1Password, Bitwarden…), Keychain Access, System Settings, the system's password prompts, terminals, Screen Sharing or Glass itself, and never types into a password field. It's told to ask you instead. Glass checks the app that would actually get the input (what's under the pointer, or what has the keyboard, Spotlight and Control Center included), not just the app in front.
+- An agent can limit itself to some apps (`authorization_details` of type `glass_computer` with `apps`); input anywhere else (other apps, Spotlight, the Dock) is refused.
+- When you use the computer, at its own keyboard and mouse or by clicking, typing or scrolling in a viewer, agents wait until you've stopped for a few seconds.
+- 1,500 actions an hour per agent; an agent over it is held until the hour ends (you get a notification), or until you resume agents.
+- On Linux, Glass can't tell which app input reaches, so it can't keep an agent out of particular apps or password fields (the sign-in page says so), and agents can't limit themselves to apps there.
 - Pause and Stop in the viewer and the Mac app work as for any agent; the banner shows its name. What it types isn't shown or logged.
 
 **Revoking is immediate**: in the Mac app (AI agents › Agents from other devices), with `glass agents revoke <id>` (or `all`), or from the agent's platform (Vercel's revoke calls Glass's). A refresh token used twice (a stolen copy) revokes its grant on the spot. `glass agents off` refuses every agent until `glass agents on`.
@@ -142,7 +143,7 @@ On your tailnet no publishing is needed: use `https://<computer>/mcp`.
 
 **Cloud agents never hang on you.** A question (`confirm`, `request_help`) holds the agent's request 20 seconds at most (it can ask for up to 50), then tells it the question is pending, so serverless functions don't time out. The question stays up in Glass and on your phone for 30 minutes; the agent does other work and collects your answer with `check_answer`. It's told not to take the action until it's approved.
 
-**Unattended agents** (Vercel Connect's `app` subject, OAuth client credentials) need installing once on the computer: when one asks, `glass agents` shows `glass agents install <client>`.
+**Unattended agents** (Vercel Connect's `app` subject, OAuth client credentials, by dynamic registration or a client ID metadata document) need installing once on the computer: when one asks, you get one notification, and `glass agents` shows `glass agents install <client>`. Revoking an app's grant uninstalls it.
 
 For providers: authorization server metadata at `/.well-known/oauth-authorization-server`, protected resource metadata at `/.well-known/oauth-protected-resource/mcp`, client ID metadata documents or dynamic registration (RFC 7591/7592), PKCE S256, `authorization_code`, `refresh_token` and `client_credentials`, client authentication `none`, `client_secret_basic`/`post` or `private_key_jwt`, revocation (RFC 7009), and the `iss` parameter on redirects (RFC 9207). Access tokens last 10 minutes. With Funnel on, only these routes are published; the viewer and everything else stay on your tailnet.
 

@@ -1093,7 +1093,11 @@ async fn control(
             },
             ClientMsg::Agent { .. } | ClientMsg::AgentAnswer { .. } if guest => refuse(OWNER_ONLY),
             ClientMsg::Agent { op } => crate::computer::control(&op),
-            ClientMsg::AgentAnswer { id, ok, note } => crate::computer::answer(id, crate::computer::Answer { ok, note }),
+            ClientMsg::AgentAnswer { id, ok, note } => {
+                // A viewer on this computer itself: an agent on the screen could be clicking it.
+                let local = crate::oauth::is_this_computer(ctx.conn.remote_address().ip());
+                crate::computer::answer_from(id, crate::computer::Answer { ok, note }, local)
+            }
             ClientMsg::Privacy { .. } if guest => refuse(OWNER_ONLY),
             ClientMsg::Privacy { on } => {
                 if let Err(e) = crate::privacy::set_forced(on) {

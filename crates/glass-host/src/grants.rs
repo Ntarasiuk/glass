@@ -24,6 +24,8 @@ pub const IDLE_SECS: u64 = 30 * 24 * 3600;
 pub const MAX_SECS: u64 = 180 * 24 * 3600;
 /// Actions an agent may take in an hour before it has to ask the owner.
 pub const HOURLY_BUDGET: u32 = 1500;
+/// A just-rotated refresh token used again this soon is a retry, refused but not theft.
+const REUSE_GRACE_SECS: u64 = 30;
 /// Rotated-out refresh tokens remembered, to catch one being used twice (a stolen copy).
 const RETIRED_KEPT: usize = 32;
 
@@ -31,15 +33,43 @@ pub const VIEW: &str = "computer:view";
 pub const USE: &str = "computer:use";
 pub const SCOPES: [&str; 2] = [VIEW, USE];
 
-/// Apps an agent never drives, whatever its grant: passwords, keychains, system security
-/// and privacy settings, and the system's own authentication prompts.
-pub const PROTECTED_APPS: [&str; 6] = [
+/// Apps an agent never drives, whatever its grant: passwords and keychains, security and
+/// privacy settings, the system's authentication prompts, terminals (a shell can undo any
+/// limit), and Glass itself (its windows approve agents).
+pub const PROTECTED_APPS: &[&str] = &[
     "com.apple.keychainaccess",
     "com.apple.Passwords",
     "com.apple.systempreferences",
+    "com.apple.Settings",
     "com.apple.SecurityAgent",
     "com.apple.loginwindow",
-    "com.apple.Settings",
+    "com.apple.LocalAuthentication.UIAgent",
+    "com.apple.Terminal",
+    "com.googlecode.iterm2",
+    "dev.warp.Warp-Stable",
+    "com.mitchellh.ghostty",
+    "net.kovidgoyal.kitty",
+    "io.alacritty",
+    "co.zeit.hyper",
+    "com.1password.1password",
+    "com.agilebits.onepassword7",
+    "com.bitwarden.desktop",
+    "com.lastpass.LastPass",
+    "com.dashlane.dashlanephonefinal",
+    "com.keepassxc.keepassxc",
+    "com.apple.ScreenSharing",
+    "dev.glassdesk.app",
+];
+
+/// System UI that takes input without being an app's window: an agent limited to some
+/// apps can't use these (Spotlight would open anything).
+pub const SYSTEM_UI: &[&str] = &[
+    "com.apple.Spotlight",
+    "com.apple.controlcenter",
+    "com.apple.notificationcenterui",
+    "com.apple.dock",
+    "com.apple.systemuiserver",
+    "com.apple.WindowManager",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -115,6 +145,10 @@ pub struct Grant {
     pub refresh: Option<String>,
     #[serde(default)]
     pub retired: Vec<String>,
+    /// When the refresh token last rotated: the one before may still arrive for a moment
+    /// (a retry, a response lost on the way), which isn't theft.
+    #[serde(default)]
+    pub rotated: u64,
     #[serde(default)]
     pub access: Vec<Access>,
 }
@@ -133,7 +167,8 @@ impl Grant {
     }
 
     pub fn has(&self, scope: &str) -> bool {
-        self.scopes.iter().any(|s| s == scope)
+        // Using the computer includes seeing it.
+        self.scopes.iter().any(|s| s == scope || (scope == VIEW && s == USE))
     }
 
     /// What it may do, for a person to read.
@@ -157,10 +192,19 @@ fn audit_path() -> PathBuf {
 }
 
 pub fn load() -> Store {
-    std::fs::read(path())
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or(Store { enabled: true, ..Default::default() })
+    read().unwrap_or_else(|e| {
+        tracing::warn!("agents: can't read {}: {e:#}", path().display());
+        // Unreadable: nothing is allowed (an empty store), and update() won't overwrite it.
+        Store { enabled: false, ..Default::default() }
+    })
+}
+
+fn read() -> Result<Store> {
+    match std::fs::read(path()) {
+        Ok(b) => Ok(serde_json::from_slice(&b)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store { enabled: true, ..Default::default() }),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Reads, changes and writes the store under an exclusive lock (shared with `glass agents`).
@@ -178,7 +222,8 @@ pub fn update<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R> {
         // SAFETY: flock on a file we hold open; released when it closes.
         unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
     }
-    let mut store = load();
+    // A store that can't be read is kept as it is for the owner to look at, never replaced.
+    let mut store = read().with_context(|| format!("{} is damaged; move it aside to start over", path().display()))?;
     let out = f(&mut store);
     let tmp = path().with_extension("json.tmp");
     {
@@ -229,12 +274,15 @@ fn issue(g: &mut Grant, now: u64) -> Issued {
     let access = random("gla_");
     g.access.retain(|a| a.expires > now);
     g.access.push(Access { hash: hash(&access), expires: now + ACCESS_SECS });
-    g.access.truncate(64);
+    // The newest are the ones in use.
+    let extra = g.access.len().saturating_sub(64);
+    g.access.drain(..extra);
     g.last_used = now;
     let refresh = (g.subject == "user").then(|| {
         let r = random("glr_");
         if let Some(old) = g.refresh.replace(hash(&r)) {
             g.retired.push(old);
+            g.rotated = now;
             let extra = g.retired.len().saturating_sub(RETIRED_KEPT);
             g.retired.drain(..extra);
         }
@@ -274,6 +322,9 @@ pub fn refresh(token: &str, client_id: &str) -> Result<Refreshed> {
             return Refreshed::Invalid;
         };
         if g.retired.contains(&h) {
+            if g.retired.last() == Some(&h) && now.saturating_sub(g.rotated) < REUSE_GRACE_SECS {
+                return Refreshed::Invalid;
+            }
             g.revoked = true;
             g.refresh = None;
             g.access.clear();
@@ -316,6 +367,7 @@ pub fn app_token(client: &Client, domain: &str) -> Result<(Grant, Issued)> {
         revoked: false,
         refresh: None,
         retired: Vec::new(),
+        rotated: 0,
         access: Vec::new(),
     })
 }
@@ -350,6 +402,11 @@ pub fn revoke_token(token: &str) -> Result<()> {
         }
         None
     })?;
+    // An app's token revoked by its platform: it's uninstalled too.
+    if let Some(g) = ended.as_ref().filter(|g| g.subject == "app") {
+        let g = g.clone();
+        update(|s| uninstall_apps(s, std::slice::from_ref(&g)))?;
+    }
     if let Some(g) = ended {
         audit(&g, "revoked", "by the agent's platform", None, true);
     }
@@ -366,6 +423,7 @@ pub fn revoke(id: Option<&str>) -> Result<usize> {
             g.access.clear();
             ended.push(g.clone());
         }
+        uninstall_apps(s, &ended);
         ended
     })?;
     for g in &ended {
@@ -374,36 +432,51 @@ pub fn revoke(id: Option<&str>) -> Result<usize> {
     Ok(ended.len())
 }
 
+/// An app's grant ended: it's no longer installed, so it can't simply get a new one.
+fn uninstall_apps(s: &mut Store, ended: &[Grant]) {
+    for g in ended.iter().filter(|g| g.subject == "app") {
+        if let Some(c) = s.clients.iter_mut().find(|c| c.id == g.client_id) {
+            c.installed = false;
+        }
+    }
+}
+
 // ---- Audit ----
 
-static AUDIT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-/// One line per action, chained: each line's `hash` covers the line before's.
+/// One line per action, chained: each line's `hash` covers the line before's. The chain's
+/// end is read from the file under a lock each time, since the host, the CLI and the Mac
+/// app all write here.
 pub fn audit(g: &Grant, action: &str, detail: &str, app: Option<&str>, ok: bool) {
-    let mut last = AUDIT.lock().unwrap();
-    if last.is_none() {
-        let prev = std::fs::read_to_string(audit_path())
-            .ok()
-            .and_then(|s| s.lines().last().map(str::to_string))
-            .and_then(|l| serde_json::from_str::<Value>(&l).ok())
+    let result = (|| -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::OpenOptions::new().create(true).read(true).append(true).open(audit_path())?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: flock on a file we hold open; released when it closes.
+            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+        }
+        let len = f.seek(SeekFrom::End(0))?;
+        let from = len.saturating_sub(16 * 1024);
+        f.seek(SeekFrom::Start(from))?;
+        let mut tail = String::new();
+        f.read_to_string(&mut tail)?;
+        let prev = tail
+            .lines()
+            .last()
+            .and_then(|l| serde_json::from_str::<Value>(l).ok())
             .and_then(|v| v["hash"].as_str().map(str::to_string))
             .unwrap_or_default();
-        *last = Some(prev);
-    }
-    let prev = last.clone().unwrap_or_default();
-    let mut entry = json!({
-        "at": now(), "grant": g.id, "agent": g.domain, "name": g.client_name,
-        "action": action, "detail": detail, "app": app, "ok": ok, "prev": prev,
-    });
-    let line_hash = hash(&entry.to_string());
-    entry["hash"] = json!(line_hash);
-    let written = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(audit_path())
-        .and_then(|mut f| writeln!(f, "{entry}"));
-    if written.is_ok() {
-        *last = Some(line_hash);
+        let mut entry = json!({
+            "at": now(), "grant": g.id, "agent": g.domain, "name": g.client_name,
+            "action": action, "detail": detail, "app": app, "ok": ok, "prev": prev,
+        });
+        entry["hash"] = json!(hash(&entry.to_string()));
+        writeln!(f, "{entry}")?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        tracing::warn!("agents: audit log: {e:#}");
     }
 }
 
@@ -460,7 +533,9 @@ pub fn cli(action: &str, id: Option<&str>, json_out: bool) -> Result<()> {
                 Some(c.name.clone())
             })?
             .with_context(|| format!("no client {id} that can authenticate"))?;
-            println!("{name} can now use this computer unattended (as an app). Undo with: glass agents revoke <grant>");
+            println!(
+                "{name} ({id}) can now use this computer unattended: see and use it, no app limits. Its name is its own claim; Glass hasn't verified who runs it. Undo: glass agents revoke <grant>"
+            );
         }
         "on" | "off" => {
             update(|s| s.enabled = action == "on")?;
@@ -542,7 +617,12 @@ pub fn cli(action: &str, id: Option<&str>, json_out: bool) -> Result<()> {
                 );
             }
             for c in asking {
-                println!("{} asks for unattended access: glass agents install {}", c.name, c.id);
+                println!(
+                    "{} asks for unattended access (registered {} ago; name not verified): glass agents install {}",
+                    c.name,
+                    ago(now.saturating_sub(c.created)),
+                    c.id
+                );
             }
         }
     }
@@ -567,30 +647,58 @@ pub fn current() -> Actor {
     ACTOR.try_with(Actor::clone).unwrap_or(Actor::Owner)
 }
 
-/// Before input reaches the computer: an agent under a grant drives only allowed apps, and
-/// never the protected ones or a password field.
-pub fn check_input(typing: bool) -> Result<(), String> {
+/// Where input is about to go: a point (global, in points) for the pointer, or wherever the
+/// keyboard is.
+#[derive(Debug, Clone, Copy)]
+pub enum Target {
+    Point(f64, f64),
+    Keys,
+}
+
+/// Before input reaches the computer: an agent under a grant drives only allowed apps (as
+/// Accessibility sees what's actually under the pointer or has the keyboard), and never
+/// the protected ones or a password field.
+pub fn check_input(target: Target) -> Result<(), String> {
     let Actor::Agent(g) = current() else { return Ok(()) };
-    if typing && secure_input() {
+    if matches!(target, Target::Keys) && secure_input() {
         return Err("A password field has the keyboard (secure input is on). Ask the person to type it with request_help.".into());
     }
-    let front = frontmost_app();
-    if let Some(app) = &front
+    let app = target_app(target);
+    if let Some(app) = &app
         && PROTECTED_APPS.contains(&app.as_str())
     {
         return Err(format!("{app} is protected: agents can't use it. Ask the person with request_help."));
     }
     if let Some(apps) = &g.apps {
-        match &front {
+        match &app {
             Some(app) if apps.iter().any(|a| a == app) => {}
-            Some(app) => return Err(format!("This agent may only use {}; {app} is in front.", apps.join(", "))),
-            None => return Err("Can't tell which app is in front, and this agent is limited to some apps.".into()),
+            Some(app) => return Err(format!("This agent may only use {}; that input would go to {app}.", apps.join(", "))),
+            None => return Err("Can't tell which app the input would reach, and this agent is limited to some apps.".into()),
         }
     }
     Ok(())
 }
 
-/// The app in front (macOS bundle id).
+/// The app input to `target` would reach (macOS bundle id).
+pub fn target_app(target: Target) -> Option<String> {
+    if crate::testmode::enabled() {
+        return std::env::var("GLASS_TEST_FRONTMOST").ok();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        match target {
+            Target::Point(x, y) => crate::platform::front::app_at(x, y),
+            Target::Keys => crate::platform::front::key_app(),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = target;
+        None
+    }
+}
+
+/// The app in front (macOS bundle id), for the audit log.
 pub fn frontmost_app() -> Option<String> {
     if crate::testmode::enabled() {
         return std::env::var("GLASS_TEST_FRONTMOST").ok();
@@ -601,6 +709,24 @@ pub fn frontmost_app() -> Option<String> {
     }
     #[cfg(not(target_os = "macos"))]
     None
+}
+
+/// Glass can tell which app input reaches (and keep agents out of protected ones) here.
+pub fn app_guard_available() -> bool {
+    cfg!(target_os = "macos") || crate::testmode::enabled()
+}
+
+/// Someone used this computer's own keyboard or mouse in the last few seconds.
+pub fn local_input_recent() -> bool {
+    if crate::testmode::enabled() {
+        return std::env::var_os("GLASS_TEST_LOCAL_INPUT").is_some();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::platform::front::local_input_age().is_some_and(|age| age < 5.0)
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
 /// A password field has the keyboard.
@@ -616,18 +742,34 @@ pub fn secure_input() -> bool {
     false
 }
 
-/// Counts an action against the grant's hour; false once it's used up.
-pub fn spend(g: &Grant) -> bool {
-    use std::collections::HashMap;
-    static SPENT: std::sync::Mutex<Option<HashMap<String, (u64, u32)>>> = std::sync::Mutex::new(None);
+static SPENT: std::sync::Mutex<Option<std::collections::HashMap<String, (u64, u32)>>> = std::sync::Mutex::new(None);
+
+pub enum Spend {
+    Ok,
+    /// Just went over: tell the owner (once).
+    JustOver,
+    Over,
+}
+
+/// Counts an action against the grant's hour.
+pub fn spend(g: &Grant) -> Spend {
     let hour = now() / 3600;
     let mut spent = SPENT.lock().unwrap();
-    let entry = spent.get_or_insert_with(HashMap::new).entry(g.id.clone()).or_insert((hour, 0));
+    let entry = spent.get_or_insert_with(Default::default).entry(g.id.clone()).or_insert((hour, 0));
     if entry.0 != hour {
         *entry = (hour, 0);
     }
-    entry.1 += 1;
-    entry.1 <= HOURLY_BUDGET
+    entry.1 = entry.1.saturating_add(1);
+    match entry.1 {
+        n if n <= HOURLY_BUDGET => Spend::Ok,
+        n if n == HOURLY_BUDGET + 1 => Spend::JustOver,
+        _ => Spend::Over,
+    }
+}
+
+/// The owner resumed agents: every agent gets a fresh hour.
+pub fn reset_budgets() {
+    SPENT.lock().unwrap().take();
 }
 
 #[cfg(test)]
@@ -649,6 +791,7 @@ mod tests {
             revoked: false,
             refresh: None,
             retired: Vec::new(),
+            rotated: 0,
             access: Vec::new(),
         }
     }

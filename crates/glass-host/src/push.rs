@@ -479,7 +479,14 @@ pub fn agent_ask(id: u64, kind: &str, text: &str) {
     send(Note {
         kind: Kind::Ask,
         title: title.into(),
-        body: if kind == "consent" { format!("{text} Open Glass and tap the number its sign-in page shows.") } else { text.into() },
+        // A consent's text ends with its request id and an instruction; the notification says it once.
+        body: if kind == "consent" {
+            let text = text.rsplit_once(" [").map_or(text, |(t, _)| t);
+            let text = text.trim_end_matches(" Tap the number if its sign-in page shows it.");
+            format!("{text} Open Glass and tap the number its sign-in page shows.")
+        } else {
+            text.into()
+        },
         tag: format!("agent-{id}"),
         // A consent needs the number from the sign-in page, so it's answered in Glass.
         action: (kind == "confirm").then_some(("agent", id, "Allow", "Don't")),
