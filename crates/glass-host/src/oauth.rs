@@ -150,18 +150,30 @@ pub fn publish(on: bool) -> anyhow::Result<Option<String>> {
     } else {
         vec!["funnel".into(), format!("--https={FUNNEL_PORT}"), "off".into()]
     };
-    let mut child = std::process::Command::new(cli)
+    let mut command = std::process::Command::new(cli);
+    command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+        .stderr(std::process::Stdio::piped());
+    // Its own process group: `tailscale` on a Mac is a script that starts the app's binary,
+    // and stopping only the script would leave that holding the output open.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command.spawn()?;
     // It can wait for an admin to allow Funnel: give it a while, then stop waiting.
     let start = Instant::now();
     while child.try_wait()?.is_none() && start.elapsed() < Duration::from_secs(20) {
         std::thread::sleep(Duration::from_millis(200));
     }
-    let _ = child.kill();
+    if child.try_wait()?.is_none() {
+        #[cfg(unix)]
+        // SAFETY: signals the group we created for this child alone.
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+        let _ = child.kill();
+    }
     let out = child.wait_with_output()?;
     let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     let enable_link = said.split_whitespace().find(|w| w.starts_with("https://login.tailscale.com/")).map(String::from);
