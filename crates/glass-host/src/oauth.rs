@@ -51,6 +51,18 @@ pub fn routes() -> axum::Router {
         .route("/oauth/token", post(token))
         .route("/oauth/revoke", post(revoke))
         .route("/mcp", post(mcp).get(mcp_get).delete(mcp_get))
+        .layer(axum::middleware::map_request(fill_host))
+}
+
+/// HTTP/2 names the host in the URI (`:authority`), not a Host header: make it one, so
+/// the issuer reads the same either way.
+async fn fill_host(mut req: axum::extract::Request) -> axum::extract::Request {
+    if !req.headers().contains_key(header::HOST)
+        && let Some(v) = req.uri().authority().and_then(|a| HeaderValue::from_str(a.as_str()).ok())
+    {
+        req.headers_mut().insert(header::HOST, v);
+    }
+    req
 }
 
 type Peer = ConnectInfo<SocketAddr>;
