@@ -1,0 +1,254 @@
+// Agents from anywhere: Glass as an OAuth authorization server and MCP server (streamable
+// HTTP), the way Vercel Connect and claude.ai connectors use it. Registration, approval by
+// number matching (or one tap on an owner device), tokens that rotate, scopes, revocation
+// and the audit log, against real `glass --test` hosts.
+
+import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
+import { Host, expectVideo, test, expect } from './harness.mjs';
+
+const REDIRECT = 'http://127.0.0.1:8765/cb';
+const b64url = (buf) => Buffer.from(buf).toString('base64url');
+
+const it = test.extend({
+  host: async ({}, use) => {
+    const host = await new Host().start();
+    await use(host);
+    await host.stop();
+  },
+});
+
+async function register(host, body) {
+  const r = await fetch(`${host.base}/oauth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  expect(r.status).toBe(201);
+  return r.json();
+}
+
+async function token(host, form, headers = {}) {
+  const r = await fetch(`${host.base}/oauth/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers },
+    body: new URLSearchParams(form),
+  });
+  return { status: r.status, body: await r.json() };
+}
+
+/** One JSON-RPC call to /mcp with a bearer token. */
+async function mcp(host, access, method, params = {}) {
+  const r = await fetch(`${host.base}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${access}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+  });
+  return { status: r.status, auth: r.headers.get('www-authenticate'), body: r.status === 200 || r.status === 403 ? await r.json() : null };
+}
+
+function pkce() {
+  const verifier = b64url(randomBytes(32));
+  return { verifier, challenge: b64url(createHash('sha256').update(verifier).digest()) };
+}
+
+function authorizeUrl(host, clientId, challenge, extra = {}) {
+  const q = new URLSearchParams({
+    response_type: 'code', client_id: clientId, redirect_uri: REDIRECT, code_challenge: challenge,
+    code_challenge_method: 'S256', state: 'st8', resource: `${host.base}/mcp`, ...extra,
+  });
+  return `${host.base}/oauth/authorize?${q}`;
+}
+
+/** A browser that isn't the owner's opens the sign-in page; its redirect is caught. */
+async function signInPage(browser, url) {
+  const ctx = await browser.newContext();
+  await ctx.route('http://127.0.0.1:8765/**', (r) => r.fulfill({ body: 'back at the agent' }));
+  const page = await ctx.newPage();
+  await page.goto(url);
+  return page;
+}
+
+it('an agent signs in by number matching, uses the computer, and refreshes; a stolen refresh token ends it', async ({ browser, page, host }) => {
+  // Discovery, as Vercel Connect and MCP clients do it.
+  const unauth = await fetch(`${host.base}/mcp`, { method: 'POST', body: '{}' });
+  expect(unauth.status).toBe(401);
+  expect(unauth.headers.get('www-authenticate')).toContain(`resource_metadata="${host.base}/.well-known/oauth-protected-resource/mcp"`);
+  const prm = await host.get('/.well-known/oauth-protected-resource/mcp');
+  expect(prm).toMatchObject({ resource: `${host.base}/mcp`, authorization_servers: [host.base] });
+  const meta = await host.get('/.well-known/oauth-authorization-server');
+  expect(meta).toMatchObject({
+    issuer: host.base,
+    code_challenge_methods_supported: ['S256'],
+    client_id_metadata_document_supported: true,
+    revocation_endpoint: `${host.base}/oauth/revoke`,
+  });
+  expect(meta.grant_types_supported).toEqual(['authorization_code', 'refresh_token', 'client_credentials']);
+
+  const client = await register(host, { client_name: 'Test agent', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+  expect(client.client_secret).toBeUndefined();
+  expect(client.registration_access_token).toBeTruthy();
+
+  // The owner is watching in a viewer.
+  await page.goto(host.url());
+  await expectVideo(page);
+
+  const { verifier, challenge } = pkce();
+  const signIn = await signInPage(browser, authorizeUrl(host, client.client_id, challenge));
+  const number = (await signIn.locator('.number').textContent()).trim();
+  expect(number).toMatch(/^\d\d$/);
+
+  // In Glass: the card shows three numbers; the right one approves.
+  const card = page.locator('.agent-ask', { hasText: 'Test agent' });
+  await expect(card).toContainText('An agent asks to use this computer');
+  await expect(card.locator('button.choice')).toHaveCount(3);
+  await card.locator('button.choice', { hasText: number }).click();
+
+  await signIn.waitForURL(/127\.0\.0\.1:8765\/cb/);
+  const back = new URL(signIn.url());
+  expect(back.searchParams.get('state')).toBe('st8');
+  expect(back.searchParams.get('iss')).toBe(host.base);
+  const code = back.searchParams.get('code');
+
+  // The wrong verifier is refused; the right one gets tokens.
+  expect((await token(host, { grant_type: 'authorization_code', code, redirect_uri: REDIRECT, client_id: client.client_id, code_verifier: pkce().verifier })).body.error).toBe('invalid_grant');
+  const first = await token(host, { grant_type: 'authorization_code', code, redirect_uri: REDIRECT, client_id: client.client_id, code_verifier: verifier });
+  // The first wrong try spent the code: one code, one chance.
+  expect(first.body.error).toBe('invalid_grant');
+
+  // Again, approving properly this time.
+  const second = pkce();
+  const signIn2 = await signInPage(browser, authorizeUrl(host, client.client_id, second.challenge));
+  const n2 = (await signIn2.locator('.number').textContent()).trim();
+  await page.locator('.agent-ask', { hasText: 'Test agent' }).locator('button.choice', { hasText: n2 }).click();
+  await signIn2.waitForURL(/127\.0\.0\.1:8765\/cb/);
+  const code2 = new URL(signIn2.url()).searchParams.get('code');
+  const t = await token(host, { grant_type: 'authorization_code', code: code2, redirect_uri: REDIRECT, client_id: client.client_id, code_verifier: second.verifier });
+  expect(t.status).toBe(200);
+  expect(t.body).toMatchObject({ token_type: 'Bearer', expires_in: 600, scope: 'computer:view computer:use' });
+  expect(t.body.refresh_token).toBeTruthy();
+
+  // MCP over HTTP: this computer's tools, no `machine`.
+  const init = await mcp(host, t.body.access_token, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 't', version: '1' } });
+  expect(init.body.result.serverInfo.name).toBe('glass');
+  const tools = (await mcp(host, t.body.access_token, 'tools/list')).body.result.tools;
+  const names = tools.map((x) => x.name);
+  expect(names).toEqual(expect.arrayContaining(['screenshot', 'click', 'type_text']));
+  expect(names).not.toContain('list_machines');
+  expect(tools.every((x) => !x.inputSchema.properties.machine)).toBe(true);
+
+  const shot = await mcp(host, t.body.access_token, 'tools/call', { name: 'screenshot', arguments: {} });
+  expect(shot.body.result.content[0]).toMatchObject({ type: 'image', mimeType: 'image/png' });
+  await host.clearInput();
+  expect((await mcp(host, t.body.access_token, 'tools/call', { name: 'click', arguments: { x: 320, y: 180 } })).body.result.isError).toBeFalsy();
+  expect((await host.input('move')).events[0]).toMatchObject({ x: 0.5, y: 0.5 });
+  // The banner names the agent; what it types isn't shown.
+  await mcp(host, t.body.access_token, 'tools/call', { name: 'type_text', arguments: { text: 'hunter2' } });
+  await expect(page.locator('#agent-label')).toContainText('Test agent · type 7 characters');
+
+  // Refreshing rotates the refresh token.
+  const r1 = await token(host, { grant_type: 'refresh_token', refresh_token: t.body.refresh_token, client_id: client.client_id });
+  expect(r1.status).toBe(200);
+  expect(r1.body.refresh_token).not.toBe(t.body.refresh_token);
+  expect((await mcp(host, r1.body.access_token, 'ping')).status).toBe(200);
+
+  // The old one, used again (a stolen copy): the whole grant ends.
+  const reused = await token(host, { grant_type: 'refresh_token', refresh_token: t.body.refresh_token, client_id: client.client_id });
+  expect(reused.body.error).toBe('invalid_grant');
+  expect((await mcp(host, r1.body.access_token, 'ping')).status).toBe(401);
+  expect((await token(host, { grant_type: 'refresh_token', refresh_token: r1.body.refresh_token, client_id: client.client_id })).body.error).toBe('invalid_grant');
+
+  // Everything is in the audit log, chained, and typed text never is.
+  const log = host.cli('agents', 'log', '--json');
+  expect(log).toContain('"action":"click"');
+  expect(log).not.toContain('hunter2');
+  expect(host.cli('agents', 'verify')).toMatch(/intact/);
+});
+
+it('the wrong number, or Deny, sends the agent away', async ({ browser, page, host }) => {
+  const client = await register(host, { client_name: 'Sneaky', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+  await page.goto(host.url());
+  await expectVideo(page);
+  const signIn = await signInPage(browser, authorizeUrl(host, client.client_id, pkce().challenge));
+  const number = (await signIn.locator('.number').textContent()).trim();
+  const card = page.locator('.agent-ask', { hasText: 'Sneaky' });
+  await card.locator('button.choice').filter({ hasNotText: number }).first().click();
+  await signIn.waitForURL(/127\.0\.0\.1:8765\/cb/);
+  expect(new URL(signIn.url()).searchParams.get('error')).toBe('access_denied');
+
+  // A redirect URI it never registered never gets anything (the page says so instead).
+  const r = await fetch(authorizeUrl(host, client.client_id, pkce().challenge, { redirect_uri: 'https://evil.example/cb' }), { redirect: 'manual' });
+  expect(r.status).toBe(400);
+});
+
+it('on an owner device it is one tap; a view-only agent can look but not touch, and protected apps are off limits', async ({ browser }) => {
+  const host = await new Host({ env: { GLASS_TEST_TRUST_LOOPBACK: '1', GLASS_TEST_FRONTMOST: 'com.apple.Passwords' } }).start();
+  try {
+    const client = await register(host, { client_name: 'Looker', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+    const { verifier, challenge } = pkce();
+    const signIn = await signInPage(browser, authorizeUrl(host, client.client_id, challenge, { scope: 'computer:view' }));
+    await expect(signIn.locator('.number')).toHaveCount(0);
+    await signIn.getByRole('button', { name: 'Approve' }).click();
+    await signIn.waitForURL(/127\.0\.0\.1:8765\/cb/);
+    const code = new URL(signIn.url()).searchParams.get('code');
+    const t = await token(host, { grant_type: 'authorization_code', code, redirect_uri: REDIRECT, client_id: client.client_id, code_verifier: verifier });
+    expect(t.body.scope).toBe('computer:view');
+
+    const names = (await mcp(host, t.body.access_token, 'tools/list')).body.result.tools.map((x) => x.name);
+    expect(names.sort()).toEqual(['list_displays', 'screenshot', 'wait_for_change']);
+    // Asking to touch: step-up, the MCP way.
+    const click = await mcp(host, t.body.access_token, 'tools/call', { name: 'click', arguments: { x: 1, y: 1 } });
+    expect(click.status).toBe(403);
+    expect(click.auth).toContain('error="insufficient_scope"');
+
+    // A full agent, with Passwords in front: refused, and told to ask the person.
+    const full = pkce();
+    const signIn2 = await signInPage(browser, authorizeUrl(host, client.client_id, full.challenge));
+    await signIn2.getByRole('button', { name: 'Approve' }).click();
+    await signIn2.waitForURL(/127\.0\.0\.1:8765\/cb/);
+    const t2 = await token(host, { grant_type: 'authorization_code', code: new URL(signIn2.url()).searchParams.get('code'), redirect_uri: REDIRECT, client_id: client.client_id, code_verifier: full.verifier });
+    const refused = await mcp(host, t2.body.access_token, 'tools/call', { name: 'click', arguments: { x: 1, y: 1 } });
+    expect(refused.body.result.isError).toBe(true);
+    expect(refused.body.result.content[0].text).toContain('protected');
+
+    // Revoking (Vercel's revoke button) ends it at once.
+    await fetch(`${host.base}/oauth/revoke`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: t2.body.refresh_token, client_id: client.client_id }) });
+    expect((await mcp(host, t2.body.access_token, 'ping')).status).toBe(401);
+  } finally {
+    await host.stop();
+  }
+});
+
+it('an app (client credentials, signed assertions) works only once the owner installs it', async ({ host }) => {
+  const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'k1', alg: 'ES256', use: 'sig' };
+  const app = await register(host, {
+    client_name: 'QA runner', grant_types: ['client_credentials'], token_endpoint_auth_method: 'private_key_jwt', jwks: { keys: [jwk] },
+  });
+  const assertion = (aud = `${host.base}/oauth/token`) => {
+    const now = Math.floor(Date.now() / 1000);
+    const head = b64url(JSON.stringify({ alg: 'ES256', kid: 'k1', typ: 'JWT' }));
+    const body = b64url(JSON.stringify({ iss: app.client_id, sub: app.client_id, aud, exp: now + 60, iat: now, jti: b64url(randomBytes(12)) }));
+    const sig = sign('sha256', Buffer.from(`${head}.${body}`), { key: privateKey, dsaEncoding: 'ieee-p1363' });
+    return `${head}.${body}.${b64url(sig)}`;
+  };
+  const form = (a) => ({ grant_type: 'client_credentials', client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion: a });
+
+  const before = await token(host, form(assertion()));
+  expect(before.body.error).toBe('unauthorized_client');
+  expect(host.cli('agents')).toContain(`glass agents install ${app.client_id}`);
+
+  host.cli('agents', 'install', app.client_id);
+  // An assertion for another server, or one replayed, is refused.
+  expect((await token(host, form(assertion('https://elsewhere.example/token')))).body.error).toBe('invalid_client');
+  const a = assertion();
+  const t = await token(host, form(a));
+  expect(t.status).toBe(200);
+  expect(t.body.refresh_token).toBeUndefined();
+  expect((await token(host, form(a))).body.error).toBe('invalid_client');
+  expect((await mcp(host, t.body.access_token, 'tools/list')).status).toBe(200);
+
+  const listed = JSON.parse(host.cli('agents', 'list', '--json'));
+  expect(listed.grants).toEqual([expect.objectContaining({ agent: 'QA runner', subject: 'app' })]);
+  host.cli('agents', 'revoke', 'all');
+  expect((await mcp(host, t.body.access_token, 'ping')).status).toBe(401);
+});

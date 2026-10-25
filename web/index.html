@@ -450,6 +450,9 @@
       color: var(--text); font: inherit; font-size: 14px; cursor: pointer;
     }
     .agent-ask button.primary { background: var(--accent); color: var(--accent-ink); font-weight: 650; }
+    .agent-ask .row.choices { justify-content: flex-start; }
+    .agent-ask button.choice { min-width: 56px; font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+    .agent-ask .row.choices button:last-child { margin-left: auto; }
     #agent-marker {
       position: fixed; left: -14px; top: -14px; width: 28px; height: 28px; border-radius: 50%;
       border: 2px solid var(--accent); box-shadow: 0 0 0 2px rgb(0 0 0 / 0.35); pointer-events: none;

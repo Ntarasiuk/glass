@@ -1,0 +1,693 @@
+//! Agents from anywhere: who may use this computer, and how much. A grant is one agent's
+//! standing permission, approved once by the owner; its tokens are short-lived and checked
+//! here on every request, so revoking takes effect at once. The host is the only
+//! authority: nothing elsewhere (glassdesk.dev, the relay, the agent's platform) can make
+//! or widen a grant.
+//!
+//! Kept in `agents.json` (mode 600) under an exclusive lock, so `glass agents` (another
+//! process) and the host never undo each other's changes. Only hashes of tokens and
+//! secrets are stored. Every action an agent takes goes to `agent-audit.jsonl`, each line
+//! chained to the one before by its hash.
+
+use std::io::Write;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+/// Access tokens last this long; refreshing makes new ones without asking anyone.
+pub const ACCESS_SECS: u64 = 600;
+/// A grant nobody has used this long ends; the agent asks again.
+pub const IDLE_SECS: u64 = 30 * 24 * 3600;
+/// And every grant ends after this long, used or not.
+pub const MAX_SECS: u64 = 180 * 24 * 3600;
+/// Actions an agent may take in an hour before it has to ask the owner.
+pub const HOURLY_BUDGET: u32 = 1500;
+/// Rotated-out refresh tokens remembered, to catch one being used twice (a stolen copy).
+const RETIRED_KEPT: usize = 32;
+
+pub const VIEW: &str = "computer:view";
+pub const USE: &str = "computer:use";
+pub const SCOPES: [&str; 2] = [VIEW, USE];
+
+/// Apps an agent never drives, whatever its grant: passwords, keychains, system security
+/// and privacy settings, and the system's own authentication prompts.
+pub const PROTECTED_APPS: [&str; 6] = [
+    "com.apple.keychainaccess",
+    "com.apple.Passwords",
+    "com.apple.systempreferences",
+    "com.apple.SecurityAgent",
+    "com.apple.loginwindow",
+    "com.apple.Settings",
+];
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Store {
+    /// Off: agents from other devices are refused (`glass agents off`).
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Published to the internet with Tailscale Funnel (`glass agents public on`).
+    #[serde(default)]
+    pub public: bool,
+    #[serde(default)]
+    pub clients: Vec<Client>,
+    #[serde(default)]
+    pub grants: Vec<Grant>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// A registered client (dynamic registration). Clients identified by a metadata
+/// document URL aren't stored: the document is fetched when needed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Client {
+    pub id: String,
+    pub name: String,
+    pub redirect_uris: Vec<String>,
+    /// `none`, `client_secret_basic`, `client_secret_post` or `private_key_jwt`.
+    pub auth_method: String,
+    #[serde(default)]
+    pub grant_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_uri: Option<String>,
+    /// For RFC 7592 updates.
+    pub registration_hash: String,
+    pub created: u64,
+    /// Allowed to use client credentials (the `app` subject) on this computer, after the
+    /// owner ran `glass agents install`.
+    #[serde(default)]
+    pub installed: bool,
+    /// Asked for client credentials before being installed: listed for the owner.
+    #[serde(default)]
+    pub install_requested: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Grant {
+    pub id: String,
+    pub client_id: String,
+    /// The client's name, as it gave it (decoration only).
+    pub client_name: String,
+    /// What the owner was shown as the agent's identity: its verified domain.
+    pub domain: String,
+    /// `user` (approved by the owner) or `app` (installed by the owner).
+    pub subject: String,
+    pub scopes: Vec<String>,
+    /// Bundle ids it may drive; any app (but the protected ones) when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps: Option<Vec<String>>,
+    pub created: u64,
+    pub last_used: u64,
+    /// Who approved it: "this computer", or the device that answered.
+    pub approved_by: String,
+    #[serde(default)]
+    pub revoked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<String>,
+    #[serde(default)]
+    pub retired: Vec<String>,
+    #[serde(default)]
+    pub access: Vec<Access>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Access {
+    pub hash: String,
+    pub expires: u64,
+}
+
+impl Grant {
+    pub fn live(&self, now: u64) -> bool {
+        !self.revoked
+            && now < self.created + MAX_SECS
+            && now < self.last_used.max(self.created) + IDLE_SECS
+    }
+
+    pub fn has(&self, scope: &str) -> bool {
+        self.scopes.iter().any(|s| s == scope)
+    }
+
+    /// What it may do, for a person to read.
+    pub fn summary(&self) -> String {
+        let what = if self.has(USE) { "see and use" } else { "see" };
+        match &self.apps {
+            Some(apps) => format!("{what} this computer, only in {}", apps.join(", ")),
+            None => format!("{what} this computer"),
+        }
+    }
+}
+
+// ---- Storage ----
+
+pub fn path() -> PathBuf {
+    crate::config_dir().join("agents.json")
+}
+
+fn audit_path() -> PathBuf {
+    crate::config_dir().join("agent-audit.jsonl")
+}
+
+pub fn load() -> Store {
+    std::fs::read(path())
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Store { enabled: true, ..Default::default() })
+}
+
+/// Reads, changes and writes the store under an exclusive lock (shared with `glass agents`).
+pub fn update<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R> {
+    let dir = crate::config_dir();
+    std::fs::create_dir_all(&dir)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("agents.lock"))?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: flock on a file we hold open; released when it closes.
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+    }
+    let mut store = load();
+    let out = f(&mut store);
+    let tmp = path().with_extension("json.tmp");
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        file.write_all(&serde_json::to_vec_pretty(&store)?)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path())?;
+    drop(lock);
+    Ok(out)
+}
+
+// ---- Secrets ----
+
+pub fn random(prefix: &str) -> String {
+    let mut b = [0u8; 32];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b).expect("random");
+    format!("{prefix}{}", crate::remote::b64url(&b))
+}
+
+pub fn hash(secret: &str) -> String {
+    crate::remote::b64url(ring::digest::digest(&ring::digest::SHA256, secret.as_bytes()).as_ref())
+}
+
+/// PKCE S256: the verifier hashes to the challenge.
+pub fn pkce_ok(verifier: &str, challenge: &str) -> bool {
+    (43..=128).contains(&verifier.len())
+        && verifier.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._~".contains(&c))
+        && crate::control::token_matches(&hash(verifier), challenge)
+}
+
+pub fn now() -> u64 {
+    crate::access::now()
+}
+
+// ---- Tokens ----
+
+pub struct Issued {
+    pub access: String,
+    pub refresh: Option<String>,
+}
+
+/// New tokens for a grant: an access token, and (for `user` grants) the next refresh token,
+/// retiring the one before.
+fn issue(g: &mut Grant, now: u64) -> Issued {
+    let access = random("gla_");
+    g.access.retain(|a| a.expires > now);
+    g.access.push(Access { hash: hash(&access), expires: now + ACCESS_SECS });
+    g.access.truncate(64);
+    g.last_used = now;
+    let refresh = (g.subject == "user").then(|| {
+        let r = random("glr_");
+        if let Some(old) = g.refresh.replace(hash(&r)) {
+            g.retired.push(old);
+            let extra = g.retired.len().saturating_sub(RETIRED_KEPT);
+            g.retired.drain(..extra);
+        }
+        r
+    });
+    Issued { access, refresh }
+}
+
+/// A new grant, approved by the owner; its first tokens.
+pub fn create(mut g: Grant) -> Result<(Grant, Issued)> {
+    let now = now();
+    let issued = issue(&mut g, now);
+    let out = g.clone();
+    update(|s| {
+        s.grants.retain(|x| x.live(now));
+        s.grants.push(g);
+    })?;
+    audit(&out, "granted", &out.summary(), None, true);
+    Ok((out, issued))
+}
+
+pub enum Refreshed {
+    Ok(Grant, Issued),
+    /// Unknown, expired or revoked.
+    Invalid,
+    /// A refresh token used twice: someone else has a copy. The grant is revoked.
+    Reused(Grant),
+}
+
+pub fn refresh(token: &str, client_id: &str) -> Result<Refreshed> {
+    let h = hash(token);
+    let now = now();
+    let out = update(|s| {
+        let Some(g) = s.grants.iter_mut().find(|g| g.client_id == client_id
+            && (g.refresh.as_deref() == Some(h.as_str()) || g.retired.contains(&h)))
+        else {
+            return Refreshed::Invalid;
+        };
+        if g.retired.contains(&h) {
+            g.revoked = true;
+            g.refresh = None;
+            g.access.clear();
+            return Refreshed::Reused(g.clone());
+        }
+        if !g.live(now) {
+            return Refreshed::Invalid;
+        }
+        let issued = issue(g, now);
+        Refreshed::Ok(g.clone(), issued)
+    })?;
+    if let Refreshed::Reused(g) = &out {
+        audit(g, "revoked", "a refresh token was used twice", None, false);
+    }
+    Ok(out)
+}
+
+/// Client credentials for an installed client: an access token (no refresh).
+pub fn app_token(client: &Client, domain: &str) -> Result<(Grant, Issued)> {
+    let now = now();
+    let existing = update(|s| {
+        let g = s.grants.iter_mut().find(|g| g.client_id == client.id && g.subject == "app" && g.live(now))?;
+        let issued = issue(g, now);
+        Some((g.clone(), issued))
+    })?;
+    if let Some(found) = existing {
+        return Ok(found);
+    }
+    create(Grant {
+        id: random("grant_")[..20].to_string(),
+        client_id: client.id.clone(),
+        client_name: client.name.clone(),
+        domain: domain.to_string(),
+        subject: "app".into(),
+        scopes: SCOPES.iter().map(|s| s.to_string()).collect(),
+        apps: None,
+        created: now,
+        last_used: now,
+        approved_by: "installed on this computer".into(),
+        revoked: false,
+        refresh: None,
+        retired: Vec::new(),
+        access: Vec::new(),
+    })
+}
+
+/// The live grant an access token belongs to.
+pub fn by_access(token: &str) -> Option<Grant> {
+    let store = load();
+    if !store.enabled {
+        return None;
+    }
+    let h = hash(token);
+    let now = now();
+    store
+        .grants
+        .into_iter()
+        .find(|g| g.access.iter().any(|a| a.expires > now && crate::control::token_matches(&a.hash, &h)))
+        .filter(|g| g.live(now))
+}
+
+/// RFC 7009: a refresh token ends its grant; an access token ends just itself.
+pub fn revoke_token(token: &str) -> Result<()> {
+    let h = hash(token);
+    let ended = update(|s| {
+        for g in &mut s.grants {
+            if g.refresh.as_deref() == Some(h.as_str()) || g.retired.contains(&h) {
+                g.revoked = true;
+                g.refresh = None;
+                g.access.clear();
+                return Some(g.clone());
+            }
+            g.access.retain(|a| a.hash != h);
+        }
+        None
+    })?;
+    if let Some(g) = ended {
+        audit(&g, "revoked", "by the agent's platform", None, true);
+    }
+    Ok(())
+}
+
+/// Ends grants by id (or all of them, for `None`); how many ended.
+pub fn revoke(id: Option<&str>) -> Result<usize> {
+    let ended = update(|s| {
+        let mut ended = Vec::new();
+        for g in s.grants.iter_mut().filter(|g| !g.revoked && id.is_none_or(|id| g.id == id)) {
+            g.revoked = true;
+            g.refresh = None;
+            g.access.clear();
+            ended.push(g.clone());
+        }
+        ended
+    })?;
+    for g in &ended {
+        audit(g, "revoked", "by the owner", None, true);
+    }
+    Ok(ended.len())
+}
+
+// ---- Audit ----
+
+static AUDIT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// One line per action, chained: each line's `hash` covers the line before's.
+pub fn audit(g: &Grant, action: &str, detail: &str, app: Option<&str>, ok: bool) {
+    let mut last = AUDIT.lock().unwrap();
+    if last.is_none() {
+        let prev = std::fs::read_to_string(audit_path())
+            .ok()
+            .and_then(|s| s.lines().last().map(str::to_string))
+            .and_then(|l| serde_json::from_str::<Value>(&l).ok())
+            .and_then(|v| v["hash"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        *last = Some(prev);
+    }
+    let prev = last.clone().unwrap_or_default();
+    let mut entry = json!({
+        "at": now(), "grant": g.id, "agent": g.domain, "name": g.client_name,
+        "action": action, "detail": detail, "app": app, "ok": ok, "prev": prev,
+    });
+    let line_hash = hash(&entry.to_string());
+    entry["hash"] = json!(line_hash);
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(audit_path())
+        .and_then(|mut f| writeln!(f, "{entry}"));
+    if written.is_ok() {
+        *last = Some(line_hash);
+    }
+}
+
+/// Checks the audit log's chain; the number of good lines, or where it breaks.
+pub fn verify_audit() -> Result<usize> {
+    let text = std::fs::read_to_string(audit_path()).unwrap_or_default();
+    let mut prev = String::new();
+    for (i, line) in text.lines().enumerate() {
+        let mut v: Value = serde_json::from_str(line).with_context(|| format!("line {}", i + 1))?;
+        let claimed = v["hash"].as_str().unwrap_or_default().to_string();
+        anyhow::ensure!(v["prev"].as_str() == Some(prev.as_str()), "line {} doesn't follow the one before", i + 1);
+        v.as_object_mut().map(|o| o.remove("hash"));
+        anyhow::ensure!(hash(&v.to_string()) == claimed, "line {} was changed", i + 1);
+        prev = claimed;
+    }
+    Ok(text.lines().count())
+}
+
+pub fn audit_lines(n: usize) -> Vec<Value> {
+    let text = std::fs::read_to_string(audit_path()).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..]
+        .iter()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+// ---- glass agents ----
+
+fn ago(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
+}
+
+pub fn cli(action: &str, id: Option<&str>, json_out: bool) -> Result<()> {
+    let now = now();
+    match action {
+        "revoke" => {
+            let id = id.context("which grant? `glass agents` lists them (or `all`)")?;
+            let n = revoke((id != "all").then_some(id))?;
+            anyhow::ensure!(n > 0, "no live grant {id}");
+            println!("Revoked {n} grant{}.", if n == 1 { "" } else { "s" });
+        }
+        "install" => {
+            let id = id.context("which client? `glass agents` lists those asking")?;
+            let name = update(|s| {
+                let c = s.clients.iter_mut().find(|c| c.id == id && c.auth_method != "none")?;
+                c.installed = true;
+                c.install_requested = false;
+                Some(c.name.clone())
+            })?
+            .with_context(|| format!("no client {id} that can authenticate"))?;
+            println!("{name} can now use this computer unattended (as an app). Undo with: glass agents revoke <grant>");
+        }
+        "on" | "off" => {
+            update(|s| s.enabled = action == "on")?;
+            if action == "off" {
+                println!("Agents from other devices are refused until `glass agents on`. Grants are kept.");
+            } else {
+                println!("Agents can ask to use this computer again.");
+            }
+        }
+        "log" => {
+            for l in audit_lines(50) {
+                if json_out {
+                    println!("{l}");
+                    continue;
+                }
+                let at = l["at"].as_u64().unwrap_or(0);
+                println!(
+                    "{:>4} ago  {:<20} {:<16} {}{}{}",
+                    ago(now.saturating_sub(at)),
+                    l["name"].as_str().unwrap_or(""),
+                    l["action"].as_str().unwrap_or(""),
+                    l["detail"].as_str().unwrap_or(""),
+                    l["app"].as_str().map(|a| format!("  [{a}]")).unwrap_or_default(),
+                    if l["ok"] == false { "  ✗" } else { "" },
+                );
+            }
+        }
+        "verify" => println!("The audit log is intact ({} entries).", verify_audit()?),
+        "public" => match id {
+            Some("on") => {
+                let url = crate::oauth::publish(true)?.unwrap_or_default();
+                println!("Agents anywhere can now ask to use this computer at:\n  {url}\nEach one still needs your approval. Stop with: glass agents public off");
+            }
+            Some("off") => {
+                crate::oauth::publish(false)?;
+                println!("Agents can only reach this computer from your tailnet now.");
+            }
+            _ => anyhow::bail!("glass agents public on|off"),
+        },
+        _ => {
+            let store = load();
+            let live: Vec<&Grant> = store.grants.iter().filter(|g| g.live(now)).collect();
+            let asking: Vec<&Client> = store.clients.iter().filter(|c| c.install_requested && !c.installed).collect();
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&json!({
+                    "enabled": store.enabled,
+                    "grants": live.iter().map(|g| json!({ "id": g.id, "agent": g.client_name, "domain": g.domain,
+                        "subject": g.subject, "scopes": g.scopes, "apps": g.apps, "created": g.created,
+                        "last_used": g.last_used, "approved_by": g.approved_by })).collect::<Vec<_>>(),
+                    "install_requests": asking.iter().map(|c| json!({ "client_id": c.id, "name": c.name })).collect::<Vec<_>>(),
+                }))?);
+                return Ok(());
+            }
+            if !store.enabled {
+                println!("Agents from other devices are off (glass agents on).");
+            }
+            if let Some(url) = crate::status::read().and_then(|s| s.url) {
+                println!("Agents on your tailnet connect at {}/mcp", url.trim_end_matches('/'));
+                if store.public
+                    && let Some(host) = url.split("://").nth(1).and_then(|h| h.split([':', '/']).next())
+                {
+                    println!("Agents anywhere connect at https://{host}:{}/mcp", crate::oauth::FUNNEL_PORT);
+                } else {
+                    println!("To let agents outside your tailnet ask (Vercel, claude.ai): glass agents public on");
+                }
+            }
+            if live.is_empty() {
+                println!("No agents can use this computer.");
+            }
+            for g in live {
+                println!(
+                    "{}  {} ({}): {}; approved by {}, last used {} ago",
+                    g.id,
+                    g.client_name,
+                    g.domain,
+                    g.summary(),
+                    g.approved_by,
+                    ago(now.saturating_sub(g.last_used)),
+                );
+            }
+            for c in asking {
+                println!("{} asks for unattended access: glass agents install {}", c.name, c.id);
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---- What an agent may do right now ----
+
+/// Who's acting: the owner's own tools (`glass mcp` with this computer's token), or an
+/// agent under a grant.
+#[derive(Debug, Clone)]
+pub enum Actor {
+    Owner,
+    Agent(Grant),
+}
+
+tokio::task_local! {
+    pub static ACTOR: Actor;
+}
+
+pub fn current() -> Actor {
+    ACTOR.try_with(Actor::clone).unwrap_or(Actor::Owner)
+}
+
+/// Before input reaches the computer: an agent under a grant drives only allowed apps, and
+/// never the protected ones or a password field.
+pub fn check_input(typing: bool) -> Result<(), String> {
+    let Actor::Agent(g) = current() else { return Ok(()) };
+    if typing && secure_input() {
+        return Err("A password field has the keyboard (secure input is on). Ask the person to type it with request_help.".into());
+    }
+    let front = frontmost_app();
+    if let Some(app) = &front
+        && PROTECTED_APPS.contains(&app.as_str())
+    {
+        return Err(format!("{app} is protected: agents can't use it. Ask the person with request_help."));
+    }
+    if let Some(apps) = &g.apps {
+        match &front {
+            Some(app) if apps.iter().any(|a| a == app) => {}
+            Some(app) => return Err(format!("This agent may only use {}; {app} is in front.", apps.join(", "))),
+            None => return Err("Can't tell which app is in front, and this agent is limited to some apps.".into()),
+        }
+    }
+    Ok(())
+}
+
+/// The app in front (macOS bundle id).
+pub fn frontmost_app() -> Option<String> {
+    if crate::testmode::enabled() {
+        return std::env::var("GLASS_TEST_FRONTMOST").ok();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::platform::front::frontmost_app()
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// A password field has the keyboard.
+pub fn secure_input() -> bool {
+    if crate::testmode::enabled() {
+        return std::env::var_os("GLASS_TEST_SECURE_INPUT").is_some();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::platform::front::secure_input()
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+/// Counts an action against the grant's hour; false once it's used up.
+pub fn spend(g: &Grant) -> bool {
+    use std::collections::HashMap;
+    static SPENT: std::sync::Mutex<Option<HashMap<String, (u64, u32)>>> = std::sync::Mutex::new(None);
+    let hour = now() / 3600;
+    let mut spent = SPENT.lock().unwrap();
+    let entry = spent.get_or_insert_with(HashMap::new).entry(g.id.clone()).or_insert((hour, 0));
+    if entry.0 != hour {
+        *entry = (hour, 0);
+    }
+    entry.1 += 1;
+    entry.1 <= HOURLY_BUDGET
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grant() -> Grant {
+        Grant {
+            id: "g1".into(),
+            client_id: "c1".into(),
+            client_name: "Test".into(),
+            domain: "agent.example".into(),
+            subject: "user".into(),
+            scopes: vec![VIEW.into()],
+            apps: None,
+            created: 1000,
+            last_used: 1000,
+            approved_by: "test".into(),
+            revoked: false,
+            refresh: None,
+            retired: Vec::new(),
+            access: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn pkce_s256() {
+        // base64url(sha256(verifier)), as computed independently.
+        assert!(pkce_ok("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWEOEjXk", "TP3DZQl9rJnri9eRuZaFS6Q7czCrth7sEZC00LreApo"));
+        assert!(!pkce_ok("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWEOEjXX", "TP3DZQl9rJnri9eRuZaFS6Q7czCrth7sEZC00LreApo"));
+        assert!(!pkce_ok("short", &hash("short")));
+    }
+
+    #[test]
+    fn refresh_tokens_rotate_and_retire() {
+        let mut g = grant();
+        let first = issue(&mut g, 2000).refresh.unwrap();
+        let second = issue(&mut g, 2001).refresh.unwrap();
+        assert_eq!(g.refresh.as_deref(), Some(hash(&second).as_str()));
+        assert!(g.retired.contains(&hash(&first)));
+        assert_eq!(g.access.len(), 2);
+    }
+
+    #[test]
+    fn grants_end_when_idle_or_old() {
+        let g = grant();
+        assert!(g.live(1000 + IDLE_SECS - 1));
+        assert!(!g.live(1000 + IDLE_SECS));
+        let mut busy = grant();
+        busy.last_used = 1000 + MAX_SECS - 10;
+        assert!(!busy.live(1000 + MAX_SECS));
+        let mut revoked = grant();
+        revoked.revoked = true;
+        assert!(!revoked.live(1001));
+    }
+
+    #[test]
+    fn app_tokens_have_no_refresh() {
+        let mut g = grant();
+        g.subject = "app".into();
+        assert!(issue(&mut g, 2000).refresh.is_none());
+    }
+}

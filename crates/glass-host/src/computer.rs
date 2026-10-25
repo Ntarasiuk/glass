@@ -45,6 +45,8 @@ pub struct Status {
 struct Ask {
     kind: &'static str,
     text: String,
+    /// Answers to pick from (the number an agent's sign-in page shows, among others).
+    choices: Option<Vec<String>>,
     reply: oneshot::Sender<Answer>,
 }
 
@@ -86,7 +88,7 @@ pub fn snapshot() -> Vec<ServerMsg> {
         let mut asks: Vec<_> = s.asks.iter().collect();
         asks.sort_by_key(|(id, _)| **id);
         for (id, a) in asks {
-            out.push(ServerMsg::AgentAsk { id: *id, kind: a.kind, text: a.text.clone() });
+            out.push(ServerMsg::AgentAsk { id: *id, kind: a.kind, text: a.text.clone(), choices: a.choices.clone() });
         }
         out
     })
@@ -123,7 +125,11 @@ pub fn status() -> Status {
 /// Questions waiting for the owner, oldest first.
 pub fn asks() -> Vec<Value> {
     with(|s| {
-        let mut asks: Vec<_> = s.asks.iter().map(|(id, a)| json!({ "id": id, "kind": a.kind, "text": a.text })).collect();
+        let mut asks: Vec<_> = s
+            .asks
+            .iter()
+            .map(|(id, a)| json!({ "id": id, "kind": a.kind, "text": a.text, "choices": a.choices }))
+            .collect();
         asks.sort_by_key(|a| a["id"].as_u64());
         asks
     })
@@ -141,9 +147,29 @@ pub fn answer(id: u64, answer: Answer) {
 #[derive(Debug)]
 pub struct Refused(pub String);
 
-/// Waits while paused; refuses when stopped.
+/// When a person last clicked, typed or scrolled from a viewer (ms since the epoch).
+static HUMAN_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// An agent waits this long after a person last used the computer.
+const HUMAN_QUIET: Duration = Duration::from_secs(5);
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// A person used the computer from a viewer (a click, a key or a scroll; not just moving
+/// the pointer): agents hold off until they've been quiet for a few seconds.
+pub fn human_input() {
+    HUMAN_AT.store(epoch_ms(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn human_busy() -> bool {
+    epoch_ms().saturating_sub(HUMAN_AT.load(std::sync::atomic::Ordering::Relaxed)) < HUMAN_QUIET.as_millis() as u64
+}
+
+/// Waits while paused or while a person is using the computer; refuses when stopped.
 async fn may_act() -> Result<(), Refused> {
     let start = Instant::now();
+    let mut said = false;
     loop {
         let status = with(|s| s.status);
         if status.stopped {
@@ -151,8 +177,13 @@ async fn may_act() -> Result<(), Refused> {
                 "The user stopped the agent. Don't continue; tell them what you were doing.".into(),
             ));
         }
-        if !status.paused {
+        let busy = human_busy();
+        if !status.paused && !busy {
             return Ok(());
+        }
+        if busy && !said {
+            said = true;
+            announce("waiting", "while you use the computer".into(), None);
         }
         if start.elapsed() > PAUSE_WAIT {
             return Err(Refused("The user paused the agent and hasn't resumed it.".into()));
@@ -192,8 +223,13 @@ fn normalize(d: &DisplayInfo, x: f64, y: f64) -> (f32, f32) {
 }
 
 fn announce(kind: &str, detail: String, at: Option<(u32, f32, f32)>) {
-    info!("agent: {kind} {detail}");
+    let agent = match crate::grants::current() {
+        crate::grants::Actor::Agent(g) => Some(g.client_name),
+        crate::grants::Actor::Owner => None,
+    };
+    info!("agent{}: {kind} {detail}", agent.as_deref().map(|a| format!(" ({a})")).unwrap_or_default());
     broadcast(ServerMsg::AgentAction {
+        agent,
         kind: kind.into(),
         detail,
         display: at.map(|a| a.0),
@@ -203,6 +239,9 @@ fn announce(kind: &str, detail: String, at: Option<(u32, f32, f32)>) {
 }
 
 fn inject(events: impl IntoIterator<Item = InputEvent>) -> Result<(), Refused> {
+    let events: Vec<InputEvent> = events.into_iter().collect();
+    let typing = events.iter().any(|e| matches!(e, InputEvent::KeyDown { .. }));
+    crate::grants::check_input(typing).map_err(Refused)?;
     let shared = shared()?;
     let mut sink = shared.injector.lock().unwrap();
     for ev in events {
@@ -212,6 +251,7 @@ fn inject(events: impl IntoIterator<Item = InputEvent>) -> Result<(), Refused> {
 }
 
 fn move_to(d: &DisplayInfo, x: f32, y: f32) -> Result<(), Refused> {
+    crate::grants::check_input(false).map_err(Refused)?;
     shared()?.injector.lock().unwrap().move_on_display(d.id, x, y);
     Ok(())
 }
@@ -322,6 +362,7 @@ pub async fn type_text(text: &str) -> Result<Value, Refused> {
     if text.chars().count() > 10_000 {
         return Err(Refused("too much text at once (10,000 characters at most)".into()));
     }
+    crate::grants::check_input(true).map_err(Refused)?;
     let typed = shared()?.injector.lock().unwrap().type_text(text);
     if !typed {
         // Key by key on a US layout.
@@ -340,14 +381,21 @@ pub async fn type_text(text: &str) -> Result<Value, Refused> {
         }
         inject(events)?;
     }
-    let shown: String = text.chars().take(60).collect();
-    let more = if text.chars().count() > 60 { "…" } else { "" };
-    announce("type", format!("{shown:?}{more}"), None);
+    // An agent's typing isn't shown to viewers or logged: it may be a secret.
+    let shown = if matches!(crate::grants::current(), crate::grants::Actor::Agent(_)) {
+        format!("{} characters", text.chars().count())
+    } else {
+        let shown: String = text.chars().take(60).collect();
+        let more = if text.chars().count() > 60 { "…" } else { "" };
+        format!("{shown:?}{more}")
+    };
+    announce("type", shown, None);
     Ok(json!({ "ok": true }))
 }
 
 pub async fn key(keys: &str) -> Result<Value, Refused> {
     may_act().await?;
+    crate::grants::check_input(true).map_err(Refused)?;
     let codes = crate::keys::combo(keys).map_err(Refused)?;
     let mut events: Vec<InputEvent> = codes.iter().map(|&keycode| InputEvent::KeyDown { keycode }).collect();
     events.extend(codes.iter().rev().map(|&keycode| InputEvent::KeyUp { keycode }));
@@ -389,34 +437,79 @@ pub async fn wait_for_change(id: Option<u32>, timeout: Duration) -> Result<Value
 /// say done) or `confirm` (yes or no).
 pub async fn ask(kind: &'static str, text: &str) -> Result<Value, Refused> {
     may_act().await?;
-    let text: String = text.chars().take(500).collect();
-    let (tx, rx) = oneshot::channel();
-    let id = with(|s| {
-        s.next_ask += 1;
-        let id = s.next_ask;
-        s.asks.insert(id, Ask { kind, text: text.clone(), reply: tx });
-        id
-    });
-    info!("agent: asks ({kind}) {text:?}");
-    crate::testmode::record("agent", json!({ "ask": kind, "text": text }));
-    broadcast(ServerMsg::AgentAsk { id, kind, text: text.clone() });
-    crate::notify::notify(
-        if kind == "help" { "An agent needs your help" } else { "An agent asks before it acts" },
-        &text,
-    );
-    crate::push::agent_ask(id, kind == "help", &text);
-    let answer = match tokio::time::timeout(ASK_WAIT, rx).await {
-        Ok(Ok(a)) => a,
-        _ => {
-            with(|s| s.asks.remove(&id));
-            broadcast(ServerMsg::AgentAnswered { id });
-            return Err(Refused("Nobody answered.".into()));
-        }
-    };
+    let mut text: String = text.chars().take(500).collect();
+    if let crate::grants::Actor::Agent(g) = crate::grants::current() {
+        text = format!("{} ({}): {text}", g.client_name, g.domain);
+    }
+    let answer = ask_owner(kind, &text, None, ASK_WAIT).await.ok_or_else(|| Refused("Nobody answered.".into()))?;
     Ok(match kind {
         "confirm" => json!({ "approved": answer.ok, "note": answer.note }),
         _ => json!({ "done": answer.ok, "note": answer.note }),
     })
+}
+
+/// Asks the owner (in viewers, the Glass app and a notification) and waits for the answer;
+/// `None` if nobody answers in time. `consent` asks show `choices` to pick from.
+pub async fn ask_owner(kind: &'static str, text: &str, choices: Option<Vec<String>>, wait: Duration) -> Option<Answer> {
+    let (tx, rx) = oneshot::channel();
+    let id = with(|s| {
+        s.next_ask += 1;
+        let id = s.next_ask;
+        s.asks.insert(id, Ask { kind, text: text.to_string(), choices: choices.clone(), reply: tx });
+        id
+    });
+    info!("agent: asks ({kind}) {text:?}");
+    crate::testmode::record("agent", json!({ "ask": kind, "text": text, "choices": choices }));
+    broadcast(ServerMsg::AgentAsk { id, kind, text: text.to_string(), choices });
+    let title = match kind {
+        "help" => "An agent needs your help",
+        "consent" => "An agent asks to use this computer",
+        _ => "An agent asks before it acts",
+    };
+    crate::notify::notify(title, text);
+    crate::push::agent_ask(id, kind, text);
+    match tokio::time::timeout(wait, rx).await {
+        Ok(Ok(a)) => Some(a),
+        _ => {
+            with(|s| s.asks.remove(&id));
+            broadcast(ServerMsg::AgentAnswered { id });
+            None
+        }
+    }
+}
+
+/// Withdraws a question nobody needs answered any more.
+pub fn withdraw(id_text: &str) {
+    let ids: Vec<u64> = with(|s| s.asks.iter().filter(|(_, a)| a.text == id_text).map(|(id, _)| *id).collect());
+    for id in ids {
+        with(|s| s.asks.remove(&id));
+        broadcast(ServerMsg::AgentAnswered { id });
+    }
+}
+
+/// One action by an agent under a grant: allowed by its scopes and budget, run with the
+/// grant in force (so input is checked against its apps), and written to the audit log.
+pub async fn act_as(grant: &crate::grants::Grant, action: Action) -> Result<Value, Refused> {
+    let (name, view_only) = action.describe();
+    let needed = if view_only { crate::grants::VIEW } else { crate::grants::USE };
+    if !grant.has(needed) {
+        crate::grants::audit(grant, name, "refused: not allowed by its grant", None, false);
+        return Err(Refused(format!("This agent isn't allowed to {name} (it needs {needed}).")));
+    }
+    if !crate::grants::spend(grant) {
+        crate::grants::audit(grant, name, "refused: hourly limit", None, false);
+        control("pause");
+        return Err(Refused("This agent used its hourly limit of actions; the owner has to resume it.".into()));
+    }
+    let detail = action.audit_detail();
+    let actor = crate::grants::Actor::Agent(grant.clone());
+    let result = crate::grants::ACTOR.scope(actor, act(action)).await;
+    let app = crate::grants::frontmost_app();
+    match &result {
+        Ok(_) => crate::grants::audit(grant, name, &detail, app.as_deref(), true),
+        Err(Refused(why)) => crate::grants::audit(grant, name, &format!("{detail} — refused: {why}"), app.as_deref(), false),
+    }
+    result
 }
 
 // ---- HTTP ----
@@ -442,16 +535,19 @@ async fn owner(peer: &Peer, headers: &HeaderMap) -> Option<Response<Body>> {
         .then(|| (StatusCode::FORBIDDEN, Json(json!({ "error": "owner only" }))).into_response())
 }
 
+/// The displays, as agents see them.
+pub async fn displays_json() -> Result<Value, Refused> {
+    Ok(json!(displays().await?.iter().map(|d| json!({
+        "id": d.id, "width": d.width, "height": d.height, "main": d.main,
+        "x": d.x, "y": d.y,
+    })).collect::<Vec<_>>()))
+}
+
 async fn http_displays(peer: Peer, headers: HeaderMap) -> Response<Body> {
     if let Some(r) = owner(&peer, &headers).await {
         return r;
     }
-    reply(displays().await.map(|all| {
-        json!({ "displays": all.iter().map(|d| json!({
-            "id": d.id, "width": d.width, "height": d.height, "main": d.main,
-            "x": d.x, "y": d.y,
-        })).collect::<Vec<_>>() })
-    }))
+    reply(displays_json().await.map(|all| json!({ "displays": all })))
 }
 
 async fn http_status(peer: Peer, headers: HeaderMap) -> Response<Body> {
@@ -475,6 +571,41 @@ pub enum Action {
     WaitForChange { display: Option<u32>, timeout_ms: Option<u64> },
     RequestHelp { text: String },
     Confirm { text: String },
+}
+
+impl Action {
+    /// Its name, and whether it only looks.
+    pub fn describe(&self) -> (&'static str, bool) {
+        match self {
+            Action::Screenshot { .. } => ("screenshot", true),
+            Action::WaitForChange { .. } => ("wait_for_change", true),
+            Action::Click { .. } => ("click", false),
+            Action::Move { .. } => ("move", false),
+            Action::Drag { .. } => ("drag", false),
+            Action::Scroll { .. } => ("scroll", false),
+            Action::Type { .. } => ("type", false),
+            Action::Key { .. } => ("key", false),
+            Action::RequestHelp { .. } => ("request_help", false),
+            Action::Confirm { .. } => ("confirm", false),
+        }
+    }
+
+    /// What the audit log keeps (never the text typed).
+    fn audit_detail(&self) -> String {
+        match self {
+            Action::Screenshot { display, .. } | Action::WaitForChange { display, .. } => {
+                display.map(|d| format!("display {d}")).unwrap_or_default()
+            }
+            Action::Click { x, y, button, count, .. } => {
+                format!("{} ×{} at {x:.0}, {y:.0}", button.as_deref().unwrap_or("left"), count.unwrap_or(1))
+            }
+            Action::Move { x, y, .. } | Action::Scroll { x, y, .. } => format!("at {x:.0}, {y:.0}"),
+            Action::Drag { from_x, from_y, to_x, to_y, .. } => format!("{from_x:.0}, {from_y:.0} → {to_x:.0}, {to_y:.0}"),
+            Action::Type { text } => format!("{} characters", text.chars().count()),
+            Action::Key { keys } => keys.clone(),
+            Action::RequestHelp { text } | Action::Confirm { text } => text.chars().take(200).collect(),
+        }
+    }
 }
 
 pub async fn act(action: Action) -> Result<Value, Refused> {

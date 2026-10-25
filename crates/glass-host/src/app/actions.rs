@@ -62,6 +62,12 @@ pub fn agent(op: &str) -> Result<String> {
     .into())
 }
 
+/// Ends an agent's access (from another device).
+pub fn revoke_grant(id: &str) -> Result<String> {
+    anyhow::ensure!(crate::grants::revoke(Some(id))? > 0, "it was already revoked");
+    Ok("Revoked. It can't use this computer unless you approve it again.".into())
+}
+
 pub fn answer(id: u64, ok: bool, note: &str) -> Result<String> {
     let note = Some(note.trim().to_string()).filter(|n| !n.is_empty());
     ipc::call(&ipc::Request::AgentAnswer { id, ok, note })?;

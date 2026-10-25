@@ -11,12 +11,14 @@ mod connlog;
 mod control;
 mod files;
 mod forward;
+mod grants;
 mod gamepad;
 mod ipc;
 mod keys;
 mod ldap;
 mod lossless;
 mod mcp;
+mod oauth;
 mod media;
 mod mic;
 mod notify;
@@ -183,6 +185,17 @@ enum Command {
         /// The token file to sign in with (default: this computer's).
         #[arg(long)]
         token_file: Option<PathBuf>,
+    },
+    /// Agents from anywhere (MCP over HTTP with OAuth, e.g. Vercel Connect or claude.ai):
+    /// list the ones you approved, revoke them, install one for unattended use, or read
+    /// what they did.
+    Agents {
+        #[arg(value_parser = ["list", "revoke", "install", "log", "verify", "on", "off", "public"], default_value = "list")]
+        action: String,
+        /// A grant's id (revoke; `all` for every one), a client's id (install), or on/off (public).
+        id: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     /// Restart the background service (viewers reconnect by themselves).
     Restart,
@@ -670,6 +683,7 @@ async fn async_main(args: Args) -> Result<()> {
         }
         Some(Command::Feedback { message }) => send_feedback(&message.join(" ")),
         Some(Command::Mcp { machine, url, token_file }) => mcp::run(url.clone(), machine.clone(), token_file.clone()),
+        Some(Command::Agents { action, id, json }) => grants::cli(action, id.as_deref(), *json),
         Some(Command::Update) => update::run_cli(),
         Some(Command::Link { list: true, json, .. }) => list_passes(*json),
         Some(Command::Link {

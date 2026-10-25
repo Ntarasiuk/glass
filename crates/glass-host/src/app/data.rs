@@ -79,13 +79,27 @@ pub struct Agent {
     pub paused: bool,
     pub stopped: bool,
     pub asks: Vec<Ask>,
+    /// Agents from other devices that may use this computer.
+    pub grants: Vec<GrantRow>,
 }
 
 #[derive(Clone, PartialEq)]
 pub struct Ask {
     pub id: u64,
     pub help: bool,
+    /// An agent asking to be allowed in: pick the number its sign-in page shows.
+    pub consent: bool,
     pub text: String,
+    pub choices: Vec<String>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct GrantRow {
+    pub id: String,
+    pub name: String,
+    pub domain: String,
+    pub summary: String,
+    pub last_used: u64,
 }
 
 impl Snapshot {
@@ -178,12 +192,26 @@ pub fn gather() -> Snapshot {
                 paused: v["status"]["paused"] == true,
                 stopped: v["status"]["stopped"] == true,
                 asks: list(&v["asks"])
-                    .map(|a| Ask { id: a["id"].as_u64().unwrap_or(0), help: a["kind"] == "help", text: text(&a["text"]) })
+                    .map(|a| Ask {
+                        id: a["id"].as_u64().unwrap_or(0),
+                        help: a["kind"] == "help",
+                        consent: a["kind"] == "consent",
+                        text: text(&a["text"]),
+                        choices: list(&a["choices"]).map(text).collect(),
+                    })
                     .collect(),
+                grants: Vec::new(),
             };
             snap.privacy = v["privacy"] == true;
         }
     }
+    let now = crate::grants::now();
+    snap.agent.grants = crate::grants::load()
+        .grants
+        .into_iter()
+        .filter(|g| g.live(now))
+        .map(|g| GrantRow { summary: g.summary(), id: g.id, name: g.client_name, domain: g.domain, last_used: g.last_used })
+        .collect();
     snap.status = status;
     snap
 }

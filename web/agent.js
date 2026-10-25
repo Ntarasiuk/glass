@@ -32,7 +32,7 @@ export function createAgent({ control, locate }) {
       ? 'Agent stopped'
       : status.paused
         ? 'Agent paused'
-        : last ? `Agent · ${last.kind} ${last.detail}` : 'Agent working';
+        : last ? `${last.agent ?? 'Agent'} · ${last.kind} ${last.detail}` : 'Agent working';
     pauseButton.textContent = status.paused ? 'Resume' : 'Pause';
     pauseButton.classList.toggle('hidden', !owner || status.stopped);
     stopButton.textContent = status.stopped ? 'Allow again' : 'Stop';
@@ -63,18 +63,44 @@ export function createAgent({ control, locate }) {
   }
   marker.addEventListener('animationend', () => marker.classList.add('hidden'));
 
-  function addAsk({ id, kind, text }) {
+  function addAsk({ id, kind, text, choices }) {
     if (asks.querySelector(`[data-id="${id}"]`)) return;
     const card = document.createElement('div');
     card.className = 'agent-ask glass';
     card.dataset.id = id;
     card.setAttribute('role', 'alertdialog');
     const title = document.createElement('strong');
-    title.textContent = kind === 'help' ? 'The agent needs your help' : 'The agent asks before it acts';
+    title.textContent = kind === 'help'
+      ? 'The agent needs your help'
+      : kind === 'consent' ? 'An agent asks to use this computer' : 'The agent asks before it acts';
     const body = document.createElement('p');
-    body.textContent = text;
+    // A consent's text ends with its request id, which isn't for people.
+    body.textContent = kind === 'consent' ? text.replace(/ \[[^\]]+\]$/, '') : text;
     card.append(title, body);
-    if (owner) {
+    if (owner && kind === 'consent') {
+      // Number matching: the right one is on the agent's sign-in page.
+      const row = document.createElement('div');
+      row.className = 'row choices';
+      const answer = (ok, note) => {
+        control({ t: 'agentAnswer', id, ok, note });
+        card.remove();
+        render();
+      };
+      for (const n of choices ?? []) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'choice';
+        b.textContent = n;
+        b.addEventListener('click', () => answer(true, n));
+        row.append(b);
+      }
+      const no = document.createElement('button');
+      no.type = 'button';
+      no.textContent = 'Deny';
+      no.addEventListener('click', () => answer(false, null));
+      row.append(no);
+      card.append(row);
+    } else if (owner) {
       const note = document.createElement('input');
       note.type = 'text';
       note.placeholder = 'Note for the agent (optional)';
@@ -124,7 +150,7 @@ export function createAgent({ control, locate }) {
           break;
         case 'agentAction':
           lastAction = Date.now();
-          recent.unshift({ kind: msg.kind, detail: msg.detail });
+          recent.unshift({ agent: msg.agent, kind: msg.kind, detail: msg.detail });
           recent.length = Math.min(recent.length, RECENT);
           if (msg.display != null && msg.x != null) showMarker(msg.display, msg.x, msg.y);
           break;

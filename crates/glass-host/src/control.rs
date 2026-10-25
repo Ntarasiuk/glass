@@ -218,6 +218,9 @@ pub enum ServerMsg {
     AgentStatus { status: crate::computer::Status },
     /// Something an agent just did; `display`, `x`, `y` (0..1) where it pointed.
     AgentAction {
+        /// The agent's name, for one using a grant (from another device).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
         kind: String,
         detail: String,
         display: Option<u32>,
@@ -225,7 +228,14 @@ pub enum ServerMsg {
         y: Option<f32>,
     },
     /// An agent asks the person: `help` (do something, then say done) or `confirm` (yes/no).
-    AgentAsk { id: u64, kind: &'static str, text: String },
+    AgentAsk {
+        id: u64,
+        kind: &'static str,
+        text: String,
+        /// `consent`: the numbers to pick from (one is on the agent's sign-in page).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        choices: Option<Vec<String>>,
+    },
     /// That question was answered (here or elsewhere), or withdrawn.
     AgentAnswered { id: u64 },
     Annotate { sender: u64, stroke: serde_json::Value },

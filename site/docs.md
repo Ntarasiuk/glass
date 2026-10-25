@@ -114,6 +114,36 @@ Tools: `list_machines`, `screenshot`, `list_displays`, `click` (left, right, mid
 
 Only the computer's owner can drive it: your own tailnet devices, or this computer's token (which `glass mcp` reads by itself on this computer). Guests and links can't. Under the hood it's an HTTP API at `https://<computer>/agent/v1/` (`POST /agent/v1/act` with `{"action": "click", "x": 640, "y": 400}` and so on), if you'd rather call it directly.
 
+## Agents from anywhere
+
+Agents that don't run on your computers (on Vercel, in claude.ai or ChatGPT, on a server) can ask to use one. Glass is a standard MCP server over HTTP with OAuth sign-in, so anything that speaks the [MCP authorization spec](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization) works, including [Vercel Connect](https://vercel.com/docs/connect):
+
+```sh
+glass agents public on       # publish it with Tailscale Funnel; prints the URL
+vercel connect create https://mac-mini.tail1234.ts.net:8443/mcp
+```
+
+On your tailnet no publishing is needed: use `https://<computer>/mcp`.
+
+**Approving takes one tap.** The agent sends you to a sign-in page on your computer. Opened on one of your own devices, it has an **Approve** button. Anywhere else, it shows a number, and Glass (the viewer, the Mac app, a notification) asks you to tap the matching one of three. Picking the wrong one denies it, so an approval you didn't start can't slip through. After that, the agent works with no prompts: its access refreshes itself, and a grant ends after 30 days unused (180 days at most).
+
+**What an agent can do is checked on your computer, at every step:**
+
+- `computer:view` (screenshots) and `computer:use` (pointer and keyboard). A view-only agent that asks to click gets told to ask you for more.
+- It never drives Passwords, Keychain Access, System Settings or the system's password prompts, and never types into a password field. It's told to ask you instead.
+- An agent can limit itself to some apps (`authorization_details` of type `glass_computer` with `apps`); input outside them is refused.
+- When you click, type or scroll from a viewer, agents wait until you've stopped for a few seconds.
+- 1,500 actions an hour at most; then it pauses until you resume it.
+- Pause and Stop in the viewer and the Mac app work as for any agent; the banner shows its name. What it types isn't shown or logged.
+
+**Revoking is immediate**: in the Mac app (AI agents › Agents from other devices), with `glass agents revoke <id>` (or `all`), or from the agent's platform (Vercel's revoke calls Glass's). A refresh token used twice (a stolen copy) revokes its grant on the spot. `glass agents off` refuses every agent until `glass agents on`.
+
+**Every action is logged** to `agent-audit.jsonl`, each line chained to the one before by its hash: `glass agents log` shows the latest, `glass agents verify` checks nothing was changed.
+
+**Unattended agents** (Vercel Connect's `app` subject, OAuth client credentials) need installing once on the computer: when one asks, `glass agents` shows `glass agents install <client>`.
+
+For providers: authorization server metadata at `/.well-known/oauth-authorization-server`, protected resource metadata at `/.well-known/oauth-protected-resource/mcp`, client ID metadata documents or dynamic registration (RFC 7591/7592), PKCE S256, `authorization_code`, `refresh_token` and `client_credentials`, client authentication `none`, `client_secret_basic`/`post` or `private_key_jwt`, revocation (RFC 7009), and the `iss` parameter on redirects (RFC 9207). Access tokens last 10 minutes. With Funnel on, only these routes are published; the viewer and everything else stay on your tailnet.
+
 ## Set up with an AI agent
 
 Glass ships an agent skill: https://glassdesk.dev/skill.md. With it, an agent like Claude Code can set Glass up on any Mac or Linux machine in your Tailscale tailnet over SSH. It finds the machine, installs Glass, runs the unattended setup, tells you exactly which permission switches to click on that machine's screen, waits until everything works, and verifies the connection.
@@ -316,6 +346,7 @@ glass token         Show the access token for devices outside your tailnet
 glass token --reset Replace it with a new random token
 glass token --set   Choose your own token (prompted; or piped: echo … | glass token --set)
 glass mcp [--machine NAME]   MCP server letting an AI agent use this computer (or NAME on your tailnet)
+glass agents [list|revoke ID|install CLIENT|log|verify|on|off|public on|off]  Agents from anywhere
 glass feedback "…"  Send feedback to the developers
 glass restart       Restart the background service (viewers reconnect by themselves)
 glass uninstall     Stop the background service and remove it from login items

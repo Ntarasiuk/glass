@@ -144,7 +144,31 @@ async fn curl_post_form(url: &str, form: &[(&str, &str)]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-fn urlencode(s: &str) -> String {
+pub(crate) fn urldecode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => {
+                match u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16) {
+                    Ok(v) => {
+                        out.push(v);
+                        i += 3;
+                        continue;
+                    }
+                    Err(_) => out.push(b'%'),
+                }
+            }
+            b'+' => out.push(b' '),
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+pub(crate) fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
@@ -388,9 +412,9 @@ fn check_flow(key: &ring::hmac::Key, cookie: &str, now: u64) -> Option<Flow> {
 pub struct Jwk {
     kty: String,
     #[serde(default)]
-    kid: Option<String>,
+    pub(crate) kid: Option<String>,
     #[serde(default)]
-    alg: Option<String>,
+    pub(crate) alg: Option<String>,
     // RSA
     #[serde(default)]
     n: Option<String>,
@@ -406,10 +430,10 @@ pub struct Jwk {
 }
 
 #[derive(Deserialize)]
-struct JwtHeader {
-    alg: String,
+pub(crate) struct JwtHeader {
+    pub(crate) alg: String,
     #[serde(default)]
-    kid: Option<String>,
+    pub(crate) kid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -425,7 +449,7 @@ pub struct Claims {
     pub email_verified: Option<serde_json::Value>,
 }
 
-fn header_of(jwt: &str) -> Result<JwtHeader> {
+pub(crate) fn header_of(jwt: &str) -> Result<JwtHeader> {
     let h = jwt.split('.').next().context("not a JWT")?;
     Ok(serde_json::from_slice(&b64url_decode(h).context("bad JWT header")?)?)
 }
@@ -466,7 +490,7 @@ pub fn verify_id_token(jwt: &str, keys: &[Jwk], issuer: &str, client_id: &str, n
     Ok(claims)
 }
 
-fn verify_sig(key: &Jwk, alg: &str, msg: &[u8], sig: &[u8]) -> bool {
+pub(crate) fn verify_sig(key: &Jwk, alg: &str, msg: &[u8], sig: &[u8]) -> bool {
     use ring::signature;
     match (alg, key.kty.as_str()) {
         ("RS256", "RSA") => {

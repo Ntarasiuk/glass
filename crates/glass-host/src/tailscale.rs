@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 /// `tailscale` on PATH, or the CLI inside the Mac App Store / standalone app bundle.
-fn cli() -> &'static str {
+pub(crate) fn cli() -> &'static str {
     const BUNDLED: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
     static CLI: std::sync::OnceLock<&str> = std::sync::OnceLock::new();
     CLI.get_or_init(|| {

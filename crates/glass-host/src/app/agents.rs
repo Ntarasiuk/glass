@@ -72,6 +72,9 @@ impl GlassApp {
             .map(|ask| {
                 let id = ask.id;
                 let help = ask.help;
+                if ask.consent {
+                    return consent_card(ask, &theme);
+                }
                 let note = self
                     .notes
                     .entry(id)
@@ -116,6 +119,30 @@ impl GlassApp {
                             )),
                     )
                     .into_any_element()
+            })
+            .collect();
+
+        let grants: Vec<AnyElement> = agent
+            .grants
+            .iter()
+            .map(|g| {
+                let id = g.id.clone();
+                let when = ago(crate::grants::now().saturating_sub(g.last_used));
+                ui::icon_row(
+                    I::Globe,
+                    theme.primary,
+                    format!("{} · {}", g.name, g.domain),
+                    format!("May {}; last used {when}", g.summary.trim_start_matches("see and use ").trim_start_matches("see ")),
+                    Button::new(SharedString::from(format!("revoke-{id}")))
+                        .small()
+                        .ghost()
+                        .label("Revoke")
+                        .on_click(move |_, window, cx| {
+                            let id = id.clone();
+                            act(window, cx, move || actions::revoke_grant(&id))
+                        }),
+                    cx,
+                )
             })
             .collect();
 
@@ -205,7 +232,62 @@ impl GlassApp {
         ui::page("AI agents", "Let Claude or another agent use this computer while you watch, pause or stop it.", cx)
             .when(!asks.is_empty(), |d| d.child(ui::section("Questions for you", asks, cx)))
             .child(ui::section("Connect an agent", clients, cx))
+            .when(!grants.is_empty(), |d| d.child(ui::section("Agents from other devices", grants, cx)))
             .child(ui::section("Control", vec![steer], cx))
             .child(how)
     }
+}
+
+fn ago(secs: u64) -> String {
+    match secs {
+        0..120 => "just now".into(),
+        120..7200 => format!("{} minutes ago", secs / 60),
+        7200..172_800 => format!("{} hours ago", secs / 3600),
+        _ => format!("{} days ago", secs / 86400),
+    }
+}
+
+/// An agent asking to be let in: the owner taps the number its sign-in page shows (one of
+/// three), so approving someone else's request by reflex doesn't work.
+fn consent_card(ask: &super::data::Ask, theme: &gpui_kit::component::Theme) -> AnyElement {
+    let id = ask.id;
+    // The request's id, kept in the text so it's unique, isn't for people.
+    let text = ask.text.rsplit_once(" [").map_or(ask.text.as_str(), |(t, _)| t).to_string();
+    v_flex()
+        .p_4()
+        .gap_3()
+        .child(
+            h_flex()
+                .gap_3()
+                .child(ui::tile(I::Globe, theme.primary))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("An agent asks to use this computer"))
+                        .child(div().text_sm().text_color(theme.muted_foreground).child(text)),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .children(ask.choices.iter().map(|n| {
+                    let n2 = n.clone();
+                    Button::new(SharedString::from(format!("pick-{id}-{n}")))
+                        .label(n.clone())
+                        .on_click(move |_, window, cx| {
+                            let n = n2.clone();
+                            act(window, cx, move || actions::answer(id, true, &n))
+                        })
+                }))
+                .child(div().flex_1())
+                .child(
+                    Button::new(("deny", id))
+                        .small()
+                        .ghost()
+                        .label("Deny")
+                        .on_click(move |_, window, cx| act(window, cx, move || actions::answer(id, false, ""))),
+                ),
+        )
+        .into_any_element()
 }

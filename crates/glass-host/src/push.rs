@@ -470,13 +470,19 @@ pub fn connect_request(id: u64, who: &str) {
     });
 }
 
-pub fn agent_ask(id: u64, help: bool, text: &str) {
+pub fn agent_ask(id: u64, kind: &str, text: &str) {
+    let title = match kind {
+        "help" => "An agent needs your help",
+        "consent" => "An agent asks to use this computer",
+        _ => "An agent asks before it acts",
+    };
     send(Note {
         kind: Kind::Ask,
-        title: if help { "An agent needs your help" } else { "An agent asks before it acts" }.into(),
-        body: text.into(),
+        title: title.into(),
+        body: if kind == "consent" { format!("{text} Open Glass and tap the number its sign-in page shows.") } else { text.into() },
         tag: format!("agent-{id}"),
-        action: (!help).then_some(("agent", id, "Allow", "Don't")),
+        // A consent needs the number from the sign-in page, so it's answered in Glass.
+        action: (kind == "confirm").then_some(("agent", id, "Allow", "Don't")),
     });
 }
 
