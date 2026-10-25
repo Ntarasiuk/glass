@@ -53,7 +53,36 @@ pub fn routes() -> axum::Router {
         .route("/mcp", post(mcp).get(mcp_get).delete(mcp_get))
         // Registrations, forms and MCP calls are small: nobody gets to store or parse more.
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
+        .layer(axum::middleware::from_fn(cors_and_no_store))
         .layer(axum::middleware::map_request(fill_host))
+}
+
+/// Browser-based clients (MCP Inspector, web apps) may read the metadata, register and get
+/// tokens: those endpoints take no cookies, so any origin is fine. `/mcp` answers browsers
+/// only on this device's own pages (loopback). Nothing here is ever cached.
+async fn cors_and_no_store(req: axum::extract::Request, next: axum::middleware::Next) -> Response<Body> {
+    let path = req.uri().path().to_string();
+    let origin = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()).map(String::from);
+    let open = path.starts_with("/.well-known/") || matches!(path.as_str(), "/oauth/register" | "/oauth/token" | "/oauth/revoke");
+    let local_origin = origin.as_deref().and_then(split_url).is_some_and(|u| loopback(&u.host));
+    let allow = if open { Some("*".to_string()) } else if path == "/mcp" && local_origin { origin.clone() } else { None };
+    let mut r = if req.method() == axum::http::Method::OPTIONS && allow.is_some() {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(req).await
+    };
+    let h = r.headers_mut();
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Some(a) = allow.and_then(|a| HeaderValue::from_str(&a).ok()) {
+        h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, a);
+        h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, OPTIONS"));
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("authorization, content-type, mcp-protocol-version, mcp-session-id, last-event-id"),
+        );
+        h.insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, HeaderValue::from_static("www-authenticate, mcp-session-id"));
+    }
+    r
 }
 
 /// HTTP/2 names the host in the URI (`:authority`), not a Host header: make it one, so
@@ -78,14 +107,23 @@ pub const FUNNEL_PORT: u16 = 8443;
 /// Serves just the agent routes on 127.0.0.1, so publishing them to the internet with
 /// Funnel exposes nothing else of Glass (not the viewer, the console or the files).
 pub fn serve_public() {
-    if crate::testmode::enabled() || crate::support::is_host() {
+    // Tests choose their own port (and only start it when they ask).
+    let port = if crate::testmode::enabled() {
+        match std::env::var("GLASS_TEST_PUBLIC_PORT").ok().and_then(|p| p.parse().ok()) {
+            Some(p) => p,
+            None => return,
+        }
+    } else {
+        PUBLIC_PORT
+    };
+    if crate::support::is_host() {
         return;
     }
     tokio::spawn(async move {
-        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", PUBLIC_PORT)).await {
+        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
             Ok(l) => l,
             Err(e) => {
-                warn!("agents: can't listen on 127.0.0.1:{PUBLIC_PORT} ({e}); agents from anywhere are unavailable");
+                warn!("agents: can't listen on 127.0.0.1:{port} ({e}); agents from anywhere are unavailable");
                 return;
             }
         };
@@ -100,6 +138,12 @@ pub fn serve_public() {
 /// Funnel (or stops). Returns the URL agents use. Tailscale may first need Funnel allowed
 /// for this machine: its link is passed on, and the result is checked, not assumed.
 pub fn publish(on: bool) -> anyhow::Result<Option<String>> {
+    // Known before anything changes, so a failure here leaves nothing published.
+    let host = crate::status::read()
+        .and_then(|s| s.url)
+        .and_then(|u| split_url(&u).map(|p| p.host))
+        .ok_or_else(|| anyhow::anyhow!("Glass isn't running, or has no address yet"));
+    let host = if on { Some(host?) } else { host.ok() };
     let cli = crate::tailscale::cli();
     let args: Vec<String> = if on {
         vec!["funnel".into(), "--bg".into(), format!("--https={FUNNEL_PORT}"), format!("http://127.0.0.1:{PUBLIC_PORT}")]
@@ -123,22 +167,21 @@ pub fn publish(on: bool) -> anyhow::Result<Option<String>> {
     let enable_link = said.split_whitespace().find(|w| w.starts_with("https://login.tailscale.com/")).map(String::from);
     let funneled = funnel_on();
     if on != funneled {
-        grants::update(|s| s.public = funneled)?;
+        let _ = grants::update(|s| s.public = funneled);
         match (on, enable_link) {
             (true, Some(link)) => anyhow::bail!("Funnel isn't allowed for this machine yet. Allow it here, then run this again:\n  {link}"),
             (true, None) => anyhow::bail!("Tailscale didn't publish it:\n{}", said.trim()),
             (false, _) => anyhow::bail!("Tailscale still publishes it:\n{}", said.trim()),
         }
     }
-    grants::update(|s| s.public = on)?;
-    if !on {
-        return Ok(None);
+    if let Err(e) = grants::update(|s| s.public = on) {
+        if on {
+            // Not recorded as published: don't leave it published.
+            let _ = std::process::Command::new(cli).args(["funnel", &format!("--https={FUNNEL_PORT}"), "off"]).output();
+        }
+        return Err(e);
     }
-    let host = crate::status::read()
-        .and_then(|s| s.url)
-        .and_then(|u| split_url(&u).map(|p| p.host))
-        .ok_or_else(|| anyhow::anyhow!("Glass isn't running, or has no address yet"))?;
-    Ok(Some(format!("https://{host}:{FUNNEL_PORT}/mcp")))
+    Ok(host.filter(|_| on).map(|host| format!("https://{host}:{FUNNEL_PORT}/mcp")))
 }
 
 /// Funnel publishes the agents' port, per `tailscale funnel status`.
@@ -212,6 +255,7 @@ async fn server_metadata(headers: HeaderMap) -> Response<Body> {
         "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post", "private_key_jwt"],
         "token_endpoint_auth_signing_alg_values_supported": ["ES256", "RS256"],
         "revocation_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post", "private_key_jwt"],
+        "revocation_endpoint_auth_signing_alg_values_supported": ["ES256", "RS256"],
         "client_id_metadata_document_supported": true,
         "authorization_response_iss_parameter_supported": true,
         "scopes_supported": grants::SCOPES,
@@ -271,7 +315,22 @@ fn loopback(host: &str) -> bool {
 /// native app, RFC 8252).
 fn redirect_allowed(u: &str) -> bool {
     !u.contains('#')
-        && split_url(u).is_some_and(|p| p.scheme == "https" || (p.scheme == "http" && loopback(&p.host)))
+        && (split_url(u).is_some_and(|p| p.scheme == "https" || (p.scheme == "http" && loopback(&p.host)))
+            || private_scheme(u).is_some())
+}
+
+/// A native app's own scheme, reverse-DNS style (`com.example.app:/callback`, RFC 8252
+/// section 7.1), which only that app receives.
+fn private_scheme(u: &str) -> Option<&str> {
+    let (scheme, rest) = u.split_once(':')?;
+    let ok = scheme.contains('.')
+        && scheme.len() <= 100
+        && scheme.bytes().all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b))
+        && scheme.as_bytes()[0].is_ascii_alphabetic()
+        && rest.starts_with('/')
+        && !rest.starts_with("//")
+        && !u.contains(char::is_whitespace);
+    ok.then_some(scheme)
 }
 
 /// The redirect URI asked for is one the client registered: exactly, or, for a loopback
@@ -308,10 +367,14 @@ fn loopback_key(u: &str) -> Option<String> {
 }
 
 /// Fetches a small public JSON document (a client's metadata or keys). Refuses private and
-/// tailnet addresses, so a client can't make this computer reach into its own network.
-async fn fetch_json(url: &str) -> Result<Value, String> {
+/// tailnet addresses, so a client can't make this computer reach into its own network: the
+/// address checked is pinned for the request itself (curl --resolve), so a second DNS
+/// answer can't point elsewhere. Errors stay vague for the asker; details go to the log.
+/// `cache`: keep it for a while (key sets; client documents are cached once they check out).
+async fn fetch_json(url: &str, cache: bool) -> Result<Value, String> {
     static CACHE: Mutex<Option<HashMap<String, (Instant, Value)>>> = Mutex::new(None);
-    if let Some((at, v)) = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(url)
+    if cache
+        && let Some((at, v)) = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(url)
         && at.elapsed() < FETCH_TTL
     {
         return Ok(v.clone());
@@ -319,38 +382,62 @@ async fn fetch_json(url: &str) -> Result<Value, String> {
     if !rate_ok("fetch".into(), 30) {
         return Err("too many lookups right now; try again in a minute".into());
     }
+    let vague = |why: String| {
+        warn!("agents: fetching {url}: {why}");
+        "couldn't fetch it".to_string()
+    };
     let parts = split_url(url).ok_or("bad URL")?;
     let test = crate::testmode::enabled();
     if parts.scheme != "https" && !(test && parts.scheme == "http" && loopback(&parts.host)) {
         return Err("only https URLs".into());
     }
-    let owned = url.to_string();
-    let value = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+    let port = url
+        .split("://")
+        .nth(1)
+        .and_then(|r| r.split(['/', '?']).next())
+        .and_then(|a| a.rsplit_once(':').filter(|(h, _)| !h.contains(']') || h.ends_with(']')).map(|(_, p)| p.to_string()))
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(if parts.scheme == "https" { 443 } else { 80 });
+    let host = parts.host.clone();
+    let addr = tokio::task::spawn_blocking(move || {
         use std::net::ToSocketAddrs;
-        let port = if parts.scheme == "https" { 443 } else { 80 };
-        let addrs: Vec<SocketAddr> = (parts.host.as_str(), port).to_socket_addrs().map_err(|e| e.to_string())?.collect();
-        if addrs.is_empty() || (!test && addrs.iter().any(|a| !public(a.ip()))) {
-            return Err("that address isn't on the public internet".into());
-        }
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(5)))
-            .max_redirects(0)
-            .build()
-            .into();
-        let mut resp = agent.get(&owned).call().map_err(|e| e.to_string())?;
-        let body = resp.body_mut().with_config().limit(FETCH_MAX).read_to_vec().map_err(|e| e.to_string())?;
-        serde_json::from_slice(&body).map_err(|e| e.to_string())
+        (host.as_str(), port).to_socket_addrs().map(|a| a.collect::<Vec<SocketAddr>>())
     })
     .await
-    .map_err(|e| e.to_string())??;
-    let mut cache = CACHE.lock().unwrap();
+    .map_err(|e| vague(e.to_string()))?
+    .map_err(|e| vague(e.to_string()))?;
+    if addr.is_empty() || (!test && addr.iter().any(|a| !public(a.ip()))) {
+        return Err(vague("not a public address".into()));
+    }
+    let ip = match addr[0].ip() {
+        IpAddr::V6(v6) => format!("[{v6}]"),
+        v4 => v4.to_string(),
+    };
+    let out = tokio::process::Command::new("curl")
+        .args(["-sS", "--fail", "--max-time", "5", "--max-redirs", "0", "--max-filesize", &FETCH_MAX.to_string()])
+        .args(["--proto", if test { "=https,http" } else { "=https" }])
+        .args(["--resolve", &format!("{}:{port}:{ip}", parts.host), url])
+        .output()
+        .await
+        .map_err(|e| vague(e.to_string()))?;
+    if !out.status.success() || out.stdout.len() as u64 > FETCH_MAX {
+        return Err(vague(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+    }
+    let value: Value = serde_json::from_slice(&out.stdout).map_err(|e| vague(e.to_string()))?;
+    if cache {
+        remember(&CACHE, url, &value);
+    }
+    Ok(value)
+}
+
+fn remember(cache: &Mutex<Option<HashMap<String, (Instant, Value)>>>, url: &str, value: &Value) {
+    let mut cache = cache.lock().unwrap();
     let cache = cache.get_or_insert_with(HashMap::new);
     cache.retain(|_, (at, _)| at.elapsed() < FETCH_TTL);
     if cache.len() >= 64 {
         cache.clear();
     }
     cache.insert(url.to_string(), (Instant::now(), value.clone()));
-    Ok(value)
 }
 
 fn public(ip: IpAddr) -> bool {
@@ -396,8 +483,22 @@ struct ClientInfo {
 
 async fn client(id: &str) -> Result<ClientInfo, String> {
     if id.starts_with("https://") || (crate::testmode::enabled() && id.starts_with("http://127.0.0.1")) {
-        // A client ID metadata document: the URL is the client's identity.
-        let doc = fetch_json(id).await.map_err(|e| format!("couldn't read the client's metadata: {e}"))?;
+        // A client ID metadata document: the URL is the client's identity. It must be an https
+        // URL with a path, and no fragment, credentials or dot segments.
+        let shape_ok = !id.contains('#')
+            && !id.contains("/./")
+            && !id.contains("/../")
+            && split_url(id).is_some()
+            && id.split("://").nth(1).is_some_and(|r| r.contains('/') && !r.ends_with('/'));
+        if !shape_ok {
+            return Err("that client_id isn't a valid metadata document URL".into());
+        }
+        static DOCS: Mutex<Option<HashMap<String, (Instant, Value)>>> = Mutex::new(None);
+        let cached = DOCS.lock().unwrap().get_or_insert_with(HashMap::new).get(id).filter(|(at, _)| at.elapsed() < FETCH_TTL).map(|(_, v)| v.clone());
+        let doc = match cached {
+            Some(d) => d,
+            None => fetch_json(id, false).await.map_err(|e| format!("couldn't read the client's metadata: {e}"))?,
+        };
         if doc["client_id"].as_str() != Some(id) {
             return Err("the client's metadata names another client_id".into());
         }
@@ -412,6 +513,11 @@ async fn client(id: &str) -> Result<ClientInfo, String> {
         if !matches!(auth_method.as_str(), "none" | "private_key_jwt") {
             return Err("a metadata-document client authenticates with none or private_key_jwt".into());
         }
+        if auth_method == "private_key_jwt" && doc["jwks_uri"].as_str().is_none() && !doc["jwks"]["keys"].is_array() {
+            return Err("the client's metadata has no keys".into());
+        }
+        // Checked out: worth keeping for a while.
+        remember(&DOCS, id, &doc);
         let domain = split_url(id).map(|p| p.host).unwrap_or_default();
         // Installed for unattended use (client credentials): kept in the store by its URL.
         let stored = grants::load().clients.into_iter().find(|c| c.id == id);
@@ -450,6 +556,9 @@ fn clean_name(n: &str) -> String {
 }
 
 fn domain_of(redirect_uris: &[String]) -> String {
+    if let Some(scheme) = redirect_uris.first().and_then(|r| private_scheme(r)) {
+        return format!("the app {scheme} on the requesting device");
+    }
     match redirect_uris.first().and_then(|r| split_url(r)) {
         Some(p) if loopback(&p.host) => "an app on the requesting device".into(),
         Some(p) => p.host,
@@ -502,6 +611,7 @@ fn validate_registration(body: &Value) -> Result<(Vec<String>, String, Vec<Strin
 }
 
 fn client_json(c: &grants::Client, iss: &str, secret: Option<&str>, registration: Option<&str>) -> Value {
+    debug_assert!(registration.is_some(), "RFC 7592: every response carries the registration access token");
     let mut v = json!({
         "client_id": c.id,
         "client_id_issued_at": c.created,
@@ -595,22 +705,42 @@ fn registered_client(id: &str, headers: &HeaderMap) -> Option<grants::Client> {
         .find(|c| c.id == id && crate::control::token_matches(&c.registration_hash, &grants::hash(&given)))
 }
 
+fn bad_registration_token() -> Response<Body> {
+    let mut r = oauth_error(StatusCode::UNAUTHORIZED, "invalid_token", "unknown client or registration token");
+    r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer error=\"invalid_token\""));
+    r
+}
+
+/// A fresh registration access token for a client (RFC 7592 lets it rotate on every call,
+/// and requires one in every response).
+fn rotate_registration(id: &str) -> Result<String, Response<Body>> {
+    let token = grants::random("glreg_");
+    let h = grants::hash(&token);
+    match grants::update(|s| s.clients.iter_mut().find(|c| c.id == id).map(|c| c.registration_hash = h.clone())) {
+        Ok(Some(())) => Ok(token),
+        Ok(None) => Err(bad_registration_token()),
+        Err(e) => Err(oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", &e.to_string())),
+    }
+}
+
 async fn client_read(headers: HeaderMap, Path(id): Path<String>) -> Response<Body> {
     let Some(iss) = issuer(&headers) else { return misdirected() };
-    match registered_client(&id, &headers) {
-        Some(c) => Json(client_json(&c, &iss, None, None)).into_response(),
-        None => oauth_error(StatusCode::UNAUTHORIZED, "invalid_token", "unknown client or registration token"),
+    let Some(c) = registered_client(&id, &headers) else { return bad_registration_token() };
+    match rotate_registration(&id) {
+        Ok(token) => Json(client_json(&c, &iss, None, Some(&token))).into_response(),
+        Err(r) => r,
     }
 }
 
 async fn client_update(headers: HeaderMap, Path(id): Path<String>, body: axum::body::Bytes) -> Response<Body> {
     let Some(iss) = issuer(&headers) else { return misdirected() };
-    let Some(mut c) = registered_client(&id, &headers) else {
-        return oauth_error(StatusCode::UNAUTHORIZED, "invalid_token", "unknown client or registration token");
-    };
+    let Some(c) = registered_client(&id, &headers) else { return bad_registration_token() };
     let Ok(body) = serde_json::from_slice::<Value>(&body) else {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_client_metadata", "not JSON");
     };
+    if body["client_id"].as_str().is_some_and(|b| b != id) {
+        return oauth_error(StatusCode::BAD_REQUEST, "invalid_client_metadata", "client_id doesn't match");
+    }
     let (redirect_uris, method, grant_types) = match validate_registration(&body) {
         Ok(v) => v,
         Err(r) => return r,
@@ -618,34 +748,37 @@ async fn client_update(headers: HeaderMap, Path(id): Path<String>, body: axum::b
     if method != c.auth_method {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_client_metadata", "the authentication method can't change");
     }
-    c.redirect_uris = redirect_uris;
-    c.grant_types = grant_types;
-    if let Some(n) = body["client_name"].as_str().map(clean_name).filter(|n| !n.is_empty()) {
-        c.name = n;
-    }
-    c.logo_uri = body["logo_uri"].as_str().filter(|l| l.starts_with("https://")).map(String::from);
-    if let Some(j) = body["jwks_uri"].as_str() {
-        c.jwks_uri = Some(j.to_string());
-    }
-    if let Some(j) = body.get("jwks") {
-        c.jwks = Some(j.clone());
-    }
-    let saved = c.clone();
-    if let Err(e) = grants::update(|s| {
-        if let Some(x) = s.clients.iter_mut().find(|x| x.id == saved.id) {
-            *x = saved.clone();
+    // Changed on the record as it is now (not a copy read earlier), metadata only.
+    let token = grants::random("glreg_");
+    let updated = grants::update(|s| {
+        let x = s.clients.iter_mut().find(|x| x.id == id)?;
+        x.redirect_uris = redirect_uris;
+        x.grant_types = grant_types;
+        if let Some(n) = body["client_name"].as_str().map(clean_name).filter(|n| !n.is_empty()) {
+            x.name = n;
         }
-    }) {
-        return oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", &e.to_string());
+        x.logo_uri = body["logo_uri"].as_str().filter(|l| l.starts_with("https://")).map(String::from);
+        if let Some(j) = body["jwks_uri"].as_str() {
+            x.jwks_uri = Some(j.to_string());
+        }
+        if let Some(j) = body.get("jwks") {
+            x.jwks = Some(j.clone());
+        }
+        x.registration_hash = grants::hash(&token);
+        Some(x.clone())
+    });
+    match updated {
+        Ok(Some(x)) => Json(client_json(&x, &iss, None, Some(&token))).into_response(),
+        Ok(None) => bad_registration_token(),
+        Err(e) => oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", &e.to_string()),
     }
-    Json(client_json(&c, &iss, None, None)).into_response()
 }
 
 async fn client_delete(headers: HeaderMap, Path(id): Path<String>) -> Response<Body> {
     if registered_client(&id, &headers).is_none() {
-        return oauth_error(StatusCode::UNAUTHORIZED, "invalid_token", "unknown client or registration token");
+        return bad_registration_token();
     }
-    let _ = grants::update(|s| {
+    let done = grants::update(|s| {
         s.clients.retain(|c| c.id != id);
         for g in s.grants.iter_mut().filter(|g| g.client_id == id) {
             g.revoked = true;
@@ -653,7 +786,10 @@ async fn client_delete(headers: HeaderMap, Path(id): Path<String>) -> Response<B
             g.access.clear();
         }
     });
-    StatusCode::NO_CONTENT.into_response()
+    match done {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", &e.to_string()),
+    }
 }
 
 /// At most `per_minute` of `what` a minute, for everyone together.
@@ -706,6 +842,8 @@ struct Code {
     expires: u64,
     /// Tried once already (right or wrong): never again.
     used: bool,
+    /// Tried again after that: whatever grant it made is revoked.
+    replayed: bool,
     /// The grant made with it: a second use revokes it (the code was stolen).
     grant: Option<String>,
 }
@@ -742,24 +880,32 @@ fn codes<R>(f: impl FnOnce(&mut HashMap<String, Code>) -> R) -> R {
 
 /// What the agent asked for: the scopes we know (both when it names none, or `*`), and
 /// apps it limits itself to (RFC 9396 `authorization_details`, type `glass_computer`).
-fn requested(q: &HashMap<String, String>) -> (Vec<String>, Option<Vec<String>>) {
+fn requested(q: &HashMap<String, String>) -> Result<(Vec<String>, Option<Vec<String>>), &'static str> {
     let asked: Vec<&str> = q.get("scope").map(|s| s.split_whitespace().collect()).unwrap_or_default();
     let mut scopes: Vec<String> = grants::SCOPES.iter().filter(|s| asked.contains(s)).map(|s| s.to_string()).collect();
     if scopes.is_empty() {
         scopes = grants::SCOPES.iter().map(|s| s.to_string()).collect();
     }
-    let apps = q
-        .get("authorization_details")
-        .and_then(|d| serde_json::from_str::<Value>(d).ok())
-        .and_then(|d| {
-            d.as_array()?
-                .iter()
-                .find(|x| x["type"] == "glass_computer")
-                .and_then(|x| x["apps"].as_array().cloned())
-        })
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).take(50).collect::<Vec<_>>())
-        .filter(|a| !a.is_empty());
-    (scopes, apps)
+    // RFC 9396: anything unclear is refused, never read as "no limit".
+    let Some(raw) = q.get("authorization_details") else { return Ok((scopes, None)) };
+    let details: Value = serde_json::from_str(raw).map_err(|_| "invalid_authorization_details")?;
+    let list = details.as_array().filter(|l| l.len() == 1).ok_or("invalid_authorization_details")?;
+    let d = list[0].as_object().ok_or("invalid_authorization_details")?;
+    if d.get("type").and_then(Value::as_str) != Some("glass_computer") || d.keys().any(|k| !matches!(k.as_str(), "type" | "apps")) {
+        return Err("invalid_authorization_details");
+    }
+    let apps = match d.get("apps") {
+        None => None,
+        Some(Value::Array(a)) if !a.is_empty() && a.len() <= 50 => {
+            let apps: Vec<String> = a.iter().filter_map(|v| v.as_str().filter(|s| !s.is_empty() && s.len() <= 200).map(String::from)).collect();
+            if apps.len() != a.len() {
+                return Err("invalid_authorization_details");
+            }
+            Some(apps)
+        }
+        Some(_) => return Err("invalid_authorization_details"),
+    };
+    Ok((scopes, apps))
 }
 
 /// Error back to the client's redirect URI (only once we know it's the client's).
@@ -801,6 +947,9 @@ async fn authorize(peer: Peer, headers: HeaderMap, Query(q): Query<HashMap<Strin
     if !owner_here && (!rate_ok(format!("authorize:{client_id}"), 3) || !rate_ok("authorize".into(), 20)) {
         return page(StatusCode::TOO_MANY_REQUESTS, "Try again soon", "<p>Too many sign-in requests right now. Try again in a minute.</p>", None);
     }
+    if blocked(client_id) {
+        return page(StatusCode::TOO_MANY_REQUESTS, "Try again later", "<p>This agent's last request was denied. It can ask again in a few minutes.</p>", None);
+    }
     let mut c = match client(client_id).await {
         Ok(c) => c,
         Err(e) => return page(StatusCode::BAD_REQUEST, "Can't sign in", &format!("<p>{}</p>", esc(&e)), None),
@@ -832,7 +981,10 @@ async fn authorize(peer: Peer, headers: HeaderMap, Query(q): Query<HashMap<Strin
     {
         return redirect_error(&redirect_uri, "invalid_target", state.as_deref(), &iss);
     }
-    let (scopes, apps) = requested(&q);
+    let (scopes, apps) = match requested(&q) {
+        Ok(r) => r,
+        Err(e) => return redirect_error(&redirect_uri, e, state.as_deref(), &iss),
+    };
     if apps.is_some() && !grants::app_guard_available() {
         // Glass can't tell apps apart here, so a limit to some apps couldn't be kept.
         return redirect_error(&redirect_uri, "invalid_request", state.as_deref(), &iss);
@@ -883,7 +1035,7 @@ async fn authorize(peer: Peer, headers: HeaderMap, Query(q): Query<HashMap<Strin
     if !owner_here {
         // Ask the owner in Glass: they pick the number this page shows.
         let mut choices = vec![number.clone()];
-        while choices.len() < 3 {
+        while choices.len() < 4 {
             let n = format!("{:02}", 10 + random_below(90));
             if !choices.contains(&n) {
                 choices.push(n);
@@ -891,13 +1043,15 @@ async fn authorize(peer: Peer, headers: HeaderMap, Query(q): Query<HashMap<Strin
         }
         shuffle(&mut choices);
         let id2 = id.clone();
+        let client_id2 = c.id.clone();
         let text = consent.ask_text.clone();
         tokio::spawn(async move {
             let answer = crate::computer::ask_owner("consent", &text, Some(choices), CONSENT_WAIT).await;
             let decision = match answer {
                 Some(a) if a.ok && a.note.as_deref() == Some(number.as_str()) => Decision::Approved("one of your devices".into()),
                 Some(a) if a.ok => {
-                    warn!("agents: the wrong number was picked for {id2}; denied");
+                    warn!("agents: the wrong number was picked for {id2}; denied, and the agent waits 10 minutes");
+                    block(&client_id2);
                     crate::push::activity("An agent's request was denied", "The number picked didn't match its sign-in page.", "agent-consent");
                     Decision::Denied
                 }
@@ -913,12 +1067,26 @@ async fn authorize(peer: Peer, headers: HeaderMap, Query(q): Query<HashMap<Strin
         });
     }
     let body = consent_page(&consent, &id, owner_here);
-    let mut r = page(StatusCode::OK, "Allow this agent?", &body, Some(&id));
+    let mut r = consent_response(&body, &id, &consent.redirect_uri);
     r.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&format!("glass_consent_{id}={cookie}; Path=/oauth/authorize; HttpOnly; Secure; SameSite=Strict; Max-Age=900")).unwrap(),
     );
     r
+}
+
+static BLOCKED: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+
+/// After a wrong number, an agent waits 10 minutes before it can ask again (no guessing).
+fn block(client_id: &str) {
+    BLOCKED.lock().unwrap().get_or_insert_with(HashMap::new).insert(client_id.to_string(), Instant::now());
+}
+
+fn blocked(client_id: &str) -> bool {
+    let mut b = BLOCKED.lock().unwrap();
+    let b = b.get_or_insert_with(HashMap::new);
+    b.retain(|_, at| at.elapsed() < Duration::from_secs(600));
+    b.contains_key(client_id)
 }
 
 fn what_for(scopes: &[String], apps: &Option<Vec<String>>) -> String {
@@ -971,7 +1139,7 @@ fn finish(id: &str, c: &Consent) -> Option<String> {
             consents(|m| m.remove(id));
             crate::computer::withdraw(&c.ask_text);
             let code = grants::random("glcode_");
-            codes(|m| m.insert(grants::hash(&code), Code { consent: c.clone(), expires: grants::now() + CODE_SECS, used: false, grant: None }));
+            codes(|m| m.insert(grants::hash(&code), Code { consent: c.clone(), expires: grants::now() + CODE_SECS, used: false, replayed: false, grant: None }));
             Some(with_query(&c.redirect_uri, &[("code", &code), ("state", c.state.as_deref().unwrap_or("")), ("iss", &c.issuer)]))
         }
     }
@@ -1033,8 +1201,15 @@ async fn wait(headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> R
 // ---- Tokens ----
 
 /// The client a token request comes from, authenticated as it registered.
-async fn authenticate(headers: &HeaderMap, f: &HashMap<String, String>, endpoint: &str, iss: &str) -> Result<ClientInfo, Response<Body>> {
-    let invalid = |d: &str| oauth_error(StatusCode::UNAUTHORIZED, "invalid_client", d);
+async fn authenticate(headers: &HeaderMap, f: &HashMap<String, String>, iss: &str) -> Result<ClientInfo, Response<Body>> {
+    let used_basic = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("Basic "));
+    let invalid = |d: &str| {
+        let mut r = oauth_error(StatusCode::UNAUTHORIZED, "invalid_client", d);
+        if used_basic {
+            r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Basic realm=\"glass\""));
+        }
+        r
+    };
     let basic = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -1071,7 +1246,9 @@ async fn authenticate(headers: &HeaderMap, f: &HashMap<String, String>, endpoint
         }
         "private_key_jwt" => {
             let a = assertion.ok_or_else(|| invalid("client_assertion missing"))?;
-            verify_assertion(a, &c, &[endpoint.to_string(), iss.to_string()]).await.map_err(|e| invalid(&e))?;
+            // Any of this server's endpoints is a fine audience, whichever is being called.
+            let audiences = [iss.to_string(), format!("{iss}/oauth/token"), format!("{iss}/oauth/revoke")];
+            verify_assertion(a, &c, &audiences).await.map_err(|e| invalid(&e))?;
         }
         _ => return Err(invalid("unsupported authentication")),
     }
@@ -1082,21 +1259,27 @@ async fn authenticate(headers: &HeaderMap, f: &HashMap<String, String>, endpoint
 /// unexpired, and never seen before.
 async fn verify_assertion(jwt: &str, c: &ClientInfo, audiences: &[String]) -> Result<(), String> {
     static SEEN: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
-    let keys: Vec<crate::oidc::Jwk> = match (&c.jwks, &c.jwks_uri) {
-        (Some(j), _) => serde_json::from_value(j["keys"].clone()).map_err(|e| e.to_string())?,
-        (None, Some(uri)) => serde_json::from_value(fetch_json(uri).await?["keys"].clone()).map_err(|e| e.to_string())?,
-        (None, None) => return Err("the client has no keys".into()),
-    };
     let parts: Vec<&str> = jwt.split('.').collect();
     let [h, p, sig] = parts[..] else { return Err("not a JWT".into()) };
     let header = crate::oidc::header_of(jwt).map_err(|e| e.to_string())?;
     let sig = crate::remote::b64url_decode(sig).ok_or("bad signature")?;
     let signed = format!("{h}.{p}");
-    let good = keys
-        .iter()
-        .filter(|k| header.kid.is_none() || k.kid == header.kid)
-        .filter(|k| k.alg.as_deref().is_none_or(|a| a == header.alg))
-        .any(|k| crate::oidc::verify_sig(k, &header.alg, signed.as_bytes(), &sig));
+    let check = |keys: &[crate::oidc::Jwk]| {
+        keys.iter()
+            .filter(|k| header.kid.is_none() || k.kid == header.kid)
+            .filter(|k| k.alg.as_deref().is_none_or(|a| a == header.alg))
+            .any(|k| crate::oidc::verify_sig(k, &header.alg, signed.as_bytes(), &sig))
+    };
+    let parse = |v: &Value| serde_json::from_value::<Vec<crate::oidc::Jwk>>(v["keys"].clone()).map_err(|e| e.to_string());
+    let good = match (&c.jwks, &c.jwks_uri) {
+        (Some(j), _) => check(&parse(j)?),
+        (None, Some(uri)) => {
+            // Keys rotate: a signature no cached key checks out gets one fresh look.
+            check(&parse(&fetch_json(uri, true).await?)?)
+                || (rate_ok(format!("jwks:{uri}"), 1) && check(&parse(&fetch_json(uri, false).await?)?))
+        }
+        (None, None) => return Err("the client has no keys".into()),
+    };
     if !good {
         return Err("bad client assertion signature".into());
     }
@@ -1134,6 +1317,9 @@ fn token_response(g: &Grant, issued: grants::Issued) -> Response<Body> {
         "expires_in": grants::ACCESS_SECS,
         "scope": g.scopes.join(" "),
     });
+    if let Some(apps) = &g.apps {
+        v["authorization_details"] = json!([{ "type": "glass_computer", "apps": apps }]);
+    }
     if let Some(r) = issued.refresh {
         v["refresh_token"] = json!(r);
     }
@@ -1148,10 +1334,10 @@ async fn token(headers: HeaderMap, axum::Form(f): axum::Form<HashMap<String, Str
     }
     let Some(iss) = issuer(&headers) else { return misdirected() };
     if !grants::load().enabled {
-        return oauth_error(StatusCode::BAD_REQUEST, "access_denied", "agents are turned off on this computer");
+        let error = if f.get("grant_type").map(String::as_str) == Some("client_credentials") { "unauthorized_client" } else { "invalid_grant" };
+        return oauth_error(StatusCode::BAD_REQUEST, error, "agents are turned off on this computer");
     }
-    let endpoint = format!("{iss}/oauth/token");
-    let c = match authenticate(&headers, &f, &endpoint, &iss).await {
+    let c = match authenticate(&headers, &f, &iss).await {
         Ok(c) => c,
         Err(r) => return r,
     };
@@ -1165,14 +1351,17 @@ async fn token(headers: HeaderMap, axum::Form(f): axum::Form<HashMap<String, Str
             let found = codes(|m| {
                 let entry = m.get_mut(&h)?;
                 let out = entry.clone();
-                // Spent on the first try, right or wrong.
+                // Spent on the first try, right or wrong; a second try marks it replayed.
+                if entry.used {
+                    entry.replayed = true;
+                }
                 entry.used = true;
                 Some(out)
             });
             let Some(found) = found else { return bad_grant("unknown or expired code") };
             if found.used {
                 if let Some(g) = &found.grant {
-                    let _ = grants::revoke(Some(g));
+                    let _ = grants::revoke_because(Some(g), "its sign-in code was used twice");
                     warn!("agents: a code was used twice; its grant {g} is revoked");
                 }
                 return bad_grant("code already used");
@@ -1212,7 +1401,15 @@ async fn token(headers: HeaderMap, axum::Form(f): axum::Form<HashMap<String, Str
             });
             match made {
                 Ok((g, issued)) => {
-                    codes(|m| m.get_mut(&h).map(|e| e.grant = Some(g.id.clone())));
+                    // A replay that came in while this grant was being made: it goes too.
+                    let replayed = codes(|m| m.get_mut(&h).map(|e| {
+                        e.grant = Some(g.id.clone());
+                        e.replayed
+                    }));
+                    if replayed == Some(true) {
+                        let _ = grants::revoke_because(Some(&g.id), "its sign-in code was used twice");
+                        return bad_grant("code already used");
+                    }
                     info!("agents: {} ({}) can now {} (approved by {by})", g.client_name, g.domain, g.summary());
                     crate::push::activity(
                         &format!("{} can use this computer", g.client_name),
@@ -1309,12 +1506,15 @@ fn install_push_due() -> bool {
 /// RFC 7009. Always 200 (the token's validity isn't revealed).
 async fn revoke(headers: HeaderMap, axum::Form(f): axum::Form<HashMap<String, String>>) -> Response<Body> {
     let Some(iss) = issuer(&headers) else { return misdirected() };
-    let endpoint = format!("{iss}/oauth/revoke");
-    if let Err(r) = authenticate(&headers, &f, &endpoint, &iss).await {
-        return r;
-    }
-    if let Some(t) = f.get("token") {
-        let _ = grants::revoke_token(t);
+    let c = match authenticate(&headers, &f, &iss).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    // Only the client's own tokens; anything else is quietly ignored (RFC 7009).
+    if let Some(t) = f.get("token")
+        && let Err(e) = grants::revoke_token(t, &c.id)
+    {
+        return oauth_error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable", &e.to_string());
     }
     StatusCode::OK.into_response()
 }
@@ -1348,6 +1548,10 @@ async fn mcp_get() -> Response<Body> {
     (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "POST")]).into_response()
 }
 
+/// MCP protocol versions this endpoint speaks; anything else gets the latest.
+const SUPPORTED_VERSIONS: [&str; 3] = ["2025-03-26", "2025-06-18", "2025-11-25"];
+const LATEST_VERSION: &str = "2025-11-25";
+
 const HTTP_INSTRUCTIONS: &str = "Glass gives you a real computer: its screens, pointer and keyboard. \
 The person who owns it approved you, can watch you live, and can pause, stop or revoke you at any time.\n\
 - Start with `screenshot`. Coordinates for click, move, drag and scroll are in the pixels of the \
@@ -1365,23 +1569,39 @@ async fn mcp(headers: HeaderMap, body: axum::body::Bytes) -> Response<Body> {
         return r;
     }
     let Some(iss) = issuer(&headers) else { return misdirected() };
-    // DNS rebinding: a page elsewhere can't talk to this endpoint through a browser.
-    if headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()).is_some_and(|o| o != iss) {
+    // DNS rebinding: a page elsewhere can't talk to this endpoint through a browser (pages
+    // on this device's loopback, like MCP Inspector, may; they still need a token).
+    if headers
+        .get(header::ORIGIN)
+        .and_then(|o| o.to_str().ok())
+        .is_some_and(|o| o != iss && !split_url(o).is_some_and(|u| loopback(&u.host)))
+    {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(tok) = bearer(&headers) else { return unauthorized(&iss, None) };
     let Some(g) = grants::by_access(&tok) else { return unauthorized(&iss, Some("invalid_token")) };
-    let Ok(req) = serde_json::from_slice::<Value>(&body) else {
-        return Json(json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "parse error" } })).into_response();
+    let rpc_error = |id: Value, code: i32, message: &str| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }))).into_response()
     };
+    let Ok(req) = serde_json::from_slice::<Value>(&body) else {
+        return rpc_error(Value::Null, -32700, "parse error");
+    };
+    if !req.is_object() {
+        // Batches went away in 2025-06-18; one message per request.
+        return rpc_error(Value::Null, -32600, "send one JSON-RPC message per request");
+    }
     let Some(id) = req.get("id").cloned() else {
         // A notification (initialized, cancelled…): nothing to answer.
-        return StatusCode::ACCEPTED.into_response();
+        return if req["method"].is_string() { StatusCode::ACCEPTED.into_response() } else { rpc_error(Value::Null, -32600, "invalid request") };
     };
+    if req.get("method").is_none() && (req.get("result").is_some() || req.get("error").is_some()) {
+        // A client's response (to nothing Glass asked, since it sends no requests).
+        return StatusCode::ACCEPTED.into_response();
+    }
     let method = req["method"].as_str().unwrap_or("");
     let result = match method {
         "initialize" => json!({
-            "protocolVersion": req["params"]["protocolVersion"].as_str().unwrap_or(crate::mcp::PROTOCOL),
+            "protocolVersion": req["params"]["protocolVersion"].as_str().filter(|v| SUPPORTED_VERSIONS.contains(v)).unwrap_or(LATEST_VERSION),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "glass", "title": format!("Glass on {}", machine_name()), "version": env!("CARGO_PKG_VERSION") },
             "instructions": HTTP_INSTRUCTIONS,
@@ -1390,6 +1610,9 @@ async fn mcp(headers: HeaderMap, body: axum::body::Bytes) -> Response<Body> {
         "tools/list" => json!({ "tools": tools_for(&g) }),
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or("");
+            if !crate::mcp::tools().as_array().is_some_and(|t| t.iter().any(|t| t["name"] == name)) || name == "list_machines" {
+                return Json(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": format!("Unknown tool: {name}") } })).into_response();
+            }
             let args = match req["params"]["arguments"].clone() {
                 Value::Null => json!({}),
                 a => a,
@@ -1456,21 +1679,22 @@ async fn run_tool(g: &Grant, name: &str, args: &Value) -> Result<Vec<Value>, Str
         args["wait_seconds"] = json!(asked.min(ASK_HOLD_MAX));
     }
     let args = &args;
-    let act = |v: Value| async move {
+    // One tool call counts once against the hour, its follow-up screenshot included.
+    let act = |v: Value, charge: bool| async move {
         let action: crate::computer::Action = serde_json::from_value(v).map_err(|e| e.to_string())?;
-        crate::computer::act_as(g, action).await.map_err(|e| e.0)
+        crate::computer::act_as(g, action, charge).await.map_err(|e| e.0)
     };
     match crate::mcp::plan(name, args)? {
         Step::Displays => {
-            let v = crate::computer::displays_json().await.map_err(|e| e.0)?;
+            let v = crate::computer::displays_as(g).await.map_err(|e| e.0)?;
             Ok(crate::mcp::displays_content(&v))
         }
         Step::Act { action, show, after, display } => {
-            let v = act(action).await?;
+            let v = act(action, true).await?;
             let mut out = crate::mcp::show(show, &v);
             if after {
-                let _ = act(json!({ "action": "wait_for_change", "display": display, "timeout_ms": 1500 })).await;
-                let shot = act(json!({ "action": "screenshot", "display": display })).await?;
+                let _ = act(json!({ "action": "wait_for_change", "display": display, "timeout_ms": 1500 }), false).await;
+                let shot = act(json!({ "action": "screenshot", "display": display }), false).await?;
                 out.extend(crate::mcp::show(Show::Shot, &shot));
             }
             Ok(out)
@@ -1519,9 +1743,13 @@ fn consent_page(c: &Consent, id: &str, owner_here: bool) -> String {
         )
     } else {
         format!(
-            "{common}<p>In Glass on your phone or this computer, tap</p><p class=number>{n}</p>\
-             <p class=dim>Waiting for you to approve. Didn't start this? Ignore it, or tap Deny in Glass.</p>",
-            n = esc(&c.number)
+            "{common}<p>In Glass, tap</p><p class=number>{n}</p>\
+             <p class=dim>Glass asks in its viewer{where_} and in the Glass app on the computer. Waiting for you to approve. Didn't start this? Ignore it, or tap Deny in Glass.</p>",
+            n = esc(&c.number),
+            where_ = crate::status::read()
+                .and_then(|s| s.url)
+                .map(|u| format!(" (<a href=\"{0}\" target=_blank rel=noopener>{0}</a>)", esc(u.trim_end_matches('/'))))
+                .unwrap_or_default(),
         )
     }
 }
@@ -1542,7 +1770,7 @@ fn page(status: StatusCode, title: &str, body: &str, waiting: Option<&str>) -> R
         "<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">\
          <meta name=referrer content=same-origin><title>{t} · Glass</title><style>\
          :root{{color-scheme:dark;font:16px/1.5 -apple-system,system-ui,sans-serif}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f2f2f4}}\
-         main{{max-width:380px;padding:32px 24px}}h1{{font-size:20px;margin:0 0 16px}}.who{{display:flex;flex-direction:column;margin:0}}.who span,.dim{{color:#9a9aa3;font-size:14px}}\
+         main{{max-width:380px;padding:32px 24px}}a{{color:inherit}}h1{{font-size:20px;margin:0 0 16px}}.who{{display:flex;flex-direction:column;margin:0}}.who span,.dim{{color:#9a9aa3;font-size:14px}}\
          ul{{padding-left:18px;color:#c9c9cf}}button:disabled{{opacity:.5}}button{{font:inherit;padding:10px 18px;border-radius:10px;border:1px solid #333;background:#1c1c20;color:inherit;margin-right:8px;cursor:pointer}}\
          .primary{{background:#f2f2f4;color:#0b0b0d;border-color:#f2f2f4}}.number{{font-size:56px;font-weight:600;letter-spacing:4px;margin:4px 0}}</style>\
          <main><h1>{t}</h1>{body}</main>{poll}",
@@ -1554,8 +1782,22 @@ fn page(status: StatusCode, title: &str, body: &str, waiting: Option<&str>) -> R
     h.insert("x-frame-options", HeaderValue::from_static("DENY"));
     h.insert(
         "content-security-policy",
-        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self' https: http://localhost:* http://127.0.0.1:*; frame-ancestors 'none'"),
+        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self' https: http://localhost:* http://127.0.0.1:* http://[::1]:*; frame-ancestors 'none'"),
     );
+    r
+}
+
+/// The consent page: its Approve form may also send the browser to a native app's own
+/// scheme, when that's where the agent asked to be sent back.
+fn consent_response(body: &str, id: &str, redirect_uri: &str) -> Response<Body> {
+    let mut r = page(StatusCode::OK, "Allow this agent?", body, Some(id));
+    if let Some(scheme) = private_scheme(redirect_uri)
+        && let Ok(v) = HeaderValue::from_str(&format!(
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self' https: http://localhost:* http://127.0.0.1:* http://[::1]:* {scheme}:; frame-ancestors 'none'"
+        ))
+    {
+        r.headers_mut().insert("content-security-policy", v);
+    }
     r
 }
 
@@ -1592,13 +1834,13 @@ mod tests {
     #[test]
     fn scopes_and_apps() {
         let q: HashMap<String, String> = [("scope".to_string(), "computer:view".to_string())].into();
-        assert_eq!(requested(&q).0, vec!["computer:view".to_string()]);
+        assert_eq!(requested(&q).unwrap().0, vec!["computer:view".to_string()]);
         let q: HashMap<String, String> = [
             ("scope".to_string(), "*".to_string()),
             ("authorization_details".to_string(), r#"[{"type":"glass_computer","apps":["com.figma.Desktop"]}]"#.to_string()),
         ]
         .into();
-        let (scopes, apps) = requested(&q);
+        let (scopes, apps) = requested(&q).unwrap();
         assert_eq!(scopes.len(), 2);
         assert_eq!(apps, Some(vec!["com.figma.Desktop".to_string()]));
     }

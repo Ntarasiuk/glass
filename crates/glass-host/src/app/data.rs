@@ -81,6 +81,14 @@ pub struct Agent {
     pub asks: Vec<Ask>,
     /// Agents from other devices that may use this computer.
     pub grants: Vec<GrantRow>,
+    /// Agents from other devices may ask at all (`glass agents on|off`).
+    pub enabled: bool,
+    /// Published to the internet with Tailscale Funnel.
+    pub public: bool,
+    /// Apps asking for unattended access: (client id, name).
+    pub installs: Vec<(String, String)>,
+    /// The latest audit log lines, newest first, as text.
+    pub recent: Vec<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -200,13 +208,30 @@ pub fn gather() -> Snapshot {
                         choices: list(&a["choices"]).map(text).collect(),
                     })
                     .collect(),
-                grants: Vec::new(),
+                ..Default::default()
             };
             snap.privacy = v["privacy"] == true;
         }
     }
     let now = crate::grants::now();
-    snap.agent.grants = crate::grants::load()
+    let store = crate::grants::load();
+    snap.agent.enabled = store.enabled;
+    snap.agent.public = store.public;
+    snap.agent.installs = store.clients.iter().filter(|c| c.install_requested && !c.installed).map(|c| (c.id.clone(), c.name.clone())).collect();
+    snap.agent.recent = crate::grants::audit_lines(6)
+        .iter()
+        .rev()
+        .map(|l| {
+            format!(
+                "{} · {} {}{}",
+                l["name"].as_str().unwrap_or("Agent"),
+                l["action"].as_str().unwrap_or(""),
+                l["detail"].as_str().unwrap_or(""),
+                if l["ok"] == false { " (refused)" } else { "" }
+            )
+        })
+        .collect();
+    snap.agent.grants = store
         .grants
         .into_iter()
         .filter(|g| g.live(now))

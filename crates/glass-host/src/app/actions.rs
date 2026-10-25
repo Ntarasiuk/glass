@@ -62,6 +62,32 @@ pub fn agent(op: &str) -> Result<String> {
     .into())
 }
 
+/// Lets agents from other devices ask (or refuses them all).
+pub fn agents_enabled(on: bool) -> Result<String> {
+    crate::grants::update(|s| s.enabled = on)?;
+    Ok(if on { "Agents can ask to use this computer." } else { "Agents from other devices are refused. Their grants are kept." }.into())
+}
+
+/// Publishes the agent sign-in and MCP endpoints with Tailscale Funnel (or stops).
+pub fn agents_public(on: bool) -> Result<String> {
+    Ok(match crate::oauth::publish(on)? {
+        Some(url) => format!("Agents anywhere can ask at {url}"),
+        None => "Agents can only reach this computer from your tailnet.".into(),
+    })
+}
+
+/// Installs an app that asked for unattended access.
+pub fn install_agent(id: &str) -> Result<String> {
+    let name = crate::grants::update(|s| {
+        let c = s.clients.iter_mut().find(|c| c.id == id && c.auth_method != "none")?;
+        c.installed = true;
+        c.install_requested = false;
+        Some(c.name.clone())
+    })?
+    .ok_or_else(|| anyhow::anyhow!("that app is gone"))?;
+    Ok(format!("{name} can use this computer unattended. Revoke it any time."))
+}
+
 /// Ends an agent's access (from another device).
 pub fn revoke_grant(id: &str) -> Result<String> {
     anyhow::ensure!(crate::grants::revoke(Some(id))? > 0, "it was already revoked");

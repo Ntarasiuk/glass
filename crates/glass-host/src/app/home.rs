@@ -188,8 +188,15 @@ impl GlassApp {
                 ui::icon_row(
                     I::Bot,
                     theme.primary,
-                    if ask.help { "An agent needs your help" } else { "An agent asks before it acts" },
-                    ask.text.clone(),
+                    if ask.consent {
+                        "An agent asks to use this computer"
+                    } else if ask.help {
+                        "An agent needs your help"
+                    } else {
+                        "An agent asks before it acts"
+                    },
+                    // A consent's request id isn't for people.
+                    ask.text.rsplit_once(" [").filter(|_| ask.consent).map_or(ask.text.clone(), |(t, _)| t.to_string()),
                     Button::new("see-ask").primary().small().label("Answer").on_click(cx.listener(|this, _, _, cx| this.go(Page::Agents, cx))),
                     cx,
                 ),

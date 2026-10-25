@@ -125,19 +125,22 @@ vercel connect create https://mac-mini.tail1234.ts.net:8443/mcp
 
 On your tailnet no publishing is needed: use `https://<computer>/mcp`. Publishing needs Funnel allowed for the machine in your tailnet's settings; if it isn't, `glass agents public on` prints the link to allow it.
 
-**Approving takes one tap.** The agent sends you to a sign-in page on your computer. Opened through your tailnet address on one of your other devices (signed in to Tailscale as you), it has an **Approve** button, which works a moment after the page appears. Anywhere else (through the Funnel address, on the computer itself, behind `tailscale serve` on Linux) it shows a number, and Glass asks you to tap the matching one of three, in the viewer or the Mac app; the notification opens Glass. Picking the wrong one denies it, so an approval you didn't start can't slip through. The computer never approves on its own: not from a browser on its own screen, and not from its own viewer while an agent is working; nor while a guest is connected. After that, the agent works with no prompts: its access refreshes itself, and a grant ends after 30 days unused (180 days at most).
+**Approving takes one tap.** The agent sends you to a sign-in page on your computer. Opened through your tailnet address on one of your other devices (signed in to Tailscale as you), it has an **Approve** button, which works a moment after the page appears. Anywhere else (through the Funnel address, on the computer itself, behind `tailscale serve` on Linux) it shows a number, and Glass asks you to tap the matching one of four, in the viewer or the Mac app; the notification tells you where. Picking the wrong one denies it, and that agent can't ask again for 10 minutes, so guessing doesn't work. The computer never approves on its own: not from a browser on its own screen, and not from its own viewer while an agent is working; nor while a guest is connected. After that, the agent works with no prompts: its access refreshes itself, and a grant ends after 30 days unused (180 days at most).
 
 **What an agent can do is checked on your computer, at every step:**
 
 - `computer:view` (screenshots) and `computer:use` (pointer and keyboard). A view-only agent that asks to click gets told to ask you for more.
 - It never drives password managers (Passwords, 1Password, Bitwarden…), Keychain Access, System Settings, the system's password prompts, terminals, Screen Sharing or Glass itself, and never types into a password field. It's told to ask you instead. Glass checks the app that would actually get the input (what's under the pointer, or what has the keyboard, Spotlight and Control Center included), not just the app in front.
 - An agent can limit itself to some apps (`authorization_details` of type `glass_computer` with `apps`); input anywhere else (other apps, Spotlight, the Dock) is refused.
-- When you use the computer, at its own keyboard and mouse or by clicking, typing or scrolling in a viewer, agents wait until you've stopped for a few seconds.
+- It doesn't see protected apps: screenshots are refused while one (or, for an agent limited to some apps, any other app) is in front.
+- When you use the computer, at its own keyboard and mouse or by clicking, typing or scrolling in a viewer, agents wait until you've stopped for a few seconds (an agent from another device is told to try again after 20 seconds).
 - 1,500 actions an hour per agent; an agent over it is held until the hour ends (you get a notification), or until you resume agents.
 - On Linux, Glass can't tell which app input reaches, so it can't keep an agent out of particular apps or password fields (the sign-in page says so), and agents can't limit themselves to apps there.
 - Pause and Stop in the viewer and the Mac app work as for any agent; the banner shows its name. What it types isn't shown or logged.
 
-**Revoking is immediate**: in the Mac app (AI agents › Agents from other devices), with `glass agents revoke <id>` (or `all`), or from the agent's platform (Vercel's revoke calls Glass's). A refresh token used twice (a stolen copy) revokes its grant on the spot. `glass agents off` refuses every agent until `glass agents on`.
+**In the Mac app** (AI agents): turn agents on or off, copy the MCP address, publish with Funnel, install apps that asked, see and revoke agents, and see what they did lately.
+
+**Revoking is immediate**: in the Mac app, with `glass agents revoke <id>` (or `all`), or from the agent's platform (Vercel's revoke calls Glass's). An old refresh token used again (a stolen copy) revokes its grant on the spot. Approving an agent again replaces its earlier grant. `glass agents off` refuses every agent until `glass agents on`.
 
 **Every action is logged** to `agent-audit.jsonl`, each line chained to the one before by its hash: `glass agents log` shows the latest, `glass agents verify` checks nothing was changed.
 

@@ -878,6 +878,12 @@ async fn async_main(args: Args) -> Result<()> {
         Some(Command::App { .. }) => unreachable!("handled before the runtime starts"),
         Some(Command::Support { .. }) => unreachable!("handled before the runtime starts"),
         Some(Command::Uninstall) => {
+            // Published to the internet for agents: not any more.
+            if grants::load().public
+                && let Err(e) = oauth::publish(false)
+            {
+                eprintln!("Couldn't stop publishing to agents with Tailscale Funnel ({e:#}); run: tailscale funnel --https=8443 off");
+            }
             agent::uninstall()?;
             println!(
                 "Glass service removed. Delete ~/.glass and ~/.config/glass to remove everything."

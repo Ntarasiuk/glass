@@ -1,179 +1,142 @@
 # Agents from anywhere: Glass as a Vercel Connect connector
 
-Status: phases 1–3 built (2026-10-25). Differences from the draft below:
+As built, 2026-10-25. Planned work is listed at the end.
 
-- Access tokens are opaque (`gla_…`), not JWTs: the host is both the authorization server and the resource server, so it looks them up directly, and revoking takes effect at once.
-- Public reach is Tailscale Funnel on port 8443 (`glass agents public on`). It points at a separate listener on `127.0.0.1:18443` that serves only the OAuth and MCP routes, so the viewer, console and files are never published. The relay route isn't built.
-- Questions to the person don't hold a cloud agent's request open: `confirm` and `request_help` wait 20 s by default (50 s at most over HTTP), then return "pending", and `check_answer` collects the answer later (kept for an hour).
-- Hardened after a review (2026-10-25):
-  - The computer itself never counts as an owner device: no Approve button there or through Funnel, and its own viewer can't pick the number while an agent works or a guest is connected.
-  - Input is checked against the app that would receive it (Accessibility hit test, or the app with the keyboard), not the front app.
-  - The protected list includes terminals, password managers and Glass.
-  - Local keyboard and mouse use pauses agents.
-  - Hourly budgets are per agent.
-  - Revoking an app uninstalls it, and metadata-document clients can be installed as apps.
-  - One pending request per agent, dropped when its page closes.
-  - The audit chain is read from the file at every write, so it stays intact across processes.
-- Not yet built:
-  - the agent's own virtual display (`display: "own"`); agents use your screen, with the banner
-  - "always allow this for this agent in this app"
-  - anomaly pauses beyond the hourly budget
-  - the ⌃⌥⌘. physical stop
-  - DPoP
-  - `jwt-bearer`
-  - moving the local `glass mcp` onto grants (it still uses the owner token)
-
-Goal: an agent running anywhere (Vercel, Claude, a server) asks for access to your computer, you approve it with one tap, and from then on it works with no prompts except for things that are truly risky. Glass follows the MCP authorization spec and what Vercel Connect expects of a provider, so `vercel connect create https://<machine>/mcp` just works, as do claude.ai and ChatGPT connectors.
+An agent running anywhere (Vercel, claude.ai, ChatGPT, a server) asks to use your computer. You approve it once with one tap, and from then on it works without prompts, except for what is truly risky. Glass follows the MCP authorization spec and what Vercel Connect expects of a provider, so `vercel connect create https://<machine>:8443/mcp` works, as do claude.ai and ChatGPT connectors and MCP Inspector.
 
 ## Principles
 
-1. **The host is the authority.** Each Glass host is its own OAuth authorization server and resource server. glassdesk.dev never holds grants, keys or tokens, so a breach there can't hand anyone your Mac. This keeps Glass account-free.
-2. **Ask once, then stay out of the way.** You approve once per agent. After that there are no prompts, only an always-visible indicator, except for actions that are risky.
-3. **Enforce on the host, at each input event.** Scopes and rules are checked when input is injected, not trusted from the model.
+1. **The host is the authority.** Each Glass host is its own OAuth authorization server and resource server. glassdesk.dev never holds grants, keys or tokens, so a breach there can't hand anyone your Mac. This also keeps Glass account-free.
+2. **Ask once, then stay out of the way.** You approve once per agent. After that there are no prompts, only a visible banner, except for actions the agent confirms.
+3. **Enforce on the host, at each input event.** Scopes and rules are checked when input is injected, never taken from the model.
 
-## Endpoints (on each host)
+## Reach
 
-You reach a host from the internet in one of two ways:
+- **On the tailnet:** `https://<machine>.<tailnet>.ts.net/mcp`. This is the normal Glass listener.
+- **From anywhere:** Tailscale Funnel on port 8443 (`glass agents public on`, or the switch in the Mac app).
+  - Funnel points at a separate listener on `127.0.0.1:18443` that serves only the OAuth and MCP routes. The viewer, console and files are never published.
+  - Everything arriving through Funnel comes from loopback, so it never counts as an owner device.
 
-- **Tailscale Funnel** (preferred): `https://<machine>.<tailnet>.ts.net`. Tailscale's certificate, with TLS ending on the host.
-- **The Glass relay**: `https://<machine-id>.mcp.glassdesk.dev`. Routed by SNI with no decryption, so TLS still ends on the host.
+## Endpoints
 
 | Path | Purpose |
 |---|---|
-| `/mcp` | MCP over streamable HTTP. A request without a token gets a 401 with `WWW-Authenticate: Bearer resource_metadata="…"`. |
-| `/.well-known/oauth-protected-resource/mcp` | RFC 9728: `resource`, `authorization_servers: [<host origin>]`, `scopes_supported`. |
-| `/.well-known/oauth-authorization-server` | RFC 8414 metadata (below). |
-| `/oauth/authorize`, `/oauth/token`, `/oauth/revoke`, `/oauth/register` (+ RFC 7592 `/oauth/register/<id>`), `/oauth/jwks` | |
+| `/mcp` | MCP over streamable HTTP (JSON responses; GET answers 405). One JSON-RPC message per request: batches get 400. Notifications and client responses get 202. Unknown tools are a JSON-RPC error. Without a token: 401 with `WWW-Authenticate: Bearer resource_metadata="…"`. |
+| `/.well-known/oauth-protected-resource/mcp` | RFC 9728 |
+| `/.well-known/oauth-authorization-server` | RFC 8414. Advertises `client_id_metadata_document_supported`, revocation, `scopes_supported` and `authorization_details_types_supported`. |
+| `/oauth/register`, `/oauth/register/<id>` | DCR (RFC 7591) and management (RFC 7592). The registration token rotates on every read or update. |
+| `/oauth/authorize` | The consent page |
+| `/oauth/token` | `authorization_code` (PKCE S256), `refresh_token`, `client_credentials` |
+| `/oauth/revoke` | RFC 7009. A client can only revoke its own tokens. |
 
-Authorization server metadata:
+**Protocol details:**
 
-```json
-{
-  "issuer": "https://mac-mini.tail1234.ts.net",
-  "authorization_endpoint": ".../oauth/authorize",
-  "token_endpoint": ".../oauth/token",
-  "revocation_endpoint": ".../oauth/revoke",
-  "registration_endpoint": ".../oauth/register",
-  "jwks_uri": ".../oauth/jwks",
-  "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
-  "response_types_supported": ["code"],
-  "code_challenge_methods_supported": ["S256"],
-  "token_endpoint_auth_methods_supported": ["private_key_jwt", "none", "client_secret_basic"],
-  "token_endpoint_auth_signing_alg_values_supported": ["ES256", "RS256"],
-  "client_id_metadata_document_supported": true,
-  "scopes_supported": ["computer:view", "computer:use", "files", "clipboard"],
-  "authorization_details_types_supported": ["glass_computer"]
-}
-```
+- Client authentication: `none`, `client_secret_basic` or `client_secret_post`, or `private_key_jwt` (ES256 or RS256). Assertions may be addressed to the issuer, the token endpoint or the revocation endpoint. Key sets are fetched again once when a signature doesn't verify, so key rotation works.
+- Client ID metadata documents are fetched over https only:
+  - public addresses only, with the checked address pinned for the request (curl `--resolve`)
+  - 64 KB at most
+  - cached for 10 minutes, and only once the document checks out
+- Redirect URIs:
+  - https, loopback http (any port, compared by parsed parts), or a native app's reverse-DNS scheme
+  - matched exactly
+  - the consent page names the host the code actually goes to
+- Browser clients get CORS on the metadata, registration, token and revocation endpoints. `/mcp` accepts browser pages only from loopback origins, and they still need a token.
+- `MCP-Protocol-Version`: `initialize` answers with the client's version if Glass speaks it (2025-03-26, 2025-06-18 or 2025-11-25); otherwise it answers with the latest.
+- Tools carry `readOnlyHint` and `destructiveHint` annotations.
 
-Client registration:
+## Scopes and limits
 
-- **Client ID metadata documents** are preferred, with DCR (RFC 7591/7592) as a fallback.
-- Public clients must use PKCE S256.
-- Redirect URIs must match exactly. `https://connect.vercel.com/callback` is just one of them; there is no allowlist of vendors.
-- The client's verified **domain**, taken from the CIMD URL or the redirect URI host, is what the consent screen shows. `client_name` and `logo_uri` are only decoration.
+| Scope | Allows |
+|---|---|
+| `computer:view` | Screenshots, `wait_for_change`, `list_displays` |
+| `computer:use` | Pointer and keyboard. Includes `computer:view`. |
 
-## Scopes and grants
-
-| Scope | Allows | Default |
-|---|---|---|
-| `computer:view` | Screenshots and `wait_for_change` | on |
-| `computer:use` | Pointer and keyboard | on |
-| `files` | Send and receive files | off |
-| `clipboard` | Read and write the clipboard | off |
-
-The scope `*` from Connect means the defaults. Finer limits ride in RFC 9396 `authorization_details` (`type: "glass_computer"`):
-
-- `machines`: this one, or others of yours on the tailnet, reached through `glass mcp`'s existing proxying.
-- `display`: `"own"` is a virtual display just for the agent, and is the default. `"main"` is your screen.
-- `apps`: bundle ids the agent may control.
-- `confirm`: `"risky"` (the default) or `"always"`.
-
-A client that doesn't send these gets the defaults, which you can change on the consent screen.
-
-A grant is stored on the host: the grant id, client domain, scopes, details, created and last-used times, and who approved it.
+- No scope, or `*`, means both. A call outside the grant gets 403 `insufficient_scope` naming what's missing (MCP step-up).
+- An agent can limit itself to some apps with RFC 9396 `authorization_details`: `[{"type": "glass_computer", "apps": ["com.figma.Desktop"]}]`.
+  - Anything malformed is refused, never read as "no limit".
+  - The granted details come back in every token response.
+  - Linux can't tell which app input reaches, so app limits are refused there.
 
 ## Tokens
 
-- **Access tokens** are JWTs signed by the host (ES256) and last **10 minutes**. They always carry `expires_in`, as Connect requires. Claims: `sub` (owner), `client_id`, `aud` (resource), `grant_id`, `scope`, `machines`.
-- **The host checks every request against its own grant table**, not just the signature, so revoking takes effect immediately.
+- **Access tokens:** opaque (`gla_…`), 10 minutes, `expires_in` always sent. The host checks its grant table on every request, and again before each input event, so revoking takes effect immediately.
 - **Refresh tokens:**
-  - **Rotated on every use.** Reusing an old one revokes the whole grant, since that means it was stolen.
-  - **Expiry:** 30 days of no use, 180 days at most. After that the agent asks again, with one tap.
-  - **Confidential clients** (`private_key_jwt`, which Connect prefers) must authenticate to refresh, so a leaked refresh token is useless without the client's key.
-- **Revocation (RFC 7009)** is implemented, so revoking in Vercel revokes it on the host too.
-- **Too little scope:** a 403 `insufficient_scope` with `WWW-Authenticate: …scope="files"`. The client can then ask for more (MCP step-up), and the user approves only the difference.
-- **No DPoP requirement**, because Connect doesn't send DPoP proofs. Short lifetimes plus client-authenticated refresh do that job. Accept DPoP when a client offers it.
+  - **Rotated on every use.** Reusing an older one (a stolen copy) revokes the grant.
+  - **Grace for retries:** the one just replaced may come back within 30 seconds (a retry or a lost response). It's refused, and that's all.
+  - **Expiry:** 30 days of no use, 180 days at most.
+- **Codes:** 60 seconds, single use. A replayed code revokes the grant it made, even mid-exchange.
+- **One grant per agent:** approving again replaces the earlier grant.
 
-## Approving: one tap, no fatigue
+## Approving
 
-1. The agent hits `/mcp` and gets a 401. Connect sends you to `/oauth/authorize`.
-2. The consent page, served by the host, shows:
-   - the agent's verified domain
-   - which computer, with a live thumbnail
-   - "Uses its own screen · asks before anything risky"
-   - one big **Approve on your phone** button, with the details collapsed below
-3. **Number match.** The page shows a 2-digit number, and your owner devices get a push notification: "vercel.app wants to use Mac mini — tap 47". Glass sends that through its existing end-to-end encrypted Web Push, and only owner devices get it. Tapping the right number approves. This stops "just tap Allow" fatigue and scam attacks, because the push alone can't approve. You can also approve on the Mac itself, or with a passkey on the page.
-4. The page redirects with a code, and Connect exchanges it.
+- **On one of your other devices**, via the tailnet address (tailnet identity is the owner's), the page has an **Approve** button. It works a moment after the page is seen and focused, so a stray key or click can't trigger it.
+- **Everywhere else** the page shows a number:
+  - This covers the computer itself, anything through Funnel, and Linux behind `tailscale serve`.
+  - Glass shows four numbers to pick from, in the viewer and in the Mac app (Home and AI agents). The macOS notification and the push say where to answer.
+  - The right number approves. A wrong one denies the request, and that agent can't ask again for 10 minutes.
+- **What's refused:**
+  - an answer from a viewer on the computer itself within 10 seconds of an agent acting
+  - any approval while a guest is connected
+  - Glass's own app as a target for agent input
+- **One pending request per agent**: a new one replaces it, and a request whose page closed is dropped after 45 seconds. Limits are per agent: 3 requests a minute, 20 overall. Owner devices aren't limited.
 
-Who can approve: owner devices only, meaning tailnet devices signed in as the owner, or the Mac app. Never guests, links or quick-support sessions. While a quick-support session is active, consent is refused outright.
+**Apps (`client_credentials`, Vercel Connect's `app` subject):**
 
-**`app` subject** (`client_credentials`, for machine pools such as QA Mac minis):
+- An app can't get tokens until it's installed on the computer with `glass agents install <client>` or the Mac app's Install button. That works for dynamic registrations and metadata-document clients alike.
+- Asking sends one notification, and at most one every 10 minutes.
+- Revoking an app's grant uninstalls it.
 
-- A client registered with secret or `private_key_jwt` credentials can't get tokens until the owner or an admin **installs** it, once, from the Mac app or `/admin/`, choosing machines and scopes.
-- After that there are no prompts.
-- Its own virtual display is mandatory, and it never gets `display: main`.
+## Enforcement (each action)
 
-**`jwt-bearer`**: deferred. When added, it will be for teams whose OIDC issuer an admin trusts explicitly.
+- The grant is live and covers the action, and agents aren't stopped or paused. Stop and Pause survive restarts.
+- The app input would reach is checked: what's under the pointer (Accessibility hit test), or what has the keyboard (Spotlight and Control Center included).
+  - **Protected apps:**
+    - password managers and keychains
+    - System Settings and the system's authentication prompts
+    - terminals
+    - Screen Sharing
+    - Glass
+  - **Password fields** (secure input) are never typed into.
+  - **App-limited agents** reach only their apps, never system UI.
+- Screenshots are refused while a protected app, or an app outside the agent's limit, is in front.
+- A person using the computer, at its own keyboard and mouse or through a viewer, holds agents for 5 seconds after they stop.
+  - An agent from another device waits up to 20 seconds, then is told to try again.
+  - Just looking doesn't wait.
+- **Hourly budget:** 1,500 actions per agent, one per tool call (a follow-up screenshot is free). Going over notifies the owner once, and Resume gives every agent a fresh hour.
+- **Questions to the person:** `confirm` and `request_help` hold an HTTP agent at most 20 s by default (50 s at most), then come back "pending", and `check_answer` collects the answer.
+  - Question ids are random.
+  - The same question asked again reuses the one already up, and an agent can have 3 open at most.
+- **The audit log** gets one line per action: grant, agent, action, detail, the app in front before the action, and the result. Typed text is never recorded.
+  - Lines are hash-chained, and every writer reads the chain's end under a lock.
+  - It rotates at 8 MB, carrying the chain on.
+  - `glass agents verify` checks it.
 
-## Day to day: what you see
+## Controls
 
-| Moment | Interruption |
-|---|---|
-| The agent works on its own display | None. A menu bar indicator shows it, and its display appears as a thumbnail in viewers. |
-| The agent works on your screen (`display: main`) | The banner with Pause and Stop. Your own mouse or keyboard pauses it until you resume or 10 s pass with no input. |
-| A risky action: sending, buying, deleting, posting | A `confirm` card or push. Each one has **Always allow this for this agent in this app** (e.g. "send in Mail"), so the same question isn't asked twice. |
-| Off-limits: secure input on, Keychain, Passwords, System Settings privacy panes, `sudo` in a terminal | The action is refused, the agent is told why, and the agent can `request_help`. |
-| First run each day | One quiet notification ("Agent X started on Mac mini"), not one per run. |
-| Revoke | One tap from any of those notifications, the Mac app, `glass agents revoke`, or Vercel. |
+- **Mac app, AI agents:**
+  - agents on/off
+  - the MCP address (with copy)
+  - publishing with Funnel
+  - install requests
+  - agents from other devices, with Revoke
+  - what agents did lately
+- **`glass agents`:** `list`, `revoke ID|all`, `install CLIENT`, `log`, `verify`, `on`, `off`, `public on|off`.
+- `glass uninstall` stops publishing.
 
-## Enforcement on the host (each input event)
+## Planned
 
-- The scope covers the action, and the grant is live and not paused or stopped.
-- The frontmost app is on the grant's `apps` list, checked at injection, not when the step was planned.
-- The target display is the agent's own unless the grant allows `main`.
-- A step budget per hour; going over it pauses the agent and asks.
-- Anything unusual pauses and asks: a new client IP range, a burst of actions, odd hours. This fails closed.
-- **Audit log:** append-only and hash-chained, one entry per action (grant, client, action, frontmost app, time). Typed text is redacted. It's viewable in the Mac app and linked to the recording.
-- **Physical stop:** pressing ⌃⌥⌘. on the Mac stops every agent.
-
-## Existing local `glass mcp`
-
-The local stdio server keeps working. It becomes a first-party client with a grant created in the Mac app, so local agents get the same scopes, audit and revocation. The host token moves to the Keychain.
-
-## Tests
-
-- **One e2e test per refusal:**
-  - out of scope
-  - wrong app
-  - wrong display
-  - expired, revoked or replayed refresh token
-  - a token signed by another host
-  - consent from a guest or link, or during quick support
-  - secure input on
-- **Fuzzing** of the token, authorize and register endpoints.
-- **Prompt injection:** hostile pages and documents run against real models.
-- **An external review** before Funnel or relay access ships.
-
-## Phases
-
-1. Grants, scopes and enforcement on the host, plus the audit log. Local `glass mcp` moves onto grants.
-2. The OAuth authorization server, `/mcp` over HTTP, the consent page with number match, and revocation. Tested on the tailnet with Vercel Connect, claude.ai and the MCP Inspector.
-3. Public reach: Funnel, then the relay with SNI passthrough.
-4. The `app` subject with installs and machine pools, the agent's own virtual display by default, and triggers once Connect documents how inbound signing works.
+- the agent's own virtual display, so it never shares your screen
+- "always allow this for this agent in this app"
+- anomaly pauses beyond the hourly budget
+- a physical stop key
+- DPoP
+- `jwt-bearer`
+- moving the local `glass mcp` onto grants (it still uses the owner token)
+- grant management in the viewer and `/admin/` (for Linux and phones), and a Revoke action on the "agent approved" notification
+- blacking out protected windows in screenshots, instead of refusing while they're in front
+- the relay route (SNI passthrough at glassdesk.dev) as an alternative to Funnel
 
 ## Open questions
 
 - Connect's inbound webhook signing and device-code support aren't documented yet.
-- Whether Connect forwards `authorization_details` to custom providers. Until it does, the consent screen sets them.
-- The relay needs a certificate for `<id>.mcp.glassdesk.dev` issued to the host. That means DNS-01 through glassdesk.dev, and the host should watch Certificate Transparency logs for certificates it didn't request.
+- Whether Connect forwards `authorization_details` to custom providers.

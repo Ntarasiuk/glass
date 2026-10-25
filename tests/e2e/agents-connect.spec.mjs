@@ -4,7 +4,7 @@
 // and the audit log, against real `glass --test` hosts.
 
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
-import { Host, expectVideo, test, expect } from './harness.mjs';
+import { Host, expectVideo, freePort, test, expect } from './harness.mjs';
 
 const REDIRECT = 'http://127.0.0.1:8765/cb';
 const b64url = (buf) => Buffer.from(buf).toString('base64url');
@@ -100,7 +100,7 @@ it('an agent signs in by number matching, uses the computer, and refreshes; a st
   // In Glass: the card shows three numbers; the right one approves.
   const card = page.locator('.agent-ask', { hasText: 'Test agent' });
   await expect(card).toContainText('An agent asks to use this computer');
-  await expect(card.locator('button.choice')).toHaveCount(3);
+  await expect(card.locator('button.choice')).toHaveCount(4);
   await card.locator('button.choice', { hasText: number }).click();
 
   await signIn.waitForURL(/127\.0\.0\.1:8765\/cb/);
@@ -181,8 +181,12 @@ it('the wrong number, or Deny, sends the agent away', async ({ browser, page, ho
   await signIn.waitForURL(/127\.0\.0\.1:8765\/cb/);
   expect(new URL(signIn.url()).searchParams.get('error')).toBe('access_denied');
 
+  // After a wrong number it can't simply ask again (no guessing).
+  expect((await fetch(authorizeUrl(host, client.client_id, pkce().challenge), { redirect: 'manual' })).status).toBe(429);
+
   // A redirect URI it never registered never gets anything (the page says so instead).
-  const r = await fetch(authorizeUrl(host, client.client_id, pkce().challenge, { redirect_uri: 'https://evil.example/cb' }), { redirect: 'manual' });
+  const other = await register(host, { client_name: 'Other', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+  const r = await fetch(authorizeUrl(host, other.client_id, pkce().challenge, { redirect_uri: 'https://evil.example/cb' }), { redirect: 'manual' });
   expect(r.status).toBe(400);
 });
 
@@ -396,5 +400,82 @@ it('a metadata-document client (how Vercel Connect registers) can be installed a
     expect((await mcp(host, t.body.access_token, 'tools/list')).status).toBe(200);
   } finally {
     server.close();
+  }
+});
+
+it('speaks the protocols as written: registration management, JSON-RPC, versions, CORS, strict details, agents off', async ({ host }) => {
+  const client = await register(host, { client_name: 'Spec', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+  // RFC 7592: read and update rotate the registration token and return it; delete works.
+  const read = await fetch(`${host.base}/oauth/register/${client.client_id}`, { headers: { authorization: `Bearer ${client.registration_access_token}` } });
+  const readBody = await read.json();
+  expect(readBody.registration_access_token).toBeTruthy();
+  expect(readBody.registration_access_token).not.toBe(client.registration_access_token);
+  const stale = await fetch(`${host.base}/oauth/register/${client.client_id}`, { headers: { authorization: `Bearer ${client.registration_access_token}` } });
+  expect(stale.status).toBe(401);
+  expect(stale.headers.get('www-authenticate')).toContain('invalid_token');
+  const put = await fetch(`${host.base}/oauth/register/${client.client_id}`, {
+    method: 'PUT', headers: { authorization: `Bearer ${readBody.registration_access_token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ client_id: client.client_id, client_name: 'Renamed', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' }),
+  });
+  const putBody = await put.json();
+  expect(putBody.client_name).toBe('Renamed');
+  const del = await fetch(`${host.base}/oauth/register/${client.client_id}`, { method: 'DELETE', headers: { authorization: `Bearer ${putBody.registration_access_token}` } });
+  expect(del.status).toBe(204);
+
+  // Unclear authorization_details are refused, never read as "no limit".
+  const c2 = await register(host, { client_name: 'Strict', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+  const bad = await fetch(authorizeUrl(host, c2.client_id, pkce().challenge, { authorization_details: '[{"type":"glass_computer","apps":"com.x"}]' }), { redirect: 'manual' });
+  expect(bad.status).toBe(303);
+  expect(new URL(bad.headers.get('location')).searchParams.get('error')).toBe('invalid_authorization_details');
+
+  // Browser clients can register and get tokens (CORS preflight).
+  const pre = await fetch(`${host.base}/oauth/token`, { method: 'OPTIONS', headers: { origin: 'http://localhost:6274', 'access-control-request-method': 'POST' } });
+  expect(pre.headers.get('access-control-allow-origin')).toBe('*');
+
+  // Agents off: sign-in refused, tokens refused with proper OAuth errors.
+  host.cli('agents', 'off');
+  expect((await fetch(authorizeUrl(host, c2.client_id, pkce().challenge))).status).toBe(403);
+  expect((await token(host, { grant_type: 'refresh_token', refresh_token: 'x', client_id: c2.client_id })).body.error).toBe('invalid_grant');
+  host.cli('agents', 'on');
+});
+
+it('JSON-RPC as MCP expects: one message per request, unknown tools are protocol errors, versions negotiated', async ({ browser }) => {
+  const host = await new Host({ env: { GLASS_TEST_TRUST_LOOPBACK: '1', GLASS_TEST_REMOTE_OWNER: '1' } }).start();
+  try {
+    const client = await register(host, { client_name: 'Rpc', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' });
+    const { verifier, challenge } = pkce();
+    const signIn = await signInPage(browser, authorizeUrl(host, client.client_id, challenge));
+    await signIn.getByRole('button', { name: 'Approve' }).click();
+    await signIn.waitForURL(/127\.0\.0\.1:8765\/cb/);
+    const t = await token(host, { grant_type: 'authorization_code', code: new URL(signIn.url()).searchParams.get('code'), redirect_uri: REDIRECT, client_id: client.client_id, code_verifier: verifier });
+    const raw = (body) => fetch(`${host.base}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${t.body.access_token}` }, body });
+    expect((await raw('[{"jsonrpc":"2.0","id":1,"method":"ping"}]')).status).toBe(400);
+    expect((await raw('not json')).status).toBe(400);
+    expect((await raw('{"jsonrpc":"2.0","method":"notifications/initialized"}')).status).toBe(202);
+    const unknown = await (await raw('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rm_rf"}}')).json();
+    expect(unknown.error.code).toBe(-32602);
+    const init = await mcp(host, t.body.access_token, 'initialize', { protocolVersion: '1999-01-01', capabilities: {}, clientInfo: { name: 't', version: '1' } });
+    expect(init.body.result.protocolVersion).toBe('2025-11-25');
+    // Read-only tools say so (ChatGPT and others can skip asking for them).
+    const tools = (await mcp(host, t.body.access_token, 'tools/list')).body.result.tools;
+    expect(tools.find((x) => x.name === 'screenshot').annotations.readOnlyHint).toBe(true);
+    expect(tools.find((x) => x.name === 'click').annotations.readOnlyHint).toBe(false);
+  } finally {
+    await host.stop();
+  }
+});
+
+it('the public listener serves only the agent endpoints', async () => {
+  const port = await freePort('tcp');
+  const host = await new Host({ env: { GLASS_TEST_PUBLIC_PORT: String(port) } }).start();
+  try {
+    const at = (path) => fetch(`http://127.0.0.1:${port}${path}`, { headers: { host: `localhost:${port}` } });
+    await expect.poll(async () => (await at('/.well-known/oauth-protected-resource/mcp').catch(() => ({ status: 0 }))).status).toBe(200);
+    expect((await at('/')).status).toBe(404);
+    expect((await at('/agent/v1/status')).status).toBe(404);
+    expect((await at('/config.json')).status).toBe(404);
+    expect((await at('/oauth/token')).headers.get('cache-control')).toBe('no-store');
+  } finally {
+    await host.stop();
   }
 });

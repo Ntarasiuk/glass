@@ -60,16 +60,37 @@ pub struct Answer {
 #[derive(Default)]
 struct State {
     status: Status,
-    /// Size of the last screenshot of each display: actions' x, y are in its pixels.
-    sizes: HashMap<u32, (u32, u32)>,
+    /// Size of each agent's last screenshot of each display: its x, y are in those pixels.
+    sizes: HashMap<(String, u32), (u32, u32)>,
     asks: HashMap<u64, Ask>,
-    next_ask: u64,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
-    f(STATE.lock().unwrap().get_or_insert_with(State::default))
+    f(STATE.lock().unwrap().get_or_insert_with(|| State { status: saved_status(), ..Default::default() }))
+}
+
+/// Stop and Pause outlast a restart (an update, a crash): a stopped agent stays stopped.
+fn status_path() -> std::path::PathBuf {
+    crate::config_dir().join("agent-status.json")
+}
+
+fn saved_status() -> Status {
+    let v: Value = std::fs::read(status_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    Status { paused: v["paused"] == true, stopped: v["stopped"] == true }
+}
+
+fn save_status(status: Status) {
+    let _ = std::fs::write(status_path(), json!({ "paused": status.paused, "stopped": status.stopped }).to_string());
+}
+
+/// A question's id: random, so one asked before a restart never matches one after.
+fn new_ask_id() -> u64 {
+    let mut b = [0u8; 8];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b).expect("random");
+    // Within what JavaScript numbers hold exactly.
+    (u64::from_le_bytes(b) >> 12).max(1)
 }
 
 fn broadcast(msg: ServerMsg) {
@@ -94,12 +115,12 @@ pub fn snapshot() -> Vec<ServerMsg> {
     })
 }
 
-/// The owner, from a viewer: `pause`, `resume`, `stop` or `allow` (after a stop).
 /// Someone connected through a link (not the owner).
 pub fn guest_connected() -> bool {
     crate::viewers::subscribe().borrow().iter().any(|v| matches!(v.how, crate::viewers::How::Guest))
 }
 
+/// The owner, from a viewer: `pause`, `resume`, `stop` or `allow` (after a stop).
 pub fn control(op: &str) {
     let status = with(|s| {
         match op {
@@ -126,6 +147,7 @@ pub fn control(op: &str) {
         }
         s.status
     });
+    save_status(status);
     info!("agent: {op} (by the owner)");
     crate::testmode::record("agent", json!({ "op": op }));
     broadcast(ServerMsg::AgentStatus { status });
@@ -206,9 +228,15 @@ fn human_busy() -> bool {
         || crate::grants::local_input_recent()
 }
 
-/// Waits while paused or while a person is using the computer; refuses when stopped.
-async fn may_act() -> Result<(), Refused> {
+/// How long an agent from another device waits while paused or while the person uses the
+/// computer, before it's told to try again (its request can't stay open for long).
+const AGENT_HOLD: Duration = Duration::from_secs(20);
+
+/// Waits while paused or while a person is using the computer (just looking doesn't wait
+/// for them); refuses when stopped.
+async fn may_act(look: bool) -> Result<(), Refused> {
     let start = Instant::now();
+    let hold = if matches!(crate::grants::current(), crate::grants::Actor::Agent(_)) { AGENT_HOLD } else { PAUSE_WAIT };
     let mut said = false;
     loop {
         let status = with(|s| s.status);
@@ -217,7 +245,7 @@ async fn may_act() -> Result<(), Refused> {
                 "The user stopped the agent. Don't continue; tell them what you were doing.".into(),
             ));
         }
-        let busy = human_busy();
+        let busy = !look && human_busy();
         if !status.paused && !busy {
             return Ok(());
         }
@@ -225,8 +253,12 @@ async fn may_act() -> Result<(), Refused> {
             said = true;
             announce("waiting", "while you use the computer".into(), None);
         }
-        if start.elapsed() > PAUSE_WAIT {
-            return Err(Refused("The user paused the agent and hasn't resumed it.".into()));
+        if start.elapsed() > hold {
+            return Err(Refused(if status.paused {
+                "The user paused agents. Try again in a minute, or wait for them to resume.".into()
+            } else {
+                "The person is using the computer right now. Try again in a minute.".into()
+            }));
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -255,7 +287,7 @@ async fn display(id: Option<u32>) -> Result<DisplayInfo, Refused> {
 
 /// `x`, `y` in the pixels of the last screenshot of `d` (or of a default-sized one), as 0..1.
 fn normalize(d: &DisplayInfo, x: f64, y: f64) -> (f32, f32) {
-    let (w, h) = with(|s| s.sizes.get(&d.id).copied()).unwrap_or_else(|| {
+    let (w, h) = with(|s| s.sizes.get(&(asker(), d.id)).copied()).unwrap_or_else(|| {
         let (w, h) = crate::thumbs::fit(d.width as usize, d.height as usize, DEFAULT_MAX);
         (w as u32, h as u32)
     });
@@ -308,8 +340,25 @@ fn move_to(d: &DisplayInfo, x: f32, y: f32) -> Result<(), Refused> {
     Ok(())
 }
 
+/// An agent under a grant doesn't see protected apps (passwords, keychains…), or apps
+/// outside its limit, when they're in front.
+fn screen_visible() -> Result<(), Refused> {
+    let crate::grants::Actor::Agent(g) = crate::grants::current() else { return Ok(()) };
+    let Some(front) = crate::grants::frontmost_app() else { return Ok(()) };
+    if crate::grants::PROTECTED_APPS.contains(&front.as_str()) {
+        return Err(Refused(format!("{front} is in front, and agents don't see it. Ask the person to switch away with request_help.")));
+    }
+    if let Some(apps) = &g.apps
+        && !apps.contains(&front)
+    {
+        return Err(Refused(format!("This agent only sees {}; {front} is in front.", apps.join(", "))));
+    }
+    Ok(())
+}
+
 pub async fn screenshot(id: Option<u32>, max: Option<[u32; 2]>) -> Result<Value, Refused> {
-    may_act().await?;
+    may_act(true).await?;
+    screen_visible()?;
     let d = display(id).await?;
     let max = max.unwrap_or(DEFAULT_MAX).map(|v| v.clamp(16, LARGEST));
     let shared = shared()?;
@@ -332,7 +381,7 @@ pub async fn screenshot(id: Option<u32>, max: Option<[u32; 2]>) -> Result<Value,
     .ok_or_else(|| Refused("couldn't take a screenshot of that display".into()))?;
     let png = crate::lossless::encode_png(&frame, [0, 0, frame.width, frame.height])
         .map_err(|e| Refused(format!("{e:#}")))?;
-    with(|s| s.sizes.insert(id, (frame.width as u32, frame.height as u32)));
+    with(|s| s.sizes.insert((asker(), id), (frame.width as u32, frame.height as u32)));
     announce("screenshot", format!("of display {id}"), None);
     Ok(json!({
         "display": id,
@@ -352,7 +401,7 @@ fn button_code(name: Option<&str>) -> Result<u8, Refused> {
 }
 
 pub async fn click(id: Option<u32>, x: f64, y: f64, button: Option<&str>, count: u8) -> Result<Value, Refused> {
-    may_act().await?;
+    may_act(false).await?;
     let d = display(id).await?;
     let b = button_code(button)?;
     let (nx, ny) = normalize(&d, x, y);
@@ -372,7 +421,7 @@ pub async fn click(id: Option<u32>, x: f64, y: f64, button: Option<&str>, count:
 }
 
 pub async fn pointer(id: Option<u32>, x: f64, y: f64) -> Result<Value, Refused> {
-    may_act().await?;
+    may_act(false).await?;
     let d = display(id).await?;
     let (nx, ny) = normalize(&d, x, y);
     move_to(&d, nx, ny)?;
@@ -381,7 +430,7 @@ pub async fn pointer(id: Option<u32>, x: f64, y: f64) -> Result<Value, Refused> 
 }
 
 pub async fn drag(id: Option<u32>, from: [f64; 2], to: [f64; 2]) -> Result<Value, Refused> {
-    may_act().await?;
+    may_act(false).await?;
     let d = display(id).await?;
     let (fx, fy) = normalize(&d, from[0], from[1]);
     let (tx, ty) = normalize(&d, to[0], to[1]);
@@ -400,7 +449,7 @@ pub async fn drag(id: Option<u32>, from: [f64; 2], to: [f64; 2]) -> Result<Value
 }
 
 pub async fn scroll(id: Option<u32>, x: f64, y: f64, dx: f64, dy: f64) -> Result<Value, Refused> {
-    may_act().await?;
+    may_act(false).await?;
     let d = display(id).await?;
     let (nx, ny) = normalize(&d, x, y);
     move_to(&d, nx, ny)?;
@@ -410,7 +459,7 @@ pub async fn scroll(id: Option<u32>, x: f64, y: f64, dx: f64, dy: f64) -> Result
 }
 
 pub async fn type_text(text: &str) -> Result<Value, Refused> {
-    may_act().await?;
+    may_act(false).await?;
     if text.chars().count() > 10_000 {
         return Err(Refused("too much text at once (10,000 characters at most)".into()));
     }
@@ -446,7 +495,7 @@ pub async fn type_text(text: &str) -> Result<Value, Refused> {
 }
 
 pub async fn key(keys: &str) -> Result<Value, Refused> {
-    may_act().await?;
+    may_act(false).await?;
     crate::grants::check_input(crate::grants::Target::Keys).map_err(Refused)?;
     let codes = crate::keys::combo(keys).map_err(Refused)?;
     let mut events: Vec<InputEvent> = codes.iter().map(|&keycode| InputEvent::KeyDown { keycode }).collect();
@@ -458,7 +507,7 @@ pub async fn key(keys: &str) -> Result<Value, Refused> {
 
 /// Waits for the display to change and then settle (or for `timeout`).
 pub async fn wait_for_change(id: Option<u32>, timeout: Duration) -> Result<Value, Refused> {
-    may_act().await?;
+    may_act(true).await?;
     let d = display(id).await?;
     let shared = shared()?;
     let id = d.id;
@@ -492,6 +541,7 @@ pub async fn wait_for_change(id: Option<u32>, timeout: Duration) -> Result<Value
 struct Waiting {
     kind: &'static str,
     asker: String,
+    text: String,
     answer: Option<Option<Answer>>,
     /// Kept this long after the answer comes, for the agent to collect.
     until: Instant,
@@ -519,13 +569,27 @@ fn asker() -> String {
 /// open for long), gives up waiting after it and says the question is pending; the
 /// question stays up, and `check_answer` collects the answer later.
 pub async fn ask(kind: &'static str, text: &str, wait: Option<Duration>) -> Result<Value, Refused> {
-    may_act().await?;
+    // Asking touches nothing: it doesn't wait for the person to stop using the computer.
+    may_act(true).await?;
     let mut text: String = text.chars().take(500).collect();
     if let crate::grants::Actor::Agent(g) = crate::grants::current() {
         text = format!("{} ({}): {text}", g.client_name, g.domain);
     }
+    let who = asker();
+    // The same question again (an agent retrying): the one already up, not another.
+    let (same, open) = waiting(|w| {
+        let mine = w.iter().filter(|(_, x)| x.asker == who && x.answer.is_none());
+        let same = mine.clone().find(|(_, x)| x.kind == kind && x.text == text).map(|(id, _)| *id);
+        (same, mine.count())
+    });
+    if let Some(id) = same {
+        return wait_answer(id, wait.unwrap_or(ASK_WAIT + Duration::from_secs(1))).await;
+    }
+    if open >= MAX_OPEN_ASKS {
+        return Err(Refused(format!("{open} of your questions are still waiting for the person; collect their answers with check_answer first.")));
+    }
     let (id, rx) = post_ask(kind, &text, None);
-    waiting(|w| w.insert(id, Waiting { kind, asker: asker(), answer: None, until: Instant::now() + ASK_WAIT + KEEP_ANSWER }));
+    waiting(|w| w.insert(id, Waiting { kind, asker: who, text: text.clone(), answer: None, until: Instant::now() + ASK_WAIT + KEEP_ANSWER }));
     tokio::spawn(async move {
         let answer = collect(id, rx, ASK_WAIT).await;
         waiting(|w| {
@@ -537,6 +601,9 @@ pub async fn ask(kind: &'static str, text: &str, wait: Option<Duration>) -> Resu
     });
     wait_answer(id, wait.unwrap_or(ASK_WAIT + Duration::from_secs(1))).await
 }
+
+/// Questions one agent may have waiting at once.
+const MAX_OPEN_ASKS: usize = 3;
 
 /// How long an answer waits for the agent to collect it.
 const KEEP_ANSWER: Duration = Duration::from_secs(3600);
@@ -595,8 +662,7 @@ async fn collect(id: u64, rx: oneshot::Receiver<Answer>, wait: Duration) -> Opti
 fn post_ask(kind: &'static str, text: &str, choices: Option<Vec<String>>) -> (u64, oneshot::Receiver<Answer>) {
     let (tx, rx) = oneshot::channel();
     let id = with(|s| {
-        s.next_ask += 1;
-        let id = s.next_ask;
+        let id = new_ask_id();
         s.asks.insert(id, Ask { kind, text: text.to_string(), choices: choices.clone(), reply: tx });
         id
     });
@@ -608,7 +674,13 @@ fn post_ask(kind: &'static str, text: &str, choices: Option<Vec<String>>) -> (u6
         "consent" => "An agent asks to use this computer",
         _ => "An agent asks before it acts",
     };
-    crate::notify::notify(title, text);
+    if kind == "consent" {
+        // The request id isn't for people; where to answer is.
+        let shown = text.rsplit_once(" [").map_or(text, |(t, _)| t);
+        crate::notify::notify(title, &format!("{shown} Answer in Glass › AI agents, or in a viewer."));
+    } else {
+        crate::notify::notify(title, text);
+    }
     crate::push::agent_ask(id, kind, text);
     (id, rx)
 }
@@ -624,14 +696,14 @@ pub fn withdraw(id_text: &str) {
 
 /// One action by an agent under a grant: allowed by its scopes and budget, run with the
 /// grant in force (so input is checked against its apps), and written to the audit log.
-pub async fn act_as(grant: &crate::grants::Grant, action: Action) -> Result<Value, Refused> {
+pub async fn act_as(grant: &crate::grants::Grant, action: Action, charge: bool) -> Result<Value, Refused> {
     let (name, view_only) = action.describe();
     let needed = if view_only { crate::grants::VIEW } else { crate::grants::USE };
     if !grant.has(needed) {
         crate::grants::audit(grant, name, "refused: not allowed by its grant", None, false);
         return Err(Refused(format!("This agent isn't allowed to {name} (it needs {needed}).")));
     }
-    match crate::grants::spend(grant) {
+    match if charge { crate::grants::spend(grant) } else { crate::grants::Spend::Ok } {
         crate::grants::Spend::Ok => {}
         over => {
             if matches!(over, crate::grants::Spend::JustOver) {
@@ -650,10 +722,11 @@ pub async fn act_as(grant: &crate::grants::Grant, action: Action) -> Result<Valu
     }
     AGENT_AT.store(epoch_ms(), std::sync::atomic::Ordering::Relaxed);
     let detail = action.audit_detail();
+    // The app in front when it acted (after, a click may have switched apps).
+    let app = crate::grants::frontmost_app();
     let actor = crate::grants::Actor::Agent(grant.clone());
     let result = crate::grants::ACTOR.scope(actor, act(action)).await;
     AGENT_AT.store(epoch_ms(), std::sync::atomic::Ordering::Relaxed);
-    let app = crate::grants::frontmost_app();
     match &result {
         Ok(_) => crate::grants::audit(grant, name, &detail, app.as_deref(), true),
         Err(Refused(why)) => crate::grants::audit(grant, name, &format!("{detail} — refused: {why}"), app.as_deref(), false),
@@ -682,6 +755,19 @@ fn reply(result: Result<Value, Refused>) -> Response<Body> {
 async fn owner(peer: &Peer, headers: &HeaderMap) -> Option<Response<Body>> {
     (!crate::forward::is_owner(peer.0.ip(), headers).await)
         .then(|| (StatusCode::FORBIDDEN, Json(json!({ "error": "owner only" }))).into_response())
+}
+
+/// The displays, for an agent under a grant: scoped, counted and logged like any action.
+pub async fn displays_as(grant: &crate::grants::Grant) -> Result<Value, Refused> {
+    if !grant.has(crate::grants::VIEW) {
+        return Err(Refused("This agent isn't allowed to see the screen.".into()));
+    }
+    if !matches!(crate::grants::spend(grant), crate::grants::Spend::Ok) {
+        return Err(Refused(format!("This agent used its {} actions for this hour.", crate::grants::HOURLY_BUDGET)));
+    }
+    let v = displays_json().await;
+    crate::grants::audit(grant, "list_displays", "", None, v.is_ok());
+    v
 }
 
 /// The displays, as agents see them.
@@ -809,8 +895,8 @@ mod tests {
         let d = display(2560, 1600);
         // Default screenshot: 1280×800.
         assert_eq!(normalize(&d, 640.0, 400.0), (0.5, 0.5));
-        with(|s| s.sizes.insert(99, (100, 50)));
+        with(|s| s.sizes.insert(("owner".into(), 99), (100, 50)));
         assert_eq!(normalize(&d, 25.0, 50.0), (0.25, 1.0));
-        with(|s| s.sizes.remove(&99));
+        with(|s| s.sizes.remove(&("owner".into(), 99)));
     }
 }

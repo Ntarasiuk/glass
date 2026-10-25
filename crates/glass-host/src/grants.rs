@@ -224,7 +224,11 @@ pub fn update<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R> {
     }
     // A store that can't be read is kept as it is for the owner to look at, never replaced.
     let mut store = read().with_context(|| format!("{} is damaged; move it aside to start over", path().display()))?;
+    let before = serde_json::to_vec(&store)?;
     let out = f(&mut store);
+    if serde_json::to_vec(&store)? == before {
+        return Ok(out);
+    }
     let tmp = path().with_extension("json.tmp");
     {
         let mut file = std::fs::File::create(&tmp)?;
@@ -296,10 +300,23 @@ pub fn create(mut g: Grant) -> Result<(Grant, Issued)> {
     let now = now();
     let issued = issue(&mut g, now);
     let out = g.clone();
-    update(|s| {
+    let replaced = update(|s| {
         s.grants.retain(|x| x.live(now));
+        // Approved again (or for more): this grant replaces the agent's earlier one.
+        let mut replaced = Vec::new();
+        for x in s.grants.iter_mut().filter(|x| x.client_id == g.client_id && x.subject == g.subject) {
+            x.revoked = true;
+            x.refresh = None;
+            x.access.clear();
+            replaced.push(x.clone());
+        }
+        s.grants.retain(|x| !x.revoked);
         s.grants.push(g);
+        replaced
     })?;
+    for x in &replaced {
+        audit(x, "revoked", "replaced by a new approval", None, true);
+    }
     audit(&out, "granted", &out.summary(), None, true);
     Ok((out, issued))
 }
@@ -388,10 +405,10 @@ pub fn by_access(token: &str) -> Option<Grant> {
 }
 
 /// RFC 7009: a refresh token ends its grant; an access token ends just itself.
-pub fn revoke_token(token: &str) -> Result<()> {
+pub fn revoke_token(token: &str, client_id: &str) -> Result<()> {
     let h = hash(token);
     let ended = update(|s| {
-        for g in &mut s.grants {
+        for g in s.grants.iter_mut().filter(|g| g.client_id == client_id) {
             if g.refresh.as_deref() == Some(h.as_str()) || g.retired.contains(&h) {
                 g.revoked = true;
                 g.refresh = None;
@@ -415,6 +432,11 @@ pub fn revoke_token(token: &str) -> Result<()> {
 
 /// Ends grants by id (or all of them, for `None`); how many ended.
 pub fn revoke(id: Option<&str>) -> Result<usize> {
+    revoke_because(id, "by the owner")
+}
+
+/// Ends grants by id (or all), saying why in the audit log.
+pub fn revoke_because(id: Option<&str>, why: &str) -> Result<usize> {
     let ended = update(|s| {
         let mut ended = Vec::new();
         for g in s.grants.iter_mut().filter(|g| !g.revoked && id.is_none_or(|id| g.id == id)) {
@@ -427,7 +449,7 @@ pub fn revoke(id: Option<&str>) -> Result<usize> {
         ended
     })?;
     for g in &ended {
-        audit(g, "revoked", "by the owner", None, true);
+        audit(g, "revoked", why, None, true);
     }
     Ok(ended.len())
 }
@@ -448,7 +470,7 @@ fn uninstall_apps(s: &mut Store, ended: &[Grant]) {
 /// app all write here.
 pub fn audit(g: &Grant, action: &str, detail: &str, app: Option<&str>, ok: bool) {
     let result = (|| -> Result<()> {
-        use std::io::{Read, Seek, SeekFrom};
+        use std::io::{Seek, SeekFrom};
         let mut f = std::fs::OpenOptions::new().create(true).read(true).append(true).open(audit_path())?;
         #[cfg(unix)]
         {
@@ -456,17 +478,24 @@ pub fn audit(g: &Grant, action: &str, detail: &str, app: Option<&str>, ok: bool)
             // SAFETY: flock on a file we hold open; released when it closes.
             unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
         }
-        let len = f.seek(SeekFrom::End(0))?;
-        let from = len.saturating_sub(16 * 1024);
-        f.seek(SeekFrom::Start(from))?;
-        let mut tail = String::new();
-        f.read_to_string(&mut tail)?;
-        let prev = tail
-            .lines()
-            .last()
-            .and_then(|l| serde_json::from_str::<Value>(l).ok())
-            .and_then(|v| v["hash"].as_str().map(str::to_string))
-            .unwrap_or_default();
+        let mut len = f.seek(SeekFrom::End(0))?;
+        if len > AUDIT_ROTATE {
+            // Rotated: the old lines move to .1 and the chain carries on from them.
+            let prev = last_hash(&mut f, len)?;
+            std::fs::rename(audit_path(), audit_path().with_extension("1.jsonl"))?;
+            f = std::fs::OpenOptions::new().create(true).read(true).append(true).open(audit_path())?;
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                // SAFETY: as above.
+                unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+            }
+            let mut entry = json!({ "at": now(), "action": "rotated", "prev": prev });
+            entry["hash"] = json!(hash(&entry.to_string()));
+            writeln!(f, "{entry}")?;
+            len = f.seek(SeekFrom::End(0))?;
+        }
+        let prev = last_hash(&mut f, len)?;
         let mut entry = json!({
             "at": now(), "grant": g.id, "agent": g.domain, "name": g.client_name,
             "action": action, "detail": detail, "app": app, "ok": ok, "prev": prev,
@@ -481,9 +510,33 @@ pub fn audit(g: &Grant, action: &str, detail: &str, app: Option<&str>, ok: bool)
 }
 
 /// Checks the audit log's chain; the number of good lines, or where it breaks.
+/// The audit log rolls over to `agent-audit.1.jsonl` at this size.
+const AUDIT_ROTATE: u64 = 8 * 1024 * 1024;
+
+/// The hash on the last line of an open audit file of length `len`.
+fn last_hash(f: &mut std::fs::File, len: u64) -> Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    f.seek(SeekFrom::Start(len.saturating_sub(16 * 1024)))?;
+    let mut tail = String::new();
+    f.read_to_string(&mut tail)?;
+    Ok(tail
+        .lines()
+        .last()
+        .and_then(|l| serde_json::from_str::<Value>(l).ok())
+        .and_then(|v| v["hash"].as_str().map(str::to_string))
+        .unwrap_or_default())
+}
+
 pub fn verify_audit() -> Result<usize> {
-    let text = std::fs::read_to_string(audit_path()).unwrap_or_default();
-    let mut prev = String::new();
+    let old = std::fs::read_to_string(audit_path().with_extension("1.jsonl")).unwrap_or_default();
+    let text = old + &std::fs::read_to_string(audit_path()).unwrap_or_default();
+    // The oldest kept line may follow lines rotated away long ago.
+    let mut prev = text
+        .lines()
+        .next()
+        .and_then(|l| serde_json::from_str::<Value>(l).ok())
+        .and_then(|v| v["prev"].as_str().map(str::to_string))
+        .unwrap_or_default();
     for (i, line) in text.lines().enumerate() {
         let mut v: Value = serde_json::from_str(line).with_context(|| format!("line {}", i + 1))?;
         let claimed = v["hash"].as_str().unwrap_or_default().to_string();
@@ -496,8 +549,19 @@ pub fn verify_audit() -> Result<usize> {
 }
 
 pub fn audit_lines(n: usize) -> Vec<Value> {
-    let text = std::fs::read_to_string(audit_path()).unwrap_or_default();
-    let lines: Vec<&str> = text.lines().collect();
+    use std::io::{Read, Seek, SeekFrom};
+    // Just the end of the file.
+    let mut text = String::new();
+    if let Ok(mut f) = std::fs::File::open(audit_path()) {
+        let len = f.seek(SeekFrom::End(0)).unwrap_or(0);
+        let from = len.saturating_sub(n as u64 * 1024);
+        let _ = f.seek(SeekFrom::Start(from));
+        let _ = f.read_to_string(&mut text);
+        if from > 0 {
+            text = text.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap_or_default();
+        }
+    }
+    let lines: Vec<&str> = text.lines().filter(|l| !l.contains("\"action\":\"rotated\"")).collect();
     lines[lines.len().saturating_sub(n)..]
         .iter()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -660,6 +724,12 @@ pub enum Target {
 /// the protected ones or a password field.
 pub fn check_input(target: Target) -> Result<(), String> {
     let Actor::Agent(g) = current() else { return Ok(()) };
+    // Revoked (or stopped) while this action waited: nothing more goes through.
+    let now = now();
+    let store = load();
+    if !store.enabled || !store.grants.iter().any(|x| x.id == g.id && x.live(now)) {
+        return Err("This agent's access was revoked.".into());
+    }
     if matches!(target, Target::Keys) && secure_input() {
         return Err("A password field has the keyboard (secure input is on). Ask the person to type it with request_help.".into());
     }
@@ -672,6 +742,9 @@ pub fn check_input(target: Target) -> Result<(), String> {
     if let Some(apps) = &g.apps {
         match &app {
             Some(app) if apps.iter().any(|a| a == app) => {}
+            Some(app) if SYSTEM_UI.contains(&app.as_str()) => {
+                return Err(format!("This agent may only use {}; that input would go to {app}, which could open anything.", apps.join(", ")));
+            }
             Some(app) => return Err(format!("This agent may only use {}; that input would go to {app}.", apps.join(", "))),
             None => return Err("Can't tell which app the input would reach, and this agent is limited to some apps.".into()),
         }

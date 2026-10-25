@@ -222,6 +222,13 @@ pub(crate) fn tools() -> Value {
         { "name": "check_answer", "description": "The person's answer to a question confirm or request_help left pending, waiting up to wait_seconds for it.",
           "inputSchema": schema(json!({ "id": { "type": "integer", "description": "The question's id, from the pending reply." }, "wait_seconds": wait }), &["id"]) },
     ]);
+    // Hints for clients that ask before each call: looking is read-only, nothing is destructive
+    // by itself (the agent confirms what is), and it's this computer, not the open world.
+    for tool in list.as_array_mut().unwrap().iter_mut() {
+        let name = tool["name"].as_str().unwrap_or("").to_string();
+        let read_only = looks_only(&name) || matches!(name.as_str(), "list_machines" | "check_answer");
+        tool["annotations"] = json!({ "readOnlyHint": read_only, "destructiveHint": false, "openWorldHint": false });
+    }
     // Every tool but list_machines can work on another computer.
     for tool in list.as_array_mut().unwrap().iter_mut().skip(1) {
         tool["inputSchema"]["properties"]["machine"] = json!({ "type": "string",
