@@ -271,8 +271,9 @@ test.describe('displays', () => {
   it('encodes at the size this screen shows, or the full size on request', async ({ page, host }) => {
     // A small window: the 640×360 display only needs ~300 px, so the host sends half
     // size (the test encoder, like Linux's, scales by halves; Macs scale to any width).
+    // Not open(): on a slow machine the first frame may already be the half-size one.
     await page.setViewportSize({ width: 300, height: 240 });
-    await open(page, host);
+    await page.goto(host.url());
     await expect.poll(() => hudText(page), { timeout: 15_000 }).toContain('320×180');
     // "This Mac" asks for full resolution again.
     await page.locator('#btn-displays').dispatchEvent('click');
