@@ -21,13 +21,13 @@ async function size(page) {
 }
 
 it('sharp text sends the display at full size, and auto sizing comes back after', async ({ browser, host }) => {
-  // A small window: auto sizing encodes the 640×360 test display smaller.
-  const context = await browser.newContext({ viewport: { width: 400, height: 300 } });
+  // A small window: auto sizing sends the 640×360 test display at half size (the test
+  // encoder scales by halves).
+  const context = await browser.newContext({ viewport: { width: 300, height: 240 } });
   const page = await context.newPage();
   await page.goto(host.url());
   await page.keyboard.press('Control+Shift+H'); // stats, for the HUD size
-  await expect.poll(() => size(page), { timeout: 15_000 }).not.toBe('640×360');
-  await expect.poll(() => size(page), { timeout: 15_000 }).toMatch(/×/);
+  await expect.poll(() => size(page), { timeout: 15_000 }).toBe('320×180');
 
   await pickMenuItem(page, 'btn-displays', 'Sharp text');
   await expect.poll(() => records(host)).toEqual([{ on: true, rext: false }]);
@@ -42,7 +42,7 @@ it('sharp text sends the display at full size, and auto sizing comes back after'
   await pickMenuItem(page, 'btn-displays', 'Sharp text');
   await expect.poll(() => records(host)).toHaveLength(4);
   expect((await records(host)).at(-1)).toEqual({ on: false, rext: false });
-  await expect.poll(() => size(page), { timeout: 15_000 }).not.toBe('640×360');
+  await expect.poll(() => size(page), { timeout: 15_000 }).toBe('320×180');
   await context.close();
 });
 
