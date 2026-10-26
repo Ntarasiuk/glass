@@ -18,6 +18,7 @@ Features:
 - **120 fps and wide colour.** A viewer on a fast screen (120 Hz and up) gets up to 120 frames a second from a Mac whose display refreshes that fast; a wide-colour (Display P3) Mac display arrives in P3 instead of being clipped to sRGB.
 - **Works in the browser.** Open a URL on the iPad; there's no app to install. Add it to the Home Screen for a true fullscreen app.
 - **Full control.** Mouse, trackpad, keyboard, and touch (tap to click, drag, long-press to right-click, two-finger scroll), plus an on-screen keyboard button.
+- **Trackpad mode on phones.** The screen works like a laptop trackpad: drag to move the pointer, tap to click, two-finger tap to right-click; zoomed in, the view follows the pointer. The toolbar folds into menus on small screens.
 - **Unlocks a locked Mac.** Type the password at the lock screen from the remote device.
 - **Apple Pencil.** Pressure and tilt reach the Mac as tablet input, so drawing apps (Photoshop, Affinity, Krita) respond as they do to a drawing tablet.
 - **Multiple displays.** Show one display, switch between them, or show all of them side by side in their macOS arrangement.
@@ -219,7 +220,11 @@ The toolbar (top right) groups its buttons: machines and displays, keyboard, sou
 
 **Display previews.** With two or more displays, a strip of small live previews of each one (and **All**) sits in the empty band below the picture whenever there's room; the one being shown is outlined, and tapping another switches to it. Without room it waits behind a small tab at the bottom. Hide it with its ⌄ button; that's remembered. Live previews of displays not being shown need macOS 14 or newer.
 
-Touch gestures: tap = click, drag = drag, long-press = right-click, two fingers = scroll.
+Touch gestures: tap = click, drag = drag, long-press = right-click, two fingers = scroll, pinch = zoom.
+
+**Trackpad mode** (the trackpad button, in the keyboard group; on by default on phones): the screen works like a laptop trackpad. Drag to move the pointer (faster flicks go further), tap to click, two-finger tap to right-click, double-tap and hold (or press and hold) to drag, two fingers to scroll, pinch to zoom; when zoomed in, the view follows the pointer.
+
+On a phone the toolbar folds each group into one button with a dropdown.
 
 Apple Pencil and other styluses draw with pressure and tilt: the Mac sees a pen tablet, so Photoshop, Affinity, Krita and other drawing apps vary the stroke. Hovering (Pencil hover on newer iPads) moves the pointer without clicking.
 

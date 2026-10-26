@@ -193,7 +193,13 @@ export async function stats(page) {
 /** Clicks a toolbar button (showing the toolbar first if it was hidden). */
 export async function toolbarClick(page, id) {
   if (await page.locator('#toolbar-show').isVisible()) await page.locator('#toolbar-show').click();
-  await page.locator(`#${id}`).click();
+  // On a phone-sized screen the button may be in its group's dropdown.
+  const button = page.locator(`#${id}`);
+  if (!(await button.isVisible())) {
+    const trigger = page.locator(`.tb-group:has(#${id}) .tb-trigger`);
+    if (await trigger.isVisible()) await trigger.click();
+  }
+  await button.click();
 }
 
 /** Opens a toolbar menu and clicks the item whose label starts with `label`. */
