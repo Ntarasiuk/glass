@@ -180,6 +180,8 @@ Devices that aren't on your tailnet, or belong to another tailnet user, are aske
 
 **From anywhere (no Tailscale on the device).** `glass link --anywhere` makes a link like `https://glassdesk.dev/app/#r=…&l=…` that works from any network. The browser and your computer connect directly over WebRTC: UDP, end-to-end encrypted, about as fast as on the tailnet. When a direct path is impossible (some cellular and corporate networks), traffic goes through Cloudflare's TURN relay, still end-to-end encrypted. glassdesk.dev only introduces the two sides; your computer keeps one outgoing connection to it and opens no ports. The link carries your computer's public key and the computer signs every connection answer, so the browser refuses anyone else, glassdesk.dev included. Remote access is off until you make such a link (or run `glass remote on`); `glass remote off` turns it off. One thing to know: in this mode the viewer page itself comes from glassdesk.dev, whereas on your tailnet it comes from your own computer.
 
+**Your computers (glassdesk.dev/computers).** Sign in there with a passkey (no email, no password; it syncs through iCloud Keychain, Google Password Manager or your password manager) to see which of your computers are online and open any of them from any device. To add a computer, run `glass account add` on it (remote access must be on) and open the one-time link, or scan its QR code, where you're signed in. Your computer signs that claim with its key, so nobody can add a computer they don't control. The account only lists computers: opening one still takes that computer's own sign-in, so someone who got into your account would see names and who's online, never a screen. `glass account remove` takes a computer off every account; deleting the account on the page deletes its list. glassdesk.dev keeps the passkey's public key, each computer's name and public key, and a hash of each sign-in cookie.
+
 ## Help someone (quick support)
 
 For helping a parent or a friend who doesn't have Glass, and shouldn't have to install anything:
@@ -353,6 +355,8 @@ glass wake <name|mac>    Wake a machine with Wake-on-LAN
 glass acl [add|remove]   Access rules for SSO and LDAP accounts
 glass config [key [value]]   Settings (no arguments: list them all with descriptions)
 glass remote on|off      Remote access from outside your tailnet (status without an argument)
+glass account add        One-time link (and QR code) that puts this computer on your glassdesk.dev/computers account
+glass account remove     Take this computer off every account
 glass token         Show the access token for devices outside your tailnet
 glass token --reset Replace it with a new random token
 glass token --set   Choose your own token (prompted; or piped: echo … | glass token --set)
@@ -429,7 +433,7 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 - Glass runs as your user (a LaunchAgent on macOS, a systemd user service on Linux), never as root.
 - The file browser is for the computer's owner only (not links or guests), sees only the home folder (no `..`, no symlinks out), and moves to the Trash rather than deleting.
 - Notifications are the one thing that leaves your network: the computer sends them through your browser's push service (Apple, Google, Mozilla or Microsoft), encrypted end to end (RFC 8291), so the push service can't read them. Only devices you turn them on for get them; guests only ever get messages.
-- The glassdesk.dev website uses Google Analytics on its pages (not on the remote viewer at glassdesk.dev/app), counts downloads using a salted hash of the IP address (no raw IPs stored) and stores feedback you choose to send, which is emailed to the maintainer. Downloads are also counted in Google Analytics under that same hash, with the country. The installer says which version it replaces, if any, so updates are counted apart from new installs. The Glass app itself sends nothing to glassdesk.dev except feedback you submit and its check for a new version.
+- The glassdesk.dev website uses Google Analytics on its pages (not on the remote viewer at glassdesk.dev/app), counts downloads using a salted hash of the IP address (no raw IPs stored) and stores feedback you choose to send, which is emailed to the maintainer. Downloads are also counted in Google Analytics under that same hash, with the country. The installer says which version it replaces, if any, so updates are counted apart from new installs. The Glass app itself sends nothing to glassdesk.dev except feedback you submit, its check for a new version, and, when you run `glass account add`, the computer's name and public key. The /computers page loads no analytics.
 
 ## Requirements
 

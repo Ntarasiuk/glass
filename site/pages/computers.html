@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your computers · Glass</title>
+  <meta name="description" content="Which of your computers are online, and a way to open each one from anywhere.">
+  <link rel="canonical" href="https://glassdesk.dev/computers">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-512.png">
+  <meta name="theme-color" content="#07080a">
+  <link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/hanken-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/glassy/glassy.css">
+  <link rel="stylesheet" href="/style.css">
+  <!-- No third-party scripts on a page about your computers. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <!-- Personal to each browser: nothing to index. -->
+  <meta name="robots" content="noindex">
+  <meta property="article:modified_time" content="{{modified}}">
+  <style>
+    .computers { display: grid; gap: clamp(28px, 4vw, 44px); padding: clamp(40px, 7vw, 88px) 0 clamp(48px, 8vw, 96px); max-width: 720px; }
+    .computers section { padding: 0; }
+    .computers h1 { margin: 0; font-size: clamp(38px, 5.4vw, 64px); line-height: 1; }
+    .computers h2 { margin: 0 0 6px; font-size: 26px; }
+    .computers .lead, .computers .note { margin: 0; color: var(--text-dim); }
+    .computers .lead { margin-top: 18px; font-size: clamp(17px, 1.5vw, 19px); max-width: 52ch; }
+    .computers .note { font-size: 15px; }
+    .list { margin: 14px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+    .list li { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-radius: 14px; background: rgb(255 255 255 / 0.05); }
+    .list .dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: rgb(255 255 255 / 0.22); }
+    .list .on .dot { background: #34c759; }
+    .list .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+    .list .detail { flex: none; color: var(--text-faint); font-size: 14px; }
+    .list a.open { flex: none; padding: 7px 14px; border-radius: 10px; background: var(--accent); color: #04121f; font-weight: 650; font-size: 14px; text-decoration: none; }
+    .list button.forget { flex: none; padding: 0 4px; border: 0; background: none; color: var(--text-faint); font-size: 18px; line-height: 1; cursor: pointer; }
+    .list button.forget:hover { color: var(--text-dim); }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .actions button { padding: 10px 18px; border: 1px solid rgb(255 255 255 / 0.14); border-radius: 12px; background: rgb(255 255 255 / 0.06); color: inherit; font: inherit; font-weight: 600; cursor: pointer; }
+    .actions button.primary { border-color: transparent; background: var(--accent); color: #04121f; }
+    .actions button.quiet { border-color: transparent; background: none; color: var(--text-faint); font-weight: 500; }
+    .actions button:disabled { opacity: 0.6; cursor: default; }
+    .computers .claim { padding: 18px 20px; border-radius: 16px; border: 1px solid rgb(255 255 255 / 0.14); background: rgb(255 255 255 / 0.06); }
+    .claim h2 { font-size: 22px; }
+    .hidden { display: none !important; }
+    .form-status { margin: 10px 0 0; color: var(--text-dim); font-size: 15px; }
+    .form-status:empty, .list:empty { display: none; }
+    .note code { font-size: 0.92em; }
+  </style>
+</head>
+<body>
+  <header class="site wrap lg-glass-surface" data-lg-preset="header">
+    <a class="brand" href="/"><img src="/icon.svg" alt="Glass logo" width="26" height="26">Glass</a>
+    <nav aria-label="Main">
+      <a href="/features">Features</a>
+      <a href="/docs">Docs</a>
+      <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
+    </nav>
+  </header>
+  <main class="computers wrap">
+    <section>
+      <h1>Your computers.</h1>
+      <p class="lead">Which are online, and a way into each from anywhere.</p>
+    </section>
+
+    <section class="claim hidden" id="claim" aria-labelledby="claim-title">
+      <h2 id="claim-title"></h2>
+      <p class="note" id="claim-note"></p>
+      <div class="actions" id="claim-actions"></div>
+      <p class="form-status" id="claim-status" role="status"></p>
+    </section>
+
+    <section class="hidden" id="mine" aria-labelledby="mine-title">
+      <h2 id="mine-title">On your account</h2>
+      <p class="note" id="mine-note"></p>
+      <ul class="list" id="mine-list"></ul>
+    </section>
+
+    <section aria-labelledby="account-title">
+      <h2 id="account-title">Your account</h2>
+      <p class="note" id="account-note"></p>
+      <div class="actions" id="account-actions"></div>
+      <p class="form-status" id="account-status" role="status"></p>
+    </section>
+
+    <section id="browser" aria-labelledby="browser-title">
+      <h2 id="browser-title">On this browser</h2>
+      <p class="note" id="browser-note"></p>
+      <ul class="list" id="browser-list"></ul>
+    </section>
+  </main>
+  {{footer}}
+  <script src="/site.js" type="module"></script>
+  <script type="module">
+    // The computers this browser opened from anywhere (glass.remotes, kept by /app/), and
+    // whether each is online: the introducer knows which hosts are connected to it.
+    const REMOTES_KEY = 'glass.remotes';
+    const REFRESH_MS = 30_000;
+    const $ = (id) => document.getElementById(id);
+    /** Sets a note's text; `like this` becomes code. */
+    function say(id, text) {
+      $(id).replaceChildren(...text.split('`').map((part, i) => {
+        if (!(i % 2)) return part;
+        const code = document.createElement('code');
+        code.textContent = part;
+        return code;
+      }));
+    }
+    const remotes = () => { try { return JSON.parse(localStorage.getItem(REMOTES_KEY) ?? '[]'); } catch { return []; } };
+    const saveRemotes = (list) => { try { localStorage.setItem(REMOTES_KEY, JSON.stringify(list)); } catch {} };
+
+    function row({ name, on, href, onForget }) {
+      const li = document.createElement('li');
+      if (on) li.className = 'on';
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      const label = document.createElement('span');
+      label.className = 'name';
+      label.textContent = name;
+      const info = document.createElement('span');
+      info.className = 'detail';
+      info.textContent = on ? 'online' : 'offline';
+      li.append(dot, label, info);
+      if (!href) return li;
+      const a = document.createElement('a');
+      a.className = 'open';
+      a.href = href;
+      a.textContent = 'Open';
+      li.append(a);
+      if (onForget) {
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'forget';
+        x.title = `Forget ${name}`;
+        x.setAttribute('aria-label', `Forget ${name}`);
+        x.textContent = '×';
+        x.addEventListener('click', onForget);
+        li.append(x);
+      }
+      return li;
+    }
+
+    /** The introducer's id for a host key: the first 16 bytes of its SHA-256 (as in rtc.js). */
+    async function hostId(key) {
+      const raw = Uint8Array.from(atob(key.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', raw)).slice(0, 16);
+      return btoa(String.fromCharCode(...digest)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    async function showBrowser() {
+      const list = remotes();
+      $('browser').classList.toggle('hidden', !list.length && Boolean(account));
+      if (!list.length) {
+        say('browser-note', 'Computers you open with a link from `glass link --anywhere` show up here.');
+        $('browser-list').replaceChildren();
+        return;
+      }
+      $('browser-note').textContent = 'Opened from this browser before.';
+      const ids = await Promise.all(list.map((c) => hostId(c.key).catch(() => '')));
+      const { online = {} } = await fetch(`/signal/online?ids=${ids.filter(Boolean).join(',')}`).then((r) => r.json()).catch(() => ({}));
+      const forget = (key) => () => {
+        saveRemotes(remotes().filter((c) => c.key !== key));
+        showBrowser();
+      };
+      $('browser-list').replaceChildren(...list.map((c, i) => row({
+        name: c.name,
+        on: Boolean(online[ids[i]]),
+        href: `/app/#r=${encodeURIComponent(c.key)}`,
+        onForget: forget(c.key),
+      })));
+    }
+
+    // Accounts: a passkey, nothing else. The site checks each ceremony (src/accounts.js);
+    // the session is an HttpOnly cookie this page never sees.
+    const enc = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const dec = (text) => Uint8Array.from(atob(text.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+    let account = null;
+
+    async function api(path, { method = 'GET', body } = {}) {
+      const r = await fetch(path, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body && JSON.stringify(body) });
+      const out = await r.json().catch(() => ({}));
+      if (!r.ok) throw Object.assign(new Error(out.error ?? 'Something went wrong. Try again.'), out, { status: r.status });
+      return out;
+    }
+
+    /** A new account, or (signed in) another passkey for this one, say from another password manager. */
+    async function createPasskey() {
+      const o = await api('/api/account/challenge', { method: 'POST', body: { mode: 'create' } });
+      const cred = await navigator.credentials.create({ publicKey: {
+        ...o,
+        challenge: dec(o.challenge),
+        user: { ...o.user, id: dec(o.user.id) },
+        excludeCredentials: o.excludeCredentials.map((c) => ({ ...c, id: dec(c.id) })),
+      } });
+      const r = cred.response;
+      const publicKey = r.getPublicKey();
+      if (!publicKey) throw new Error('This browser can\'t share the passkey\'s key. Try another browser.');
+      await api('/api/account/passkey', { method: 'POST', body: {
+        id: cred.id,
+        clientDataJSON: enc(r.clientDataJSON),
+        authenticatorData: enc(r.getAuthenticatorData()),
+        publicKey: enc(publicKey),
+        publicKeyAlgorithm: r.getPublicKeyAlgorithm(),
+      } });
+    }
+
+    async function signIn() {
+      const o = await api('/api/account/challenge', { method: 'POST', body: { mode: 'get' } });
+      const cred = await navigator.credentials.get({ publicKey: { ...o, challenge: dec(o.challenge) } });
+      const r = cred.response;
+      try {
+        await api('/api/account/session', { method: 'POST', body: {
+          id: cred.id,
+          clientDataJSON: enc(r.clientDataJSON),
+          authenticatorData: enc(r.authenticatorData),
+          signature: enc(r.signature),
+          userHandle: r.userHandle ? enc(r.userHandle) : undefined,
+        } });
+      } catch (e) {
+        // Its account is gone: let the password manager drop it.
+        if (e.unknown) PublicKeyCredential.signalUnknownCredential?.({ rpId: location.hostname, credentialId: cred.id }).catch(() => {});
+        throw e;
+      }
+    }
+
+    function button(text, onClick, kind = '') {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = text;
+      if (kind) b.className = kind;
+      b.addEventListener('click', async () => {
+        for (const other of $('account-actions').querySelectorAll('button')) other.disabled = true;
+        $('account-status').textContent = '';
+        try {
+          await onClick();
+        } catch (e) {
+          // Closing the passkey sheet isn't an error worth a message.
+          if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') $('account-status').textContent = e.message;
+        }
+        await showAccount();
+        await Promise.all([showClaim(), showMine()]);
+      });
+      return b;
+    }
+
+    async function showAccount() {
+      ({ account } = await api('/api/account').catch(() => ({ account: null })));
+      if (!window.PublicKeyCredential) {
+        $('account-note').textContent = 'This browser can\'t use passkeys.';
+        $('account-actions').replaceChildren();
+        return;
+      }
+      if (!account) {
+        $('account-note').textContent = 'Sign in with a passkey to see your computers on every device: it syncs through iCloud Keychain, Google Password Manager or your password manager. No email, no password.';
+        $('account-actions').replaceChildren(
+          button('Sign in', signIn, 'primary'),
+          button('Create an account', createPasskey),
+        );
+        return;
+      }
+      $('account-note').textContent = `Signed in with a passkey${account.passkeys > 1 ? ` (this account has ${account.passkeys})` : ''}.`;
+      $('account-actions').replaceChildren(
+        button('Sign out', () => api('/api/account/session', { method: 'DELETE' })),
+        button('Add a passkey', createPasskey),
+        button('Delete account', async () => {
+          if (!confirm('Delete your account? Your computers stay as they are; only this list goes.')) return;
+          await api('/api/account', { method: 'DELETE' });
+        }, 'quiet'),
+      );
+    }
+
+    async function showMine() {
+      $('mine').classList.toggle('hidden', !account);
+      $('browser').classList.toggle('hidden', !remotes().length && Boolean(account));
+      if (!account) return;
+      const { computers = [] } = await api('/api/account/computers').catch(() => ({}));
+      say('mine-note', computers.length
+        ? 'Signed in on any device, these are here.'
+        : 'To add a computer, run `glass account add` on it and open the link here.');
+      $('mine-list').replaceChildren(...computers.map((c) => row({
+        name: c.name,
+        on: c.online,
+        href: `/app/#r=${encodeURIComponent(c.key)}`,
+        onForget: async () => {
+          if (!confirm(`Take ${c.name} off your account? To add it back, run glass account add on it.`)) return;
+          await api(`/api/account/computers/${c.id}`, { method: 'DELETE' }).catch(() => {});
+          showMine();
+        },
+      })));
+    }
+
+    // A link from `glass account add` (#claim=…): kept for this tab until used or dismissed,
+    // so creating an account or signing in on the way doesn't lose it.
+    function takeClaimFromLink() {
+      const fromLink = new URLSearchParams(location.hash.slice(1)).get('claim');
+      if (!fromLink) return false;
+      try { sessionStorage.setItem('glass.claim', fromLink); } catch {}
+      history.replaceState(null, '', location.pathname);
+      return true;
+    }
+    takeClaimFromLink();
+    addEventListener('hashchange', () => { if (takeClaimFromLink()) showClaim(); });
+    const pendingClaim = () => { try { return sessionStorage.getItem('glass.claim'); } catch { return null; } };
+    const dropClaim = () => { try { sessionStorage.removeItem('glass.claim'); } catch {} };
+
+    async function showClaim() {
+      const code = pendingClaim();
+      $('claim').classList.toggle('hidden', !code);
+      if (!code) return;
+      let name;
+      try {
+        ({ name } = await api(`/api/account/claim?code=${encodeURIComponent(code)}`));
+      } catch (e) {
+        $('claim-title').textContent = 'This link doesn\'t work';
+        $('claim-note').textContent = e.message;
+        $('claim-actions').replaceChildren(claimButton('OK', async () => dropClaim()));
+        return;
+      }
+      $('claim-title').textContent = `Add ${name}?`;
+      if (!account) {
+        $('claim-note').textContent = `Sign in or create an account below, then add ${name} to it.`;
+        $('claim-actions').replaceChildren(claimButton('Not now', async () => dropClaim(), 'quiet'));
+        return;
+      }
+      $('claim-note').textContent = 'Only add a computer you\'re setting up yourself, right now: it shows on your account and opens from here.';
+      $('claim-actions').replaceChildren(
+        claimButton(`Add ${name}`, async () => {
+          await api('/api/account/computers', { method: 'POST', body: { claim: code } });
+          dropClaim();
+        }, 'primary'),
+        claimButton('Not now', async () => dropClaim(), 'quiet'),
+      );
+    }
+
+    function claimButton(text, onClick, kind = '') {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = text;
+      if (kind) b.className = kind;
+      b.addEventListener('click', async () => {
+        for (const other of $('claim-actions').querySelectorAll('button')) other.disabled = true;
+        $('claim-status').textContent = '';
+        try {
+          await onClick();
+        } catch (e) {
+          $('claim-status').textContent = e.message;
+          if (e.status !== 404) {
+            for (const other of $('claim-actions').querySelectorAll('button')) other.disabled = false;
+            return;
+          }
+          dropClaim();
+        }
+        await Promise.all([showClaim(), showMine()]);
+      });
+      return b;
+    }
+
+    const refresh = () => Promise.all([showMine(), showBrowser()]);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+    setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS);
+    showAccount().then(() => Promise.all([showClaim(), showMine()]));
+    showBrowser();
+  </script>
+</body>
+</html>

@@ -17,8 +17,10 @@ export class Introducer extends DurableObject {
   }
 
   async fetch(request) {
-    if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected a WebSocket', { status: 426 });
     const url = new URL(request.url);
+    // For glassdesk.dev/computers. Not secret: a browser that connects is told the same.
+    if (url.searchParams.get('role') === 'status') return Response.json({ online: Boolean(this.host()) });
+    if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected a WebSocket', { status: 426 });
     const role = url.searchParams.get('role');
     const hostId = url.searchParams.get('id');
     const { 0: client, 1: server } = new WebSocketPair();
@@ -105,16 +107,40 @@ export class Introducer extends DurableObject {
 
 /** The host proves it holds the key whose fingerprint is its id. */
 async function verifyHost(hostId, nonce, keyB64, sigB64) {
+  return (await verifySigned(keyB64, `glass-signal-v1\n${nonce}`, sigB64)) === hostId;
+}
+
+/**
+ * The id of the host whose key (`keyB64`, a raw P-256 point) signed `message`, or null.
+ * The id is the key's fingerprint, so only the key's holder speaks for it.
+ */
+export async function verifySigned(keyB64, message, sigB64) {
   try {
     const keyBytes = fromB64url(keyB64);
-    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', keyBytes));
-    if (toB64url(digest.slice(0, 16)) !== hostId) return false;
     const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
-    const data = new TextEncoder().encode(`glass-signal-v1\n${nonce}`);
-    return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, fromB64url(sigB64), data);
+    const ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, fromB64url(sigB64), new TextEncoder().encode(message));
+    return ok ? await hostIdFor(keyBytes) : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** The introducer's id for a host: the first 16 bytes of its key's SHA-256. */
+export async function hostIdFor(keyBytes) {
+  return toB64url(new Uint8Array(await crypto.subtle.digest('SHA-256', keyBytes)).slice(0, 16));
+}
+
+/** Which of these hosts are connected here now: { id: true | false }. */
+export async function hostsOnline(env, ids) {
+  const entries = await Promise.all(
+    ids.map((id) =>
+      env.INTRODUCER.get(env.INTRODUCER.idFromName(id))
+        .fetch(`https://introducer/?role=status&id=${id}`)
+        .then((r) => r.json())
+        .then((r) => [id, Boolean(r.online)], () => [id, false]),
+    ),
+  );
+  return Object.fromEntries(entries);
 }
 
 /** Short-lived TURN credentials: your own coturn (self-hosting), or Cloudflare Realtime. */

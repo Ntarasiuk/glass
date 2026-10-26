@@ -776,6 +776,7 @@ async fn control(
         features,
         name: settings.name.clone(),
         accent: settings.accent.clone(),
+        computer: computer_name().to_owned(),
         codec: crate::codec::current(),
     };
     control::write_json(&mut send, &welcome).await?;
@@ -1875,6 +1876,12 @@ async fn machines(cache: MachinesCache, port: u16, wt_port: u16) -> Json<serde_j
     };
     *cache = Some((std::time::Instant::now(), list.clone()));
     Json(serde_json::json!({ "machines": list, "groups": crate::admin::load_groups().groups }))
+}
+
+/// This computer's name (looked up once: it's a process on macOS).
+fn computer_name() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(crate::support::computer_name)
 }
 
 /// If a Glass host answers at `https://<dns>:<port>/config.json`, its WebTransport port.

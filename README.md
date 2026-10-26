@@ -75,6 +75,7 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Links with limits.** `--view-only`, `--no-files`, `--no-clipboard`, `--for 1h`, `--ask` (the person at the computer allows each connection) and `--passkey` (Face ID, Touch ID or a security key every time).
 - **Chat, drawing and a privacy screen.** Message everyone connected (the conversation is in the Mac app too), draw on the screen, and blank the computer's own screen while you work.
 - **From anywhere.** `glass link --anywhere` connects any browser straight to your computer over WebRTC: end-to-end encrypted, no ports opened, no Tailscale needed on the viewer.
+- **Your computers, at one address.** Sign in at glassdesk.dev/computers with a passkey (no email, no password) to see which of your computers are online and open any of them from any device. `glass account add` puts a computer there; the account only lists computers, so getting in still takes the computer's own sign-in.
 
 ### AI agents
 - **Let an agent drive, supervised.** `glass mcp` gives Claude Code (or any MCP client) the screens, pointer and keyboard of every computer on your tailnet running Glass. Add it to Claude Code, Claude Desktop or Cursor in one click from the Mac app. You watch every step, pause or stop it, approve anything risky from your phone, and hand it a 2FA code when it's stuck.
@@ -131,6 +132,8 @@ glass link --ask --passkey                   # asks you first; needs a passkey e
 glass link --list        # devices let in by links (with ids)
 glass link --revoke [id] # cut off one device, or every device let in by a link
 glass remote off         # turn off access from outside your tailnet
+glass account add        # one-time link that puts this computer on your glassdesk.dev/computers account
+glass account remove     # take this computer off every account
 glass viewers / kick     # who's connected now; end a session
 glass requests / allow / deny   # answer connection requests (glass config ask-guests on)
 glass chat "be right there"     # message everyone viewing
@@ -197,7 +200,7 @@ NSPasteboard, files ◀─▶ control + file streams ◀────────
 - A device gets in only if Tailscale says it's yours, or it has the access token or a one-time pass. Nothing is sent until then.
 - Narrow it further: limited or passkey-bound links, ask-first, single sign-on or LDAP with access rules, SCIM deprovisioning and device posture checks. Secrets are stored owner-only.
 - Remote access from outside your tailnet is off until you make a link or run `glass remote on`.
-- Glass runs as your user, never as root. The app sends nothing to glassdesk.dev except feedback you choose to send.
+- Glass runs as your user, never as root. The app sends nothing to glassdesk.dev except feedback you choose to send, and, if you run `glass account add`, this computer's name and public key for your account's list.
 
 Found a security issue? Please open a [private security advisory](https://github.com/Ntarasiuk/glass/security/advisories/new) rather than a public issue.
 

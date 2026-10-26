@@ -22,7 +22,8 @@ test.beforeAll(async () => {
   execFileSync('npx', ['wrangler', 'd1', 'migrations', 'apply', 'getglass', '--local', '--persist-to', persist], { cwd: SITE, stdio: 'ignore' });
   const port = await freePort('tcp');
   base = `http://localhost:${port}`;
-  introducer = spawn('npx', ['wrangler', 'dev', '--local', '--persist-to', persist, '--port', String(port), '--inspector-port', String(await freePort('tcp'))], {
+  // --local-upstream: the Worker sees this address (not the route's), as passkeys need.
+  introducer = spawn('npx', ['wrangler', 'dev', '--local', '--persist-to', persist, '--port', String(port), '--local-upstream', `localhost:${port}`, '--inspector-port', String(await freePort('tcp'))], {
     cwd: SITE,
     stdio: 'ignore',
     detached: true,
@@ -148,6 +149,111 @@ test('says so when the computer is offline or remote access is off', async ({ pa
     await page.waitForTimeout(4000); // the host notices within ~3 s and disconnects
     await page.goto(url);
     await expect(page.locator('#status')).toContainText(/offline, or remote access is turned off/, { timeout: 20_000 });
+  } finally {
+    await host.stop();
+  }
+});
+
+test('/computers lists the computers opened from anywhere, online or not', async ({ page }) => {
+  const host = await remoteHost();
+  try {
+    const { url } = JSON.parse(host.cli('link', '--anywhere', '--json'));
+    await page.goto(url);
+    await expectVideo(page);
+
+    // /app/ without a computer is the list; the one just opened is on it, by name, online.
+    await page.goto(`${base}/app/`);
+    await expect(page).toHaveURL(`${base}/computers`);
+    const remote = page.locator('#browser-list li');
+    await expect(remote).toHaveCount(1);
+    await expect(remote.locator('.detail')).toHaveText('online');
+    await expect(remote.locator('.name')).not.toHaveText('Computer');
+    expect(await remote.locator('a.open').getAttribute('href')).toMatch(/^\/app\/#r=[A-Za-z0-9_-]+$/);
+
+    // Remote access off: offline. Forgetting it empties the list.
+    host.cli('remote', 'off');
+    await page.waitForTimeout(4000); // the host notices within ~3 s and disconnects
+    await page.reload();
+    await expect(remote.locator('.detail')).toHaveText('offline');
+    await remote.locator('button.forget').click();
+    await expect(remote).toHaveCount(0);
+  } finally {
+    await host.stop();
+  }
+});
+
+/** A platform authenticator for this page, that says yes (like Touch ID would). */
+async function passkeys(page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('WebAuthn.enable');
+  await cdp.send('WebAuthn.addVirtualAuthenticator', {
+    options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
+  });
+}
+
+test('/computers: a passkey makes an account that signs in and out, and deleting it ends it', async ({ page }) => {
+  await passkeys(page);
+  await page.goto(`${base}/computers`);
+  const note = page.locator('#account-note');
+  await page.getByRole('button', { name: 'Create an account' }).click();
+  await expect(note).toHaveText('Signed in with a passkey.');
+  await page.reload();
+  await expect(note).toHaveText('Signed in with a passkey.');
+
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  await expect(note).toContainText('Sign in with a passkey');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(note).toHaveText('Signed in with a passkey.');
+
+  page.once('dialog', (d) => d.accept());
+  await page.getByRole('button', { name: 'Delete account' }).click();
+  await expect(note).toContainText('Sign in with a passkey');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.locator('#account-status')).toContainText("isn't on any account");
+});
+
+test('/computers: glass account add puts a computer on the account, once, until it takes itself off', async ({ page }) => {
+  const host = await remoteHost();
+  try {
+    host.cli('remote', 'on');
+    await passkeys(page);
+    await page.goto(`${base}/computers`);
+    await page.getByRole('button', { name: 'Create an account' }).click();
+    await expect(page.locator('#account-note')).toHaveText('Signed in with a passkey.');
+    const mine = page.locator('#mine-list li');
+    await expect(page.locator('#mine-note')).toContainText('glass account add');
+
+    const { url, name } = JSON.parse(host.cli('account', 'add', '--json'));
+    expect(url).toMatch(new RegExp(`^${base}/computers#claim=[A-Za-z0-9_-]{43}$`));
+    await page.goto(url);
+    await expect(page.locator('#claim-title')).toHaveText(`Add ${name}?`);
+    expect(page.url()).toBe(`${base}/computers`); // the code leaves the address bar
+    await page.getByRole('button', { name: `Add ${name}` }).click();
+    await expect(page.locator('#claim')).toBeHidden();
+    await expect(mine).toHaveCount(1);
+    await expect(mine.locator('.name')).toHaveText(name);
+    // Online once the host has reached the introducer (it checks every few seconds).
+    await expect(async () => {
+      await page.reload();
+      await expect(mine.locator('.detail')).toHaveText('online', { timeout: 1000 });
+    }).toPass({ timeout: 15_000 });
+    expect(await mine.locator('a.open').getAttribute('href')).toMatch(/^\/app\/#r=[A-Za-z0-9_-]+$/);
+
+    // One link, one computer, once.
+    await page.goto(url);
+    await expect(page.locator('#claim-title')).toHaveText("This link doesn't work");
+    await page.getByRole('button', { name: 'OK', exact: true }).click();
+    await expect(page.locator('#claim')).toBeHidden();
+
+    // The computer takes itself off every account.
+    expect(JSON.parse(host.cli('account', 'remove', '--json'))).toEqual({ removed: 1 });
+    await page.reload();
+    await expect(page.locator('#mine-note')).toContainText('glass account add');
+    await expect(mine).toHaveCount(0);
+
+    // Without remote access, there's no link to make.
+    host.cli('remote', 'off');
+    expect(() => host.cli('account', 'add')).toThrow(/remote access is off/);
   } finally {
     await host.stop();
   }

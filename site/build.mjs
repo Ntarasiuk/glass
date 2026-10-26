@@ -94,7 +94,7 @@ writeFileSync(
 
 > ${summary}
 
-Install on the computer to be controlled: \`curl -fsSL glassdesk.dev | sh\` (macOS 13+ on Apple Silicon or Intel; Linux x86_64 on Wayland, beta). On a Mac the installer adds Glass.app and opens it for a guided setup (Tailscale, the background service, permissions); in a terminal or over SSH it runs \`glass setup\` instead. From outside the tailnet, \`glass link --anywhere\` makes a one-time link that connects any browser directly over WebRTC (end-to-end encrypted, no open ports). Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free and open source (MIT).
+Install on the computer to be controlled: \`curl -fsSL glassdesk.dev | sh\` (macOS 13+ on Apple Silicon or Intel; Linux x86_64 on Wayland, beta). On a Mac the installer adds Glass.app and opens it for a guided setup (Tailscale, the background service, permissions); in a terminal or over SSH it runs \`glass setup\` instead. From outside the tailnet, \`glass link --anywhere\` makes a one-time link that connects any browser directly over WebRTC (end-to-end encrypted, no open ports). At ${SITE}/computers, a passkey account (no email, no password) lists your computers, shows which are online and opens any of them; \`glass account add\` puts a computer there, and the account never lets anyone in by itself. Viewers need only a browser (Safari 26.4+, Chrome, Edge, Firefox). Free and open source (MIT).
 
 Features:
 - Picture and speed: about 20 ms, up to 120 fps on fast screens, Display P3 colour, Sharp text (native size, 4:2:2, lossless 4:4:4 once still), every display (live previews, or side by side), the viewing device as a second display that extends the Mac's desktop, fit-this-device resolution, adaptive bitrate.
@@ -111,6 +111,7 @@ Features:
 - [Full documentation](${SITE}/llms-full.txt): everything in one file: install, setup, features, keyboard behaviour on iPad, CLI reference, architecture, security, troubleshooting, FAQ
 - [Documentation (HTML)](${SITE}/docs): the same, as a web page
 - [Install script](${SITE}/install.sh): what \`curl -fsSL glassdesk.dev | sh\` runs
+- [Your computers](${SITE}/computers): sign in with a passkey to see which of your computers are online and open them; \`glass account add\` on a computer adds it
 - [Agent skill](${SITE}/skill.md): how an AI agent sets Glass up on any machine in the user's Tailscale tailnet over SSH (\`glass setup --yes --json\`)
 - [Source code](https://github.com/Ntarasiuk/glass): Rust host, browser client, and this website (MIT)
 
@@ -239,8 +240,8 @@ const home = finish(readFileSync('index.html', 'utf8'), lastModified('index.html
 if (!home.includes('<style>')) throw new Error('index.html: stylesheet link not found');
 writeFileSync('public/index.html', home);
 
-// Features and quick support: hand-written pages with the shared placeholders.
-for (const [name, dir] of [['features', 'public/features'], ['help', 'public/help']]) {
+// Features, quick support and your computers: hand-written pages with the shared placeholders.
+for (const [name, dir] of [['features', 'public/features'], ['help', 'public/help'], ['computers', 'public/computers']]) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(`${dir}/index.html`, finish(readFileSync(`pages/${name}.html`, 'utf8'), lastModified(`pages/${name}.html`)));
 }
@@ -446,7 +447,7 @@ for (const p of PLATFORMS) {
   writeFileSync(`public/releases/${f}.sha256`, `${sum}  ${f}\n`);
 }
 
-console.log('built: index.html, features/, help/, guides/, vs/, skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, index.md, sitemap.xml, app/, releases/');
+console.log('built: index.html, features/, help/, computers/, guides/, vs/, skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, index.md, sitemap.xml, app/, releases/');
 
 /** YYYY-MM-DD of the first commit adding a file, if it's committed. */
 function firstCommitted(file) {

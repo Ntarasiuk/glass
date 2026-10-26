@@ -1,7 +1,12 @@
 // glassdesk.dev: landing page, one-line installer, release downloads (counted in D1 and
-// sent to Google Analytics), the feedback API (emailed to the maintainer), and the introducer for remote access (WebRTC signaling, one Durable
-// Object per host). Static files come from ./public via the ASSETS binding; the web client
-// for remote access is served from /app/.
+// sent to Google Analytics), the feedback API (emailed to the maintainer), the introducer
+// for remote access (WebRTC signaling, one Durable Object per host), and passkey accounts
+// for /computers (src/accounts.js). Static files come from ./public via the ASSETS binding;
+// the web client for remote access is served from /app/.
+
+import { accounts } from './accounts.js';
+
+import { hostsOnline } from './introducer.js';
 
 export { Introducer } from './introducer.js';
 
@@ -43,6 +48,9 @@ export default {
       return cors(json({ error: 'method not allowed' }, 405));
     }
 
+    const account = await accounts(request, env, url);
+    if (account) return account;
+
     if (url.pathname === '/api/stats') return stats(request, env);
     // Your own visitor id, so `node stats.mjs --mark-me` can leave this machine out of the numbers.
     if (url.pathname === '/api/visitor') return json({ visitor: await visitorId(request, env) });
@@ -53,6 +61,12 @@ export default {
       return json({ error: 'method not allowed' }, 405);
     }
     if (url.pathname === '/api/support/claim' && request.method === 'POST') return supportClaim(request, env);
+
+    // /signal/online?ids=<id>,…: which of these computers are online (glassdesk.dev/computers).
+    if (url.pathname === '/signal/online') {
+      const ids = [...new Set((url.searchParams.get('ids') ?? '').split(','))].filter((id) => /^[A-Za-z0-9_-]{22}$/.test(id)).slice(0, 32);
+      return json({ online: await hostsOnline(env, ids) });
+    }
 
     // /signal/host/<id> (the host) and /signal/connect/<id> (a browser).
     const signal = url.pathname.match(/^\/signal\/(host|connect)\/([A-Za-z0-9_-]{22})$/);
@@ -371,7 +385,7 @@ async function stats(request, env) {
  * Salted SHA-256 of the client IP: lets us count unique visitors without storing IPs. IPv6
  * counts by its /64 (one household or office), since devices change the rest every day.
  */
-async function visitorId(request, env) {
+export async function visitorId(request, env) {
   const ip = network(request.headers.get('cf-connecting-ip') ?? '');
   const data = new TextEncoder().encode(`${env.VISITOR_SALT ?? ''}:${ip}`);
   const digest = await crypto.subtle.digest('SHA-256', data);
