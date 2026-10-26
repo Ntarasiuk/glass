@@ -22,7 +22,8 @@ test.beforeAll(async () => {
   execFileSync('npx', ['wrangler', 'd1', 'migrations', 'apply', 'getglass', '--local', '--persist-to', persist], { cwd: SITE, stdio: 'ignore' });
   const port = await freePort('tcp');
   base = `http://localhost:${port}`;
-  introducer = spawn('npx', ['wrangler', 'dev', '--local', '--persist-to', persist, '--port', String(port), '--inspector-port', String(await freePort('tcp'))], {
+  // --local-upstream: the Worker sees this address (not the route's), as passkeys need.
+  introducer = spawn('npx', ['wrangler', 'dev', '--local', '--persist-to', persist, '--port', String(port), '--local-upstream', `localhost:${port}`, '--inspector-port', String(await freePort('tcp'))], {
     cwd: SITE,
     stdio: 'ignore',
     detached: true,
@@ -179,4 +180,34 @@ test('/computers lists the computers opened from anywhere, online or not', async
   } finally {
     await host.stop();
   }
+});
+
+/** A platform authenticator for this page, that says yes (like Touch ID would). */
+async function passkeys(page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('WebAuthn.enable');
+  await cdp.send('WebAuthn.addVirtualAuthenticator', {
+    options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
+  });
+}
+
+test('/computers: a passkey makes an account that signs in and out, and deleting it ends it', async ({ page }) => {
+  await passkeys(page);
+  await page.goto(`${base}/computers`);
+  const note = page.locator('#account-note');
+  await page.getByRole('button', { name: 'Create an account' }).click();
+  await expect(note).toHaveText('Signed in with a passkey.');
+  await page.reload();
+  await expect(note).toHaveText('Signed in with a passkey.');
+
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  await expect(note).toContainText('Sign in with a passkey');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(note).toHaveText('Signed in with a passkey.');
+
+  page.once('dialog', (d) => d.accept());
+  await page.getByRole('button', { name: 'Delete account' }).click();
+  await expect(note).toContainText('Sign in with a passkey');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.locator('#account-status')).toContainText("isn't on any account");
 });

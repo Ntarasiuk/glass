@@ -34,6 +34,12 @@
     .list a.open { flex: none; padding: 7px 14px; border-radius: 10px; background: var(--accent); color: #04121f; font-weight: 650; font-size: 14px; text-decoration: none; }
     .list button.forget { flex: none; padding: 0 4px; border: 0; background: none; color: var(--text-faint); font-size: 18px; line-height: 1; cursor: pointer; }
     .list button.forget:hover { color: var(--text-dim); }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .actions button { padding: 10px 18px; border: 1px solid rgb(255 255 255 / 0.14); border-radius: 12px; background: rgb(255 255 255 / 0.06); color: inherit; font: inherit; font-weight: 600; cursor: pointer; }
+    .actions button.primary { border-color: transparent; background: var(--accent); color: #04121f; }
+    .actions button.quiet { border-color: transparent; background: none; color: var(--text-faint); font-weight: 500; }
+    .actions button:disabled { opacity: 0.6; cursor: default; }
+    .form-status { margin: 10px 0 0; min-height: 1.4em; color: var(--text-dim); font-size: 15px; }
   </style>
 </head>
 <body>
@@ -49,6 +55,13 @@
     <section>
       <h1>Your computers.</h1>
       <p class="lead">Which are online, and a way into each from anywhere.</p>
+    </section>
+
+    <section aria-labelledby="account-title">
+      <h2 id="account-title">Your account</h2>
+      <p class="note" id="account-note"></p>
+      <div class="actions" id="account-actions"></div>
+      <p class="form-status" id="account-status" role="status"></p>
     </section>
 
     <section aria-labelledby="browser-title">
@@ -127,8 +140,107 @@
       })));
     }
 
+    // Accounts: a passkey, nothing else. The site checks each ceremony (src/accounts.js);
+    // the session is an HttpOnly cookie this page never sees.
+    const enc = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const dec = (text) => Uint8Array.from(atob(text.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+    let account = null;
+
+    async function api(path, { method = 'GET', body } = {}) {
+      const r = await fetch(path, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body && JSON.stringify(body) });
+      const out = await r.json().catch(() => ({}));
+      if (!r.ok) throw Object.assign(new Error(out.error ?? 'Something went wrong. Try again.'), out);
+      return out;
+    }
+
+    /** A new account, or (signed in) another passkey for this one, say from another password manager. */
+    async function createPasskey() {
+      const o = await api('/api/account/challenge', { method: 'POST', body: { mode: 'create' } });
+      const cred = await navigator.credentials.create({ publicKey: {
+        ...o,
+        challenge: dec(o.challenge),
+        user: { ...o.user, id: dec(o.user.id) },
+        excludeCredentials: o.excludeCredentials.map((c) => ({ ...c, id: dec(c.id) })),
+      } });
+      const r = cred.response;
+      const publicKey = r.getPublicKey();
+      if (!publicKey) throw new Error('This browser can\'t share the passkey\'s key. Try another browser.');
+      await api('/api/account/passkey', { method: 'POST', body: {
+        id: cred.id,
+        clientDataJSON: enc(r.clientDataJSON),
+        authenticatorData: enc(r.getAuthenticatorData()),
+        publicKey: enc(publicKey),
+        publicKeyAlgorithm: r.getPublicKeyAlgorithm(),
+      } });
+    }
+
+    async function signIn() {
+      const o = await api('/api/account/challenge', { method: 'POST', body: { mode: 'get' } });
+      const cred = await navigator.credentials.get({ publicKey: { ...o, challenge: dec(o.challenge) } });
+      const r = cred.response;
+      try {
+        await api('/api/account/session', { method: 'POST', body: {
+          id: cred.id,
+          clientDataJSON: enc(r.clientDataJSON),
+          authenticatorData: enc(r.authenticatorData),
+          signature: enc(r.signature),
+          userHandle: r.userHandle ? enc(r.userHandle) : undefined,
+        } });
+      } catch (e) {
+        // Its account is gone: let the password manager drop it.
+        if (e.unknown) PublicKeyCredential.signalUnknownCredential?.({ rpId: location.hostname, credentialId: cred.id }).catch(() => {});
+        throw e;
+      }
+    }
+
+    function button(text, onClick, kind = '') {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = text;
+      if (kind) b.className = kind;
+      b.addEventListener('click', async () => {
+        for (const other of $('account-actions').querySelectorAll('button')) other.disabled = true;
+        $('account-status').textContent = '';
+        try {
+          await onClick();
+        } catch (e) {
+          // Closing the passkey sheet isn't an error worth a message.
+          if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') $('account-status').textContent = e.message;
+        }
+        await showAccount();
+      });
+      return b;
+    }
+
+    async function showAccount() {
+      ({ account } = await api('/api/account').catch(() => ({ account: null })));
+      if (!window.PublicKeyCredential) {
+        $('account-note').textContent = 'This browser can\'t use passkeys.';
+        $('account-actions').replaceChildren();
+        return;
+      }
+      if (!account) {
+        $('account-note').textContent = 'Sign in with a passkey to see your computers on every device: it syncs through iCloud Keychain, Google Password Manager or your password manager. No email, no password.';
+        $('account-actions').replaceChildren(
+          button('Sign in', signIn, 'primary'),
+          button('Create an account', createPasskey),
+        );
+        return;
+      }
+      $('account-note').textContent = `Signed in with a passkey${account.passkeys > 1 ? ` (this account has ${account.passkeys})` : ''}.`;
+      $('account-actions').replaceChildren(
+        button('Sign out', () => api('/api/account/session', { method: 'DELETE' })),
+        button('Add a passkey', createPasskey),
+        button('Delete account', async () => {
+          if (!confirm('Delete your account? Your computers stay as they are; only this list goes.')) return;
+          await api('/api/account', { method: 'DELETE' });
+        }, 'quiet'),
+      );
+    }
+
     document.addEventListener('visibilitychange', () => { if (!document.hidden) showBrowser(); });
     setInterval(() => { if (!document.hidden) showBrowser(); }, REFRESH_MS);
+    showAccount();
     showBrowser();
   </script>
 </body>
