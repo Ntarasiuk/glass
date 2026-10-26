@@ -337,3 +337,25 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { transition-duration: 1ms !important; animation-duration: 1ms !important; }
 }
+
+/* Guides, comparisons and dates */
+.updated, .crumbs { color: var(--text-faint); font-size: 14px; margin: 0 0 6px; }
+.crumbs a, .updated a { color: var(--text-dim); }
+.doc .lede { color: var(--text-dim); font-size: 19px; }
+.guide-list { list-style: none; padding: 0; display: grid; gap: 18px; }
+.guide-list a { font: 650 20px var(--display); color: var(--text); }
+.guide-list span { display: block; color: var(--text-dim); margin-top: 4px; }
+.related { margin-top: 56px; }
+.doc .cta { margin-top: 48px; max-width: none; }
+.answer { font-size: clamp(17px, 1.5vw, 19px); color: var(--text); }
+.compare-links { display: grid; gap: 8px; padding-left: 20px; }
+footer.site nav[aria-label="Guides and comparisons"] { flex-basis: 100%; gap: 8px 20px; }
+@media (max-width: 760px) {
+  .doc table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .doc th, .doc td { min-width: 120px; }
+}
+.shot { margin: 40px 0 0; }
+.shot img { width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--line); }
+.shot figcaption { color: var(--text-faint); font-size: 14px; margin-top: 8px; }
+.about { margin-top: 40px; padding: 18px 20px; border: 1px solid var(--line); border-radius: 14px; background: rgb(255 255 255 / 0.03); }
+.doc .about h2 { margin: 0 0 8px; padding: 0; border: 0; font-size: 20px; }

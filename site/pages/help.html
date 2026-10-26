@@ -1,10 +1,19 @@
 <!doctype html>
 <html lang="en">
 <head>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-LCYDPMQMLD"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-LCYDPMQMLD');
+  </script>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Help someone with their computer · Glass</title>
-  <meta name="description" content="Quick support with Glass: they run one line and read you a code; you see and control their computer from your browser, after they allow it. Nothing stays installed.">
+  <title>Help someone with their computer, free · Glass</title>
+  <meta name="description" content="Help someone with their Mac or Linux computer, free: they run one line and read you a code, you connect from your browser. Nothing stays installed.">
   <link rel="canonical" href="https://glassdesk.dev/help">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icon-512.png">
@@ -13,7 +22,50 @@
   <link rel="preload" href="/fonts/hanken-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/glassy/glassy.css">
   <link rel="stylesheet" href="/style.css">
-  <meta name="robots" content="index, follow">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+  <meta property="og:type" content="website">
+  <meta property="article:modified_time" content="{{modified}}">
+  <meta property="og:site_name" content="Glass">
+  <meta property="og:url" content="https://glassdesk.dev/help">
+  <meta property="og:title" content="Help someone with their computer · Glass">
+  <meta property="og:description" content="Help someone with their Mac or Linux computer, free: they run one line and read you a code, you connect from your browser. Nothing stays installed.">
+  <meta property="og:image" content="https://glassdesk.dev/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Glass: your computer, in any browser. About 20 ms from your Mac or Linux screen to an iPad, phone or laptop.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://glassdesk.dev/og.png">
+  <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    "{{organization}}",
+    "{{author}}",
+    {
+      "@type": "WebPage",
+      "@id": "https://glassdesk.dev/help#webpage",
+      "url": "https://glassdesk.dev/help",
+      "name": "Help someone with their computer, free · Glass",
+      "description": "Help someone with their Mac or Linux computer, free: they run one line and read you a code, you connect from your browser. Nothing stays installed.",
+      "isPartOf": { "@id": "https://glassdesk.dev/#website" },
+      "about": { "@id": "https://glassdesk.dev/#software" },
+      "publisher": { "@id": "https://glassdesk.dev/#organization" },
+      "dateModified": "{{modified}}",
+      "inLanguage": "en"
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://glassdesk.dev/help#faq",
+      "mainEntity": [
+        { "@type": "Question", "name": "Does the person I'm helping have to install anything?", "acceptedAnswer": { "@type": "Answer", "text": "No. The one line runs Glass from a temporary folder for this session only: not as a background service and not at login. When they stop sharing, it's deleted." } },
+        { "@type": "Question", "name": "Can I see their screen without them knowing?", "acceptedAnswer": { "@type": "Answer", "text": "No. They're asked before you can see anything, the Glass window stays open while you're connected, and they can stop at any time." } },
+        { "@type": "Question", "name": "Is it free?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Glass is free and open source under the MIT license, with no account for either of you." } },
+        { "@type": "Question", "name": "Which computers does it work on?", "acceptedAnswer": { "@type": "Answer", "text": "The person being helped needs macOS 13 or later, or Linux on Wayland (beta). You can help from any modern browser: a Mac, a PC, an iPad or a phone." } }
+      ]
+    }
+  ]
+}
+  </script>
   <style>
     .help { display: grid; gap: clamp(28px, 4vw, 44px); padding: clamp(40px, 7vw, 88px) 0 clamp(48px, 8vw, 96px); max-width: 720px; }
     .help h1 { margin: 0; font-size: clamp(38px, 5.4vw, 64px); line-height: 1; }
@@ -32,11 +84,15 @@
     #code-form button:disabled { opacity: 0.6; cursor: default; }
     .help .form-status { margin-top: 10px; }
     .help .fine { color: var(--text-faint); font-size: 14px; }
+    .help-more h2 { margin: 36px 0 10px; font-size: 26px; }
+    .help-more h2:first-child { margin-top: 0; }
+    .help-more h3 { margin: 22px 0 6px; font: 650 18px var(--display); }
+    .help-more p { color: var(--text-dim); margin: 0; }
   </style>
 </head>
 <body>
   <header class="site wrap lg-glass-surface" data-lg-preset="header">
-    <a class="brand" href="/"><img src="/icon.svg" alt="" width="26" height="26">Glass</a>
+    <a class="brand" href="/"><img src="/icon.svg" alt="Glass logo" width="26" height="26">Glass</a>
     <nav aria-label="Main">
       <a href="/features">Features</a>
       <a href="/docs">Docs</a>
@@ -47,7 +103,7 @@
   <main class="help wrap">
     <section>
       <h1>Help someone with their computer.</h1>
-      <p class="lead">They run one line and read you a code. You see and control their screen from this browser, once they allow it. When they stop, nothing stays on their computer.</p>
+      <p class="lead"><strong>Glass quick support is a free way to see and control someone's Mac or Linux computer from your browser, with nothing left installed on theirs.</strong> They run one line and read you a code. You see and control their screen from this browser, once they allow it. When they stop, nothing stays on their computer.</p>
     </section>
 
     <ol>
@@ -81,17 +137,25 @@
     </ol>
 
     <p class="fine">Each code works once, for an hour. The connection goes directly between the two computers and is end-to-end encrypted.</p>
+
+    <section class="help-more">
+      <h2>How it works</h2>
+      <p>The line they paste downloads Glass into a temporary folder and starts it for this one session, with its own temporary settings and keys. It doesn't run as a background service or at login. Their code stands for a one-time link to their computer; glassdesk.dev keeps only a salted hash of it, and a code typed wrong too often is locked out. You connect over WebRTC, the same way as <a href="/docs#connecting">Glass's links from anywhere</a>: direct and end-to-end encrypted, with no ports opened on their network.</p>
+      <h2>What they see</h2>
+      <p>The first time, their Mac asks them to allow Screen Recording and Accessibility, and the Glass window has a button for each. Before you see anything, they're asked to let you in. While you're connected the window stays open, and you can talk in a chat or draw on their screen to point at things. They click <b>Stop sharing</b> or close the window when you're done, and Glass deletes itself.</p>
+      <h2>Questions</h2>
+      <h3>Does the person I'm helping have to install anything?</h3>
+      <p>No. Glass runs from a temporary folder for this session only and is deleted when they stop sharing.</p>
+      <h3>Can I see their screen without them knowing?</h3>
+      <p>No. They're asked before you can see anything, the Glass window stays open while you're connected, and they can stop at any time.</p>
+      <h3>Is it free?</h3>
+      <p>Yes. Glass is free and <a href="https://github.com/Ntarasiuk/glass">open source</a> under the MIT license, with no account for either of you.</p>
+      <h3>Which computers does it work on?</h3>
+      <p>The person being helped needs macOS 13 or later, or Linux on Wayland (beta). You can help from any modern browser: a Mac, a PC, an iPad or a phone. To reach your own computers every day, <a href="/">install Glass</a> instead. For how this compares with TeamViewer, AnyDesk and Chrome Remote Desktop, see <a href="/guides/remote-support-without-installing">remote support without installing anything</a>.</p>
+    </section>
   </main>
 
-  <footer class="site wrap">
-    <span>Glass is free and open source under the MIT license.</span>
-    <nav aria-label="Footer">
-      <a href="/features">Features</a>
-      <a href="/docs">Documentation</a>
-      <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
-      <a href="/help.sh">help.sh</a>
-    </nav>
-  </footer>
+  {{footer}}
 
   <script src="/site.js" type="module"></script>
   <script type="module">

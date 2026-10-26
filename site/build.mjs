@@ -6,8 +6,74 @@ import { createHash } from 'node:crypto';
 import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { marked } from 'marked';
 
+// Headings get ids (`## Connecting` → #connecting), so passages can be linked and quoted.
+marked.use({
+  renderer: {
+    heading({ tokens, depth, text }) {
+      const id = text.toLowerCase().replace(/<[^>]+>|`/g, '').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '-');
+      return `<h${depth} id="${id}">${this.parser.parseInline(tokens)}</h${depth}>\n`;
+    },
+  },
+});
+
 const SITE = 'https://glassdesk.dev';
 const docs = readFileSync('docs.md', 'utf8');
+
+// Who makes Glass, on every page: a stable @id, the logo and the repo, so "Glass" (a common
+// word) resolves to this remote desktop.
+const ORG = {
+  '@type': 'Organization',
+  '@id': `${SITE}/#organization`,
+  name: 'Glass',
+  alternateName: ['Glass remote desktop', 'glassdesk.dev'],
+  url: `${SITE}/`,
+  description: 'Glass makes a free, open-source, low-latency remote desktop for Mac and Linux that you use from any browser.',
+  logo: { '@type': 'ImageObject', '@id': `${SITE}/#logo`, url: `${SITE}/icon-512.png`, width: 512, height: 512, caption: 'Glass' },
+  image: { '@id': `${SITE}/#logo` },
+  founder: { '@id': `${SITE}/#author` },
+  sameAs: ['https://github.com/Ntarasiuk/glass'],
+};
+const AUTHOR = { '@type': 'Person', '@id': `${SITE}/#author`, name: 'Nathan Tarasiuk', url: 'https://github.com/Ntarasiuk', sameAs: ['https://github.com/Ntarasiuk'] };
+
+// Guides and comparisons: guides/*.md, each with a small front matter block.
+const guides = readdirSync('guides')
+  .filter((f) => f.endsWith('.md'))
+  .map((f) => {
+    const src = `guides/${f}`;
+    const [, front, markdown] = readFileSync(src, 'utf8').match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/) ?? [];
+    if (!front) throw new Error(`${src}: missing front matter`);
+    const meta = Object.fromEntries(front.split('\n').map((l) => l.match(/^(\w+):\s*(.*)$/).slice(1)));
+    for (const k of ['path', 'title', 'description', 'label']) if (!meta[k]) throw new Error(`${src}: no ${k}`);
+    if (meta.description.length > 160) throw new Error(`${src}: description over 160 characters`);
+    return { ...meta, src, markdown, order: Number(meta.order ?? 99) };
+  })
+  .sort((a, b) => a.order - b.order);
+
+const human = (iso) => new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const ld = (graph) => `<script type="application/ld+json">${JSON.stringify({ '@context': 'https://schema.org', '@graph': graph }).replace(/</g, '\\u003c')}</script>`;
+
+/** The footer every page shares: what Glass is, when the page changed, and links between pages. */
+function footer(modified, { wrap = true } = {}) {
+  const compare = guides.map((g) => `<a href="${g.path}">${esc(g.label)}</a>`).join('');
+  return `<footer class="site${wrap ? ' wrap' : ''}">
+    <span>Glass is a free, open-source remote desktop for Mac and Linux (MIT). Updated <time datetime="${modified}">${human(modified)}</time>.</span>
+    <nav aria-label="Footer"><a href="/features">Features</a><a href="/docs">Documentation</a><a href="/guides">Guides</a><a href="/help">Quick support</a><a href="/features#feedback">Feedback</a><a href="https://github.com/Ntarasiuk/glass">Star on GitHub</a><a href="/docs.md">docs.md</a><a href="/llms.txt">llms.txt</a><a href="/install.sh">install.sh</a></nav>
+    <nav aria-label="Guides and comparisons">${compare}</nav>
+  </footer>`;
+}
+
+/** Fills a hand-written page's placeholders: dates, the shared entities and the footer. */
+function finish(html, modified) {
+  const out = html
+    .replaceAll('{{modified}}', modified)
+    .replaceAll('"{{organization}}"', JSON.stringify(ORG))
+    .replaceAll('"{{author}}"', JSON.stringify(AUTHOR))
+    .replaceAll('{{footer}}', footer(modified));
+  const left = out.match(/\{\{\w+\}\}/);
+  if (left) throw new Error(`unfilled placeholder ${left[0]}`);
+  return out;
+}
 
 // Hosts check this to offer updates.
 const version = readFileSync('../Cargo.toml', 'utf8').match(/^version = "(.+)"/m)[1];
@@ -48,6 +114,10 @@ Features:
 - [Agent skill](${SITE}/skill.md): how an AI agent sets Glass up on any machine in the user's Tailscale tailnet over SSH (\`glass setup --yes --json\`)
 - [Source code](https://github.com/Ntarasiuk/glass): Rust host, browser client, and this website (MIT)
 
+## Guides and comparisons
+
+${guides.map((g) => `- [${g.title}](${SITE}${g.path}): ${g.description}`).join('\n')}
+
 ## Optional
 
 - [Feedback API](${SITE}/docs.md#feedback): \`POST ${SITE}/api/feedback\` with JSON \`{"message": "…"}\`
@@ -70,9 +140,12 @@ if (faq.length < 5) throw new Error(`docs FAQ: parsed only ${faq.length} questio
 const title = 'Glass documentation: install, setup and remote access';
 const docsDescription =
   'How to install and set up Glass, connect from an iPad or any browser, reach your computer from anywhere, and fix problems. CLI reference and FAQ.';
+const docsModified = lastModified('docs.md');
 const docsLd = {
   '@context': 'https://schema.org',
   '@graph': [
+    ORG,
+    AUTHOR,
     {
       '@type': 'TechArticle',
       '@id': `${SITE}/docs#article`,
@@ -81,8 +154,9 @@ const docsLd = {
       description: docsDescription,
       about: { '@id': `${SITE}/#software` },
       author: { '@id': `${SITE}/#author` },
+      publisher: { '@id': `${SITE}/#organization` },
       isPartOf: { '@id': `${SITE}/#website` },
-      dateModified: lastModified('docs.md'),
+      dateModified: docsModified,
       inLanguage: 'en',
     },
     { '@type': 'FAQPage', '@id': `${SITE}/docs#faq`, url: `${SITE}/docs#faq`, mainEntity: faq },
@@ -112,6 +186,7 @@ writeFileSync(
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <link rel="canonical" href="${SITE}/docs">
   <meta property="og:type" content="article">
+  <meta property="article:modified_time" content="${docsModified}">
   <meta property="og:site_name" content="Glass">
   <meta property="og:url" content="${SITE}/docs">
   <meta property="og:title" content="${title}">
@@ -140,13 +215,14 @@ writeFileSync(
 <body>
   <div class="wrap">
     <header class="site lg-glass-surface" data-lg-preset="header">
-      <a class="brand" href="/"><img src="/icon.svg" alt="" width="26" height="26">Glass</a>
-      <nav class="site" aria-label="Main"><a href="/">Home</a><a href="/features">Features</a><a href="/docs.md">Markdown</a><a href="/llms.txt">llms.txt</a></nav>
+      <a class="brand" href="/"><img src="/icon.svg" alt="Glass logo" width="26" height="26">Glass</a>
+      <nav class="site" aria-label="Main"><a href="/">Home</a><a href="/features">Features</a><a href="/guides">Guides</a><a href="/docs.md">Markdown</a></nav>
     </header>
     <main class="doc">
+<p class="updated">Updated <time datetime="${docsModified}">${human(docsModified)}</time></p>
 ${body}
     </main>
-    <footer class="site"><span>Glass. A remote desktop for Mac and Linux.</span><nav aria-label="Footer"><a href="/">Home</a><a href="/features#feedback">Feedback</a></nav></footer>
+    ${footer(docsModified, { wrap: false })}
   </div>
   <script src="/site.js" type="module"></script>
 </body>
@@ -156,25 +232,174 @@ ${body}
 
 // Home page: the release its SoftwareApplication describes, and the stylesheets inlined so
 // first paint needs only the HTML (about 10 KB compressed, one round trip).
-const home = readFileSync('index.html', 'utf8')
+const home = finish(readFileSync('index.html', 'utf8'), lastModified('index.html'))
   .replace(/"softwareVersion": "[^"]*"/, `"softwareVersion": "${version}"`)
   .replace('<link rel="stylesheet" href="/glassy/glassy.css">', () => `<style>\n${readFileSync('public/glassy/glassy.css', 'utf8')}</style>`)
   .replace('<link rel="stylesheet" href="/style.css">', () => `<style>\n${readFileSync('public/style.css', 'utf8')}</style>`);
 if (!home.includes('<style>')) throw new Error('index.html: stylesheet link not found');
 writeFileSync('public/index.html', home);
 
+// Features and quick support: hand-written pages with the shared placeholders.
+for (const [name, dir] of [['features', 'public/features'], ['help', 'public/help']]) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(`${dir}/index.html`, finish(readFileSync(`pages/${name}.html`, 'utf8'), lastModified(`pages/${name}.html`)));
+}
+
+// Guides and comparisons, from guides/*.md: an article each, and an index at /guides.
+for (const g of guides) {
+  const modified = lastModified(g.src);
+  const published = firstCommitted(g.src) ?? modified;
+  const faqItems = [...(g.markdown.split(/^## (?:FAQ|Questions)\n/m)[1] ?? '').matchAll(/^### (.+\?)\n\n([\s\S]+?)(?=\n### |\n## |$)/gm)].map(([, q, a]) => ({
+    '@type': 'Question',
+    name: q,
+    acceptedAnswer: { '@type': 'Answer', text: a.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/[`*]/g, '').trim() },
+  }));
+  const graph = [
+    ORG,
+    AUTHOR,
+    {
+      '@type': 'Article',
+      '@id': `${SITE}${g.path}#article`,
+      url: `${SITE}${g.path}`,
+      mainEntityOfPage: `${SITE}${g.path}`,
+      headline: g.title,
+      description: g.description,
+      about: { '@id': `${SITE}/#software` },
+      author: { '@id': `${SITE}/#author` },
+      publisher: { '@id': `${SITE}/#organization` },
+      isPartOf: { '@id': `${SITE}/#website` },
+      image: `${SITE}/og.png`,
+      datePublished: published,
+      dateModified: modified,
+      inLanguage: 'en',
+    },
+    {
+      '@type': 'BreadcrumbList',
+      itemListElement: [
+        { '@type': 'ListItem', position: 1, name: 'Glass', item: `${SITE}/` },
+        { '@type': 'ListItem', position: 2, name: 'Guides', item: `${SITE}/guides` },
+        { '@type': 'ListItem', position: 3, name: g.label, item: `${SITE}${g.path}` },
+      ],
+    },
+    ...(faqItems.length ? [{ '@type': 'FAQPage', '@id': `${SITE}${g.path}#faq`, mainEntity: faqItems }] : []),
+  ];
+  const html = marked.parse(g.markdown);
+  const related = guides.filter((o) => o !== g).map((o) => `<li><a href="${o.path}">${esc(o.title)}</a></li>`).join('');
+  writePage(g.path, {
+    title: g.title,
+    description: g.description,
+    modified,
+    type: 'article',
+    graph,
+    body: `<nav class="crumbs" aria-label="Breadcrumb"><a href="/">Glass</a> › <a href="/guides">Guides</a></nav>
+<p class="updated">Updated <time datetime="${modified}">${human(modified)}</time> · by <a href="https://github.com/Ntarasiuk">Nathan Tarasiuk</a>, who makes Glass</p>
+${html}
+<figure class="shot"><img src="/og.png" width="1200" height="630" loading="lazy" alt="Glass: your computer, in any browser. About 20 ms from your Mac or Linux screen to an iPad, phone or laptop. Install with curl -fsSL glassdesk.dev | sh."><figcaption>Glass installs with one line on the Mac or Linux computer; you open it from any browser.</figcaption></figure>
+<aside class="about"><h2>How this page was checked</h2><p>Written by <a href="https://github.com/Ntarasiuk">Nathan Tarasiuk</a>, who builds Glass. Every claim about another product links to that product's own page or documentation, checked on ${human(modified)}; Glass's own numbers come from its built-in latency meter on a home network. Products change: if something here is out of date, <a href="/features#feedback">tell us</a> and it gets fixed.</p></aside>
+<aside class="related"><h2>More guides</h2><ul>${related}</ul></aside>`,
+  });
+}
+const guidesModified = guides.map((g) => lastModified(g.src)).sort().at(-1) ?? lastModified('build.mjs');
+writePage('/guides', {
+  title: 'Remote desktop guides and comparisons · Glass',
+  description: 'Honest guides to controlling a Mac or Linux computer remotely, and how Glass compares with Jump Desktop, Parsec, RustDesk and Apple Sidecar.',
+  modified: guidesModified,
+  type: 'website',
+  graph: [
+    ORG,
+    {
+      '@type': 'CollectionPage',
+      '@id': `${SITE}/guides#page`,
+      url: `${SITE}/guides`,
+      name: 'Remote desktop guides and comparisons',
+      isPartOf: { '@id': `${SITE}/#website` },
+      publisher: { '@id': `${SITE}/#organization` },
+      dateModified: guidesModified,
+      hasPart: guides.map((g) => ({ '@id': `${SITE}${g.path}#article` })),
+    },
+  ],
+  body: `<h1>Guides and comparisons</h1>
+<p class="lede">Glass is a free, open-source remote desktop for Mac and Linux, used from any browser. These pages answer the questions people ask before choosing one, including when another tool fits better.</p>
+<ul class="guide-list">${guides.map((g) => `<li><a href="${g.path}">${esc(g.title)}</a><span>${esc(g.description)}</span></li>`).join('')}</ul>`,
+});
+
+/** A page in the docs' layout: head, header, body, shared footer. */
+function writePage(path, { title, description, modified, type, graph, body: content }) {
+  const url = `${SITE}${path}`;
+  mkdirSync(`public${path}`, { recursive: true });
+  writeFileSync(
+    `public${path}/index.html`,
+    `<!doctype html>
+<html lang="en">
+<head>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-LCYDPMQMLD"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-LCYDPMQMLD');
+  </script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${esc(title)}</title>
+  <meta name="description" content="${esc(description)}">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+  <link rel="canonical" href="${url}">
+  <meta property="og:type" content="${type}">
+  <meta property="article:modified_time" content="${modified}">
+  <meta property="og:site_name" content="Glass">
+  <meta property="og:url" content="${url}">
+  <meta property="og:title" content="${esc(title)}">
+  <meta property="og:description" content="${esc(description)}">
+  <meta property="og:image" content="${SITE}/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="${ogImageAlt}">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="${SITE}/og.png">
+  ${ld(graph)}
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/hanken-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/glassy/glassy.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="site lg-glass-surface" data-lg-preset="header">
+      <a class="brand" href="/"><img src="/icon.svg" alt="Glass logo" width="26" height="26">Glass</a>
+      <nav class="site" aria-label="Main"><a href="/">Home</a><a href="/features">Features</a><a href="/docs">Docs</a><a href="https://github.com/Ntarasiuk/glass">GitHub</a></nav>
+    </header>
+    <main class="doc">
+${content}
+<div class="command lg-glass-surface cta" data-lg-preset="control" data-copy="curl -fsSL glassdesk.dev | sh"><code><span class="prompt" aria-hidden="true">$</span> curl -fsSL glassdesk.dev | sh</code><button type="button" class="copy">Copy</button></div>
+<p class="hint">Try Glass: run this on the Mac or Linux computer you want to reach. Free and <a href="https://github.com/Ntarasiuk/glass">open source</a>.</p>
+    </main>
+    ${footer(modified, { wrap: false })}
+  </div>
+  <script src="/site.js" type="module"></script>
+</body>
+</html>
+`,
+  );
+}
+
 // Sitemap: the HTML pages, each dated by its source's last commit.
 const pages = [
   ['/', 'index.html'],
-  ['/features', 'public/features/index.html'],
-  ['/help', 'public/help/index.html'],
+  ['/features', 'pages/features.html'],
+  ['/help', 'pages/help.html'],
   ['/docs', 'docs.md'],
+  ...guides.map((g) => [g.path, g.src]),
 ];
 writeFileSync(
   'public/sitemap.xml',
   `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 ${pages.map(([path, src]) => `  <url><loc>${SITE}${path}</loc><lastmod>${lastModified(src)}</lastmod></url>`).join('\n')}
+  <url><loc>${SITE}/guides</loc><lastmod>${guidesModified}</lastmod></url>
 </urlset>
 `,
 );
@@ -221,7 +446,16 @@ for (const p of PLATFORMS) {
   writeFileSync(`public/releases/${f}.sha256`, `${sum}  ${f}\n`);
 }
 
-console.log('built: index.html, skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, index.md, sitemap.xml, app/, releases/');
+console.log('built: index.html, features/, help/, guides/, vs/, skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, index.md, sitemap.xml, app/, releases/');
+
+/** YYYY-MM-DD of the first commit adding a file, if it's committed. */
+function firstCommitted(file) {
+  try {
+    return execFileSync('git', ['log', '--diff-filter=A', '--follow', '--format=%cs', '--', file], { encoding: 'utf8' }).trim().split('\n').at(-1) || null;
+  } catch {
+    return null;
+  }
+}
 
 /** YYYY-MM-DD of the last commit touching a file (today when uncommitted). */
 function lastModified(file) {

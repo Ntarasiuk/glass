@@ -21,6 +21,7 @@
   <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <meta property="og:type" content="website">
+  <meta property="article:modified_time" content="{{modified}}">
   <meta property="og:site_name" content="Glass">
   <meta property="og:url" content="https://glassdesk.dev/">
   <meta property="og:title" content="Glass: your computer, in any browser">
@@ -48,6 +49,7 @@
 {
   "@context": "https://schema.org",
   "@graph": [
+    "{{organization}}",
     {
       "@type": "WebSite",
       "@id": "https://glassdesk.dev/#website",
@@ -55,7 +57,7 @@
       "name": "Glass",
       "description": "Control your Mac or Linux computer from an iPad or any browser with about 20 ms of delay. Free, open source, end-to-end encrypted, one-line install.",
       "publisher": {
-        "@id": "https://glassdesk.dev/#author"
+        "@id": "https://glassdesk.dev/#organization"
       },
       "inLanguage": "en"
     },
@@ -70,6 +72,7 @@
       "about": {
         "@id": "https://glassdesk.dev/#software"
       },
+      "dateModified": "{{modified}}",
       "primaryImageOfPage": {
         "@type": "ImageObject",
         "url": "https://glassdesk.dev/og.png",
@@ -135,6 +138,9 @@
       "author": {
         "@id": "https://glassdesk.dev/#author"
       },
+      "publisher": {
+        "@id": "https://glassdesk.dev/#organization"
+      },
       "image": "https://glassdesk.dev/og.png",
       "softwareVersion": "0.6.0"
     }
@@ -145,7 +151,7 @@
 </head>
 <body>
   <header class="site wrap lg-glass-surface" data-lg-preset="header">
-    <a class="brand" href="/"><img src="/icon.svg" alt="" width="26" height="26">Glass</a>
+    <a class="brand" href="/"><img src="/icon.svg" alt="Glass logo" width="26" height="26">Glass</a>
     <nav aria-label="Main">
       <a href="/features">Features</a>
       <a href="/docs">Docs</a>
@@ -158,7 +164,7 @@
       <div class="hero-copy">
         <video class="mark" src="/mark.mp4" width="240" height="216" muted playsinline preload="auto" aria-label="Glass"></video>
         <h1>Your computer, in any browser.</h1>
-        <p class="lede">Control your Mac or Linux computer from an iPad, phone or laptop with about 20&nbsp;ms of delay. Nothing to install on the device in your hands.</p>
+        <p class="lede">Glass is a free, open-source remote desktop for Mac and Linux: control your computer from an iPad, phone or laptop browser with about 20&nbsp;ms of delay. Nothing to install on the device in your hands.</p>
         <div class="command lg-glass-surface" data-lg-preset="control" data-copy="curl -fsSL glassdesk.dev | sh">
           <code><span class="prompt" aria-hidden="true">$</span> curl -fsSL glassdesk.dev | sh</code>
           <button type="button" class="copy">Copy</button>
@@ -225,19 +231,7 @@
     </section>
   </main>
 
-  <footer class="site wrap">
-    <span>Glass is free and open source under the MIT license.</span>
-    <nav aria-label="Footer">
-      <a href="/features">Features</a>
-      <a href="/docs">Documentation</a>
-      <a href="/features#feedback">Feedback</a>
-      <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
-      <a href="/docs.md">docs.md</a>
-      <a href="/llms.txt">llms.txt</a>
-      <a href="/skill.md">skill.md</a>
-      <a href="/install.sh">install.sh</a>
-    </nav>
-  </footer>
+  {{footer}}
 
   <script src="/site.js" type="module"></script>
 </body>

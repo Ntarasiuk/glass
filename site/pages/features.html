@@ -13,7 +13,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Glass features: remote desktop for iPad, Mac and Linux</title>
-  <meta name="description" content="Everything Glass does: about 20 ms latency at up to 120 fps, every display or your device as a second one, Apple Pencil, your mic, files and clipboard, quick support, AI agents you supervise, notifications, a Mac app, single sign-on and access from anywhere.">
+  <meta name="description" content="Everything Glass does: a free remote desktop for Mac and Linux at about 20 ms and 120 fps, in any browser, with Apple Pencil, quick support and AI agents.">
   <link rel="canonical" href="https://glassdesk.dev/features">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icon-512.png">
@@ -24,10 +24,11 @@
   <link rel="stylesheet" href="/style.css">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <meta property="og:type" content="website">
+  <meta property="article:modified_time" content="{{modified}}">
   <meta property="og:site_name" content="Glass">
   <meta property="og:url" content="https://glassdesk.dev/features">
   <meta property="og:title" content="Glass features: remote desktop for iPad, Mac and Linux">
-  <meta property="og:description" content="Everything Glass does: about 20 ms latency at up to 120 fps, every display or your device as a second one, Apple Pencil, your mic, files and clipboard, quick support, AI agents you supervise, notifications, a Mac app, single sign-on and access from anywhere.">
+  <meta property="og:description" content="Everything Glass does: a free remote desktop for Mac and Linux at about 20 ms and 120 fps, in any browser, with Apple Pencil, quick support and AI agents.">
   <meta property="og:image" content="https://glassdesk.dev/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -39,25 +40,30 @@
   <meta property="og:video:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Glass features: remote desktop for iPad, Mac and Linux">
-  <meta name="twitter:description" content="Everything Glass does: about 20 ms latency at up to 120 fps, every display or your device as a second one, Apple Pencil, your mic, files and clipboard, quick support, AI agents you supervise, notifications, a Mac app, single sign-on and access from anywhere.">
+  <meta name="twitter:description" content="Everything Glass does: a free remote desktop for Mac and Linux at about 20 ms and 120 fps, in any browser, with Apple Pencil, quick support and AI agents.">
   <meta name="twitter:image" content="https://glassdesk.dev/og.png">
   <meta name="twitter:image:alt" content="Glass: your computer, in any browser. About 20 ms from your Mac or Linux screen to an iPad, phone or laptop.">
   <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@graph": [
+    "{{organization}}",
     {
       "@type": "WebPage",
       "@id": "https://glassdesk.dev/features#webpage",
       "url": "https://glassdesk.dev/features",
       "name": "Glass features: remote desktop for iPad, Mac and Linux",
-      "description": "Everything Glass does: about 20 ms latency at up to 120 fps, every display or your device as a second one, Apple Pencil, your mic, files and clipboard, quick support, AI agents you supervise, notifications, a Mac app, single sign-on and access from anywhere.",
+      "description": "Everything Glass does: a free remote desktop for Mac and Linux at about 20 ms and 120 fps, in any browser, with Apple Pencil, quick support and AI agents.",
       "isPartOf": {
         "@id": "https://glassdesk.dev/#website"
       },
       "about": {
         "@id": "https://glassdesk.dev/#software"
       },
+      "publisher": {
+        "@id": "https://glassdesk.dev/#organization"
+      },
+      "dateModified": "{{modified}}",
       "inLanguage": "en"
     }
   ]
@@ -67,7 +73,7 @@
 </head>
 <body>
   <header class="site wrap lg-glass-surface" data-lg-preset="header">
-    <a class="brand" href="/"><img src="/icon.svg" alt="" width="26" height="26">Glass</a>
+    <a class="brand" href="/"><img src="/icon.svg" alt="Glass logo" width="26" height="26">Glass</a>
     <nav aria-label="Main">
       <a href="/features">Features</a>
       <a href="/docs">Docs</a>
@@ -78,6 +84,7 @@
   <main>
     <section class="page-head wrap">
       <h1>Everything Glass does.</h1>
+      <p class="answer">Glass is a free, open-source remote desktop for Mac and Linux that you use from a browser. To control a Mac from an iPad wirelessly, run one install command on the Mac, then open its address in Safari on the iPad: touch, trackpad, keyboard and Apple Pencil work at about 20&nbsp;ms, at home or from anywhere. <a href="/guides/control-mac-from-ipad">How it compares with Sidecar and Screen Sharing</a>.</p>
       <p>Most remote desktops ride the same pipeline as video calls, which buffers to look smooth. Glass hands frames from the hardware encoder straight to your browser's decoder and never waits. Around that sits everything you need to work, help someone, or let an AI agent work while you watch.</p>
       <nav class="jump" aria-label="Feature groups">
         <a href="#picture">Picture and speed</a>
@@ -196,6 +203,18 @@
       </dl>
     </section>
 
+    <section class="all-features wrap" aria-labelledby="compare">
+      <h2 id="compare">How Glass compares</h2>
+      <p>Glass is built for one thing: a computer you own, controlled from the browser on whatever is in your hands, as close to local as the network allows. Other tools fit other jobs, and these pages say when:</p>
+      <ul class="compare-links">
+        <li><a href="/vs/jump-desktop">Glass vs Jump Desktop</a></li>
+        <li><a href="/vs/parsec">Glass vs Parsec</a></li>
+        <li><a href="/vs/rustdesk">Glass vs RustDesk</a></li>
+        <li><a href="/guides/control-mac-from-ipad">Control a Mac from an iPad: Sidecar, Universal Control, Screen Sharing or Glass</a></li>
+        <li><a href="/guides/free-remote-desktop-mac">The best free and open-source remote desktops for Mac</a></li>
+      </ul>
+    </section>
+
     <section class="all-features wrap" aria-labelledby="platforms">
       <h2 id="platforms">On a Mac or Linux</h2>
       <p>Glass runs on the computer you control: macOS 13 or later (Apple Silicon or Intel), or Linux x86_64 on Wayland (beta). You view from any modern browser.</p>
@@ -253,19 +272,7 @@
     </section>
   </main>
 
-  <footer class="site wrap">
-    <span>Glass is free and open source under the MIT license.</span>
-    <nav aria-label="Footer">
-      <a href="/features">Features</a>
-      <a href="/docs">Documentation</a>
-      <a href="/features#feedback">Feedback</a>
-      <a href="https://github.com/Ntarasiuk/glass">GitHub</a>
-      <a href="/docs.md">docs.md</a>
-      <a href="/llms.txt">llms.txt</a>
-      <a href="/skill.md">skill.md</a>
-      <a href="/install.sh">install.sh</a>
-    </nav>
-  </footer>
+  {{footer}}
 
   <script src="/site.js" type="module"></script>
 </body>
