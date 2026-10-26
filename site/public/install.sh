@@ -36,8 +36,12 @@ esac
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+# What's there already, so an update can say so (and skip the setup guide). The download
+# says it too, so glassdesk.dev counts updates apart from new installs.
+previous=$("$PREFIX/bin/glass" --version 2>/dev/null | cut -d' ' -f2 || true)
+
 info "Downloading"
-curl -fsSL "$BASE/releases/$TARBALL" -o "$tmp/glass.tar.gz" || fail "Download failed. Check your connection and try again."
+curl -fsSL -H "X-Glass-Previous: ${previous:-none}" "$BASE/releases/$TARBALL" -o "$tmp/glass.tar.gz" || fail "Download failed. Check your connection and try again."
 curl -fsSL "$BASE/releases/$TARBALL.sha256" -o "$tmp/glass.sha256" || fail "Couldn't fetch the checksum."
 expected=$(cut -d' ' -f1 < "$tmp/glass.sha256")
 if command -v sha256sum >/dev/null 2>&1; then
@@ -46,9 +50,6 @@ else
   actual=$(shasum -a 256 "$tmp/glass.tar.gz" | cut -d' ' -f1)
 fi
 [ "$expected" = "$actual" ] || fail "Checksum mismatch: the download is corrupt or was tampered with."
-
-# What's there already, so an update can say so (and skip the setup guide).
-previous=$("$PREFIX/bin/glass" --version 2>/dev/null | cut -d' ' -f2 || true)
 
 info "Installing to ~/.glass"
 tar -xzf "$tmp/glass.tar.gz" -C "$tmp"
