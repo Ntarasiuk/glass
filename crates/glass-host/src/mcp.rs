@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-const PROTOCOL: &str = "2025-06-18";
+pub(crate) const PROTOCOL: &str = "2025-06-18";
 
-const INSTRUCTIONS: &str = "Glass gives you a real computer: its screens, pointer and keyboard. \
+pub(crate) const INSTRUCTIONS: &str = "Glass gives you a real computer: its screens, pointer and keyboard. \
 The person who owns it can watch you live and pause or stop you at any time.\n\
 - You're on this computer unless you pass `machine`: `list_machines` shows the user's other \
 computers running Glass, and every tool takes `machine` to work on one of them.\n\
@@ -186,10 +186,11 @@ fn schema(props: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": props, "required": required })
 }
 
-fn tools() -> Value {
+pub(crate) fn tools() -> Value {
     let display = json!({ "type": "integer", "description": "Display id (from list_displays); the main display if left out." });
     let x = json!({ "type": "number", "description": "In pixels of the latest screenshot of this display." });
     let after = json!({ "type": "boolean", "description": "Take a screenshot once the screen settles, and return it." });
+    let wait = json!({ "type": "integer", "minimum": 0, "description": "How long to wait for the answer before returning (it stays pending after)." });
     let mut list = json!([
         { "name": "list_machines", "description": "The computers on the user's tailnet: which run Glass and are online. Use their name as `machine` in the other tools to work on them.",
           "inputSchema": schema(json!({}), &[]) },
@@ -214,11 +215,20 @@ fn tools() -> Value {
           "inputSchema": schema(json!({ "keys": { "type": "string" }, "screenshot_after": after }), &["keys"]) },
         { "name": "wait_for_change", "description": "Waits until the display changes and settles (a page loads, a dialog opens), or the timeout passes.",
           "inputSchema": schema(json!({ "display": display, "timeout_ms": { "type": "integer", "description": "Default 10000, at most 60000." } }), &[]) },
-        { "name": "request_help", "description": "Asks the person to do something you can't (sign in, a 2FA code, a CAPTCHA, a decision) and waits until they say it's done. Their note comes back.",
-          "inputSchema": schema(json!({ "message": { "type": "string", "description": "What you need them to do, in one or two sentences." } }), &["message"]) },
-        { "name": "confirm", "description": "Asks the person to approve an action before you take it (sending, buying, deleting, posting…). Waits for yes or no.",
-          "inputSchema": schema(json!({ "action": { "type": "string", "description": "Exactly what you're about to do." } }), &["action"]) },
+        { "name": "request_help", "description": "Asks the person to do something you can't (sign in, a 2FA code, a CAPTCHA, a decision) and waits until they say it's done. Their note comes back. If they haven't answered within wait_seconds, it says the question is pending: collect the answer later with check_answer.",
+          "inputSchema": schema(json!({ "message": { "type": "string", "description": "What you need them to do, in one or two sentences." }, "wait_seconds": wait }), &["message"]) },
+        { "name": "confirm", "description": "Asks the person to approve an action before you take it (sending, buying, deleting, posting…). Waits for yes or no. If they haven't answered within wait_seconds, it says the question is pending: don't take the action; collect the answer later with check_answer.",
+          "inputSchema": schema(json!({ "action": { "type": "string", "description": "Exactly what you're about to do." }, "wait_seconds": wait }), &["action"]) },
+        { "name": "check_answer", "description": "The person's answer to a question confirm or request_help left pending, waiting up to wait_seconds for it.",
+          "inputSchema": schema(json!({ "id": { "type": "integer", "description": "The question's id, from the pending reply." }, "wait_seconds": wait }), &["id"]) },
     ]);
+    // Hints for clients that ask before each call: looking is read-only, nothing is destructive
+    // by itself (the agent confirms what is), and it's this computer, not the open world.
+    for tool in list.as_array_mut().unwrap().iter_mut() {
+        let name = tool["name"].as_str().unwrap_or("").to_string();
+        let read_only = looks_only(&name) || matches!(name.as_str(), "list_machines" | "check_answer");
+        tool["annotations"] = json!({ "readOnlyHint": read_only, "destructiveHint": false, "openWorldHint": false });
+    }
     // Every tool but list_machines can work on another computer.
     for tool in list.as_array_mut().unwrap().iter_mut().skip(1) {
         tool["inputSchema"]["properties"]["machine"] = json!({ "type": "string",
@@ -227,11 +237,11 @@ fn tools() -> Value {
     list
 }
 
-fn text(s: impl Into<String>) -> Value {
+pub(crate) fn text(s: impl Into<String>) -> Value {
     json!({ "type": "text", "text": s.into() })
 }
 
-fn image_content(shot: &Value) -> Vec<Value> {
+pub(crate) fn image_content(shot: &Value) -> Vec<Value> {
     vec![
         json!({ "type": "image", "data": shot["png"], "mimeType": "image/png" }),
         text(format!(
@@ -239,6 +249,108 @@ fn image_content(shot: &Value) -> Vec<Value> {
             shot["display"], shot["width"], shot["height"]
         )),
     ]
+}
+
+/// What a tool call turns into: the displays, or one action on the computer (and how to
+/// show its result), optionally followed by a screenshot once the screen settles.
+pub(crate) enum Step {
+    Displays,
+    Act { action: Value, show: Show, after: bool, display: Value },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Show {
+    Done,
+    Shot,
+    Wait,
+    Help,
+    Confirm,
+    /// A pending question's answer: help or confirm, as it was asked.
+    Answer,
+}
+
+fn wait_ms(args: &Value) -> Value {
+    args["wait_seconds"].as_u64().map_or(Value::Null, |s| json!(s.saturating_mul(1000)))
+}
+
+/// A tool call as a step; `list_machines` is the stdio server's own.
+pub(crate) fn plan(name: &str, args: &Value) -> Result<Step, String> {
+    let display = args.get("display").cloned().unwrap_or(Value::Null);
+    let after = args["screenshot_after"].as_bool().unwrap_or(false);
+    let (action, show) = match name {
+        "list_displays" => return Ok(Step::Displays),
+        "screenshot" => (json!({ "action": "screenshot", "display": display,
+            "max_width": args.get("max_width"), "max_height": args.get("max_height") }), Show::Shot),
+        "click" => (json!({ "action": "click", "display": display, "x": args["x"], "y": args["y"],
+            "button": args.get("button"), "count": args.get("clicks") }), Show::Done),
+        "move_pointer" => (json!({ "action": "move", "display": display, "x": args["x"], "y": args["y"] }), Show::Done),
+        "drag" => (json!({ "action": "drag", "display": display, "from_x": args["from_x"], "from_y": args["from_y"],
+            "to_x": args["to_x"], "to_y": args["to_y"] }), Show::Done),
+        "scroll" => (json!({ "action": "scroll", "display": display, "x": args["x"], "y": args["y"],
+            "dx": args.get("dx").cloned().unwrap_or(json!(0)), "dy": args.get("dy").cloned().unwrap_or(json!(0)) }), Show::Done),
+        "type_text" => (json!({ "action": "type", "text": args["text"] }), Show::Done),
+        "press_keys" => (json!({ "action": "key", "keys": args["keys"] }), Show::Done),
+        "wait_for_change" => (json!({ "action": "wait_for_change", "display": display, "timeout_ms": args.get("timeout_ms") }), Show::Wait),
+        "request_help" => (json!({ "action": "request_help", "text": args["message"], "wait_ms": wait_ms(args) }), Show::Help),
+        "confirm" => (json!({ "action": "confirm", "text": args["action"], "wait_ms": wait_ms(args) }), Show::Confirm),
+        "check_answer" => (json!({ "action": "check_answer", "id": args["id"], "wait_ms": wait_ms(args) }), Show::Answer),
+        other => return Err(format!("unknown tool {other}")),
+    };
+    let after = after && matches!(show, Show::Done);
+    Ok(Step::Act { action, show, after, display })
+}
+
+/// Tools that only look (no input); the rest need `computer:use`.
+pub(crate) fn looks_only(name: &str) -> bool {
+    matches!(name, "list_displays" | "screenshot" | "wait_for_change")
+}
+
+/// An action's result as MCP content.
+pub(crate) fn show(how: Show, v: &Value) -> Vec<Value> {
+    if v["pending"] == true {
+        let id = &v["id"];
+        return vec![text(if v["kind"] == "confirm" {
+            format!("The person hasn't answered yet (question {id}). Don't take the action. Work on something that doesn't depend on it, or call check_answer with id {id} in a while.")
+        } else {
+            format!("The person hasn't done it yet (question {id}). Call check_answer with id {id} in a while; carry on with anything that doesn't need it.")
+        })];
+    }
+    let how = match how {
+        Show::Answer if v["kind"] == "confirm" => Show::Confirm,
+        Show::Answer => Show::Help,
+        other => other,
+    };
+    match how {
+        Show::Done => vec![text("Done.")],
+        Show::Shot => image_content(v),
+        Show::Wait => vec![text(if v["changed"].as_bool().unwrap_or(false) {
+            format!("The screen changed and settled after {} ms.", v["waited_ms"])
+        } else {
+            format!("No change in {} ms.", v["waited_ms"])
+        })],
+        Show::Help => {
+            let note = v["note"].as_str().filter(|n| !n.is_empty());
+            vec![text(match (v["done"].as_bool().unwrap_or(false), note) {
+                (true, Some(n)) => format!("The person says it's done: {n}"),
+                (true, None) => "The person says it's done. Take a screenshot to see where things are.".into(),
+                (false, Some(n)) => format!("The person declined: {n}"),
+                (false, None) => "The person declined.".into(),
+            })]
+        }
+        Show::Confirm => {
+            let note = v["note"].as_str().filter(|n| !n.is_empty()).map(|n| format!(" Note: {n}")).unwrap_or_default();
+            vec![text(if v["approved"].as_bool().unwrap_or(false) {
+                format!("Approved.{note}")
+            } else {
+                format!("Not approved: don't do it.{note}")
+            })]
+        }
+        Show::Answer => unreachable!(),
+    }
+}
+
+pub(crate) fn displays_content(displays: &Value) -> Vec<Value> {
+    vec![text(serde_json::to_string_pretty(displays).unwrap_or_default())]
 }
 
 /// Runs one tool: the MCP `content` list, or an error message.
@@ -253,65 +365,22 @@ fn call_tool(targets: &Targets, name: &str, args: &Value) -> Result<Vec<Value>, 
         return Ok(vec![text(serde_json::to_string_pretty(&list).unwrap_or_default())]);
     }
     let host = &targets.pick(args["machine"].as_str())?;
-    let display = args.get("display").cloned().unwrap_or(Value::Null);
-    let after = args["screenshot_after"].as_bool().unwrap_or(false);
-    let action = match name {
-        "list_displays" => {
+    match plan(name, args)? {
+        Step::Displays => {
             let v = host.call("GET", "/agent/v1/displays", None)?;
-            return Ok(vec![text(serde_json::to_string_pretty(&v["displays"]).unwrap_or_default())]);
+            Ok(displays_content(&v["displays"]))
         }
-        "screenshot" => {
-            let shot = host.act(json!({ "action": "screenshot", "display": display,
-                "max_width": args.get("max_width"), "max_height": args.get("max_height") }))?;
-            return Ok(image_content(&shot));
+        Step::Act { action, show: how, after, display } => {
+            let v = host.act(action)?;
+            let mut out = show(how, &v);
+            if after {
+                let _ = host.act(json!({ "action": "wait_for_change", "display": display, "timeout_ms": 1500 }));
+                let shot = host.act(json!({ "action": "screenshot", "display": display }))?;
+                out.extend(image_content(&shot));
+            }
+            Ok(out)
         }
-        "click" => json!({ "action": "click", "display": display, "x": args["x"], "y": args["y"],
-            "button": args.get("button"), "count": args.get("clicks") }),
-        "move_pointer" => json!({ "action": "move", "display": display, "x": args["x"], "y": args["y"] }),
-        "drag" => json!({ "action": "drag", "display": display, "from_x": args["from_x"], "from_y": args["from_y"],
-            "to_x": args["to_x"], "to_y": args["to_y"] }),
-        "scroll" => json!({ "action": "scroll", "display": display, "x": args["x"], "y": args["y"],
-            "dx": args.get("dx").cloned().unwrap_or(json!(0)), "dy": args.get("dy").cloned().unwrap_or(json!(0)) }),
-        "type_text" => json!({ "action": "type", "text": args["text"] }),
-        "press_keys" => json!({ "action": "key", "keys": args["keys"] }),
-        "wait_for_change" => {
-            let v = host.act(json!({ "action": "wait_for_change", "display": display, "timeout_ms": args.get("timeout_ms") }))?;
-            let changed = v["changed"].as_bool().unwrap_or(false);
-            return Ok(vec![text(if changed {
-                format!("The screen changed and settled after {} ms.", v["waited_ms"])
-            } else {
-                format!("No change in {} ms.", v["waited_ms"])
-            })]);
-        }
-        "request_help" => {
-            let v = host.act(json!({ "action": "request_help", "text": args["message"] }))?;
-            let note = v["note"].as_str().filter(|n| !n.is_empty());
-            return Ok(vec![text(match (v["done"].as_bool().unwrap_or(false), note) {
-                (true, Some(n)) => format!("The person says it's done: {n}"),
-                (true, None) => "The person says it's done. Take a screenshot to see where things are.".into(),
-                (false, Some(n)) => format!("The person declined: {n}"),
-                (false, None) => "The person declined.".into(),
-            })]);
-        }
-        "confirm" => {
-            let v = host.act(json!({ "action": "confirm", "text": args["action"] }))?;
-            let note = v["note"].as_str().filter(|n| !n.is_empty()).map(|n| format!(" Note: {n}")).unwrap_or_default();
-            return Ok(vec![text(if v["approved"].as_bool().unwrap_or(false) {
-                format!("Approved.{note}")
-            } else {
-                format!("Not approved: don't do it.{note}")
-            })]);
-        }
-        other => return Err(format!("unknown tool {other}")),
-    };
-    host.act(action)?;
-    let mut out = vec![text("Done.")];
-    if after {
-        let _ = host.act(json!({ "action": "wait_for_change", "display": display, "timeout_ms": 1500 }));
-        let shot = host.act(json!({ "action": "screenshot", "display": display }))?;
-        out.extend(image_content(&shot));
     }
-    Ok(out)
 }
 
 fn handle(targets: &Targets, req: &Value) -> Option<Value> {

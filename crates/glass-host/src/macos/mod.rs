@@ -7,6 +7,7 @@ pub mod capture;
 pub mod clipboard;
 pub mod clock;
 pub mod encode;
+pub mod front;
 pub mod input;
 pub mod menubar;
 pub mod overlay;

@@ -79,13 +79,35 @@ pub struct Agent {
     pub paused: bool,
     pub stopped: bool,
     pub asks: Vec<Ask>,
+    /// Agents from other devices that may use this computer.
+    pub grants: Vec<GrantRow>,
+    /// Agents from other devices may ask at all (`glass agents on|off`).
+    pub enabled: bool,
+    /// Published to the internet with Tailscale Funnel.
+    pub public: bool,
+    /// Apps asking for unattended access: (client id, name).
+    pub installs: Vec<(String, String)>,
+    /// The latest audit log lines, newest first, as text.
+    pub recent: Vec<String>,
 }
 
 #[derive(Clone, PartialEq)]
 pub struct Ask {
     pub id: u64,
     pub help: bool,
+    /// An agent asking to be allowed in: pick the number its sign-in page shows.
+    pub consent: bool,
     pub text: String,
+    pub choices: Vec<String>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct GrantRow {
+    pub id: String,
+    pub name: String,
+    pub domain: String,
+    pub summary: String,
+    pub last_used: u64,
 }
 
 impl Snapshot {
@@ -178,12 +200,43 @@ pub fn gather() -> Snapshot {
                 paused: v["status"]["paused"] == true,
                 stopped: v["status"]["stopped"] == true,
                 asks: list(&v["asks"])
-                    .map(|a| Ask { id: a["id"].as_u64().unwrap_or(0), help: a["kind"] == "help", text: text(&a["text"]) })
+                    .map(|a| Ask {
+                        id: a["id"].as_u64().unwrap_or(0),
+                        help: a["kind"] == "help",
+                        consent: a["kind"] == "consent",
+                        text: text(&a["text"]),
+                        choices: list(&a["choices"]).map(text).collect(),
+                    })
                     .collect(),
+                ..Default::default()
             };
             snap.privacy = v["privacy"] == true;
         }
     }
+    let now = crate::grants::now();
+    let store = crate::grants::load();
+    snap.agent.enabled = store.enabled;
+    snap.agent.public = store.public;
+    snap.agent.installs = store.clients.iter().filter(|c| c.install_requested && !c.installed).map(|c| (c.id.clone(), c.name.clone())).collect();
+    snap.agent.recent = crate::grants::audit_lines(6)
+        .iter()
+        .rev()
+        .map(|l| {
+            format!(
+                "{} · {} {}{}",
+                l["name"].as_str().unwrap_or("Agent"),
+                l["action"].as_str().unwrap_or(""),
+                l["detail"].as_str().unwrap_or(""),
+                if l["ok"] == false { " (refused)" } else { "" }
+            )
+        })
+        .collect();
+    snap.agent.grants = store
+        .grants
+        .into_iter()
+        .filter(|g| g.live(now))
+        .map(|g| GrantRow { summary: g.summary(), id: g.id, name: g.client_name, domain: g.domain, last_used: g.last_used })
+        .collect();
     snap.status = status;
     snap
 }

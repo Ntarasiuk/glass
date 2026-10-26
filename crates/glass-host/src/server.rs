@@ -138,6 +138,7 @@ pub async fn run(
         .merge(crate::scim::routes())
         .merge(crate::acl::routes())
         .merge(crate::computer::routes())
+        .merge(crate::oauth::routes())
         .merge(crate::push::routes())
         .merge(crate::browse::routes())
         .route("/config.json", get(client_config))
@@ -159,6 +160,9 @@ pub async fn run(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         ));
+    // Agents from anywhere: only the OAuth and MCP routes, on this computer alone, for
+    // Tailscale Funnel to publish (glass agents public on).
+    crate::oauth::serve_public();
     let web_port = http_listener.local_addr()?.port();
     http_listener.set_nonblocking(true)?;
     tokio::spawn(async move {
@@ -1089,7 +1093,11 @@ async fn control(
             },
             ClientMsg::Agent { .. } | ClientMsg::AgentAnswer { .. } if guest => refuse(OWNER_ONLY),
             ClientMsg::Agent { op } => crate::computer::control(&op),
-            ClientMsg::AgentAnswer { id, ok, note } => crate::computer::answer(id, crate::computer::Answer { ok, note }),
+            ClientMsg::AgentAnswer { id, ok, note } => {
+                // A viewer on this computer itself: an agent on the screen could be clicking it.
+                let local = crate::oauth::is_this_computer(ctx.conn.remote_address().ip());
+                crate::computer::answer_from(id, crate::computer::Answer { ok, note }, local)
+            }
             ClientMsg::Privacy { .. } if guest => refuse(OWNER_ONLY),
             ClientMsg::Privacy { on } => {
                 if let Err(e) = crate::privacy::set_forced(on) {
@@ -1663,7 +1671,13 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
                     Some(ev @ InputEvent::Gamepad { .. }) if !crate::testmode::enabled() => {
                         crate::gamepad::handle(ev)
                     }
-                    Some(ev) => ctx.shared.injector.lock().unwrap().handle(ev),
+                    Some(ev) => {
+                        // A person clicking, typing or scrolling: agents wait for them.
+                        if matches!(ev, InputEvent::MouseDown { .. } | InputEvent::KeyDown { .. } | InputEvent::Scroll { .. }) {
+                            crate::computer::human_input();
+                        }
+                        ctx.shared.injector.lock().unwrap().handle(ev)
+                    }
                     None => continue,
                 }
                 events += 1;

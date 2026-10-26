@@ -3,6 +3,7 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -72,6 +73,9 @@ impl GlassApp {
             .map(|ask| {
                 let id = ask.id;
                 let help = ask.help;
+                if ask.consent {
+                    return consent_card(ask, &theme);
+                }
                 let note = self
                     .notes
                     .entry(id)
@@ -118,6 +122,84 @@ impl GlassApp {
                     .into_any_element()
             })
             .collect();
+
+        let grants: Vec<AnyElement> = agent
+            .grants
+            .iter()
+            .map(|g| {
+                let id = g.id.clone();
+                let when = ago(crate::grants::now().saturating_sub(g.last_used));
+                ui::icon_row(
+                    I::Globe,
+                    theme.primary,
+                    format!("{} · {}", g.name, g.domain),
+                    format!("Can {}; last used {when}", g.summary),
+                    Button::new(SharedString::from(format!("revoke-{id}")))
+                        .small()
+                        .ghost()
+                        .label("Revoke")
+                        .on_click(move |_, window, cx| {
+                            let id = id.clone();
+                            act(window, cx, move || actions::revoke_grant(&id))
+                        }),
+                    cx,
+                )
+            })
+            .collect();
+
+        // Agents from other devices: the address, publishing, on/off, installs, activity.
+        let mcp_url = snap.url().map(|u| format!("{}/mcp", u.trim_end_matches('/')));
+        let mut anywhere: Vec<AnyElement> = Vec::new();
+        anywhere.push(ui::row(
+            "Agents can ask",
+            "Agents on Vercel, in claude.ai or on a server ask with standard MCP sign-in; you approve each once.",
+            Switch::new("agents-on").checked(agent.enabled).on_click(|on: &bool, window, cx| {
+                let on = *on;
+                act(window, cx, move || actions::agents_enabled(on))
+            }),
+            cx,
+        ));
+        if let Some(url) = mcp_url.clone() {
+            let copy = url.clone();
+            anywhere.push(ui::row(
+                "Address on your tailnet",
+                url,
+                Button::new("copy-mcp-url").small().icon(I::Copy).label("Copy").on_click(move |_, window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                    super::toast(window, cx, Ok("Copied".into()));
+                }),
+                cx,
+            ));
+        }
+        let public_url = mcp_url
+            .as_deref()
+            .and_then(|u| u.split("://").nth(1))
+            .and_then(|h| h.split([':', '/']).next())
+            .map(|h| format!("https://{h}:{}/mcp", crate::oauth::FUNNEL_PORT));
+        anywhere.push(ui::row(
+            "From anywhere",
+            match (&public_url, agent.public) {
+                (Some(u), true) => format!("Published with Tailscale Funnel: {u}"),
+                _ => "Publish just the agent sign-in and MCP endpoints with Tailscale Funnel, for agents outside your tailnet.".into(),
+            },
+            Switch::new("agents-public").checked(agent.public).on_click(|on: &bool, window, cx| {
+                let on = *on;
+                act(window, cx, move || actions::agents_public(on))
+            }),
+            cx,
+        ));
+        for (id, name) in agent.installs.clone() {
+            anywhere.push(ui::row(
+                format!("{name} asks for unattended access"),
+                "Not verified by Glass. Installed, it can see and use this computer with nobody approving each run.",
+                Button::new(SharedString::from(format!("install-{id}"))).small().label("Install").on_click(move |_, window, cx| {
+                    let id = id.clone();
+                    act(window, cx, move || actions::install_agent(&id))
+                }),
+                cx,
+            ));
+        }
+        let recent: Vec<AnyElement> = agent.recent.iter().map(|line| ui::note(line.clone(), cx)).collect();
 
         let mut clients: Vec<AnyElement> = self
             .clients
@@ -205,7 +287,64 @@ impl GlassApp {
         ui::page("AI agents", "Let Claude or another agent use this computer while you watch, pause or stop it.", cx)
             .when(!asks.is_empty(), |d| d.child(ui::section("Questions for you", asks, cx)))
             .child(ui::section("Connect an agent", clients, cx))
+            .child(ui::section("Agents from anywhere", anywhere, cx))
+            .when(!grants.is_empty(), |d| d.child(ui::section("Agents from other devices", grants, cx)))
+            .when(!recent.is_empty(), |d| d.child(ui::section("What agents did lately", recent, cx)))
             .child(ui::section("Control", vec![steer], cx))
             .child(how)
     }
+}
+
+fn ago(secs: u64) -> String {
+    match secs {
+        0..120 => "just now".into(),
+        120..7200 => format!("{} minutes ago", secs / 60),
+        7200..172_800 => format!("{} hours ago", secs / 3600),
+        _ => format!("{} days ago", secs / 86400),
+    }
+}
+
+/// An agent asking to be let in: the owner taps the number its sign-in page shows (one of
+/// three), so approving someone else's request by reflex doesn't work.
+fn consent_card(ask: &super::data::Ask, theme: &gpui_kit::component::Theme) -> AnyElement {
+    let id = ask.id;
+    // The request's id, kept in the text so it's unique, isn't for people.
+    let text = ask.text.rsplit_once(" [").map_or(ask.text.as_str(), |(t, _)| t).to_string();
+    v_flex()
+        .p_4()
+        .gap_3()
+        .child(
+            h_flex()
+                .gap_3()
+                .child(ui::tile(I::Globe, theme.primary))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("An agent asks to use this computer"))
+                        .child(div().text_sm().text_color(theme.muted_foreground).child(text)),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .children(ask.choices.iter().map(|n| {
+                    let n2 = n.clone();
+                    Button::new(SharedString::from(format!("pick-{id}-{n}")))
+                        .label(n.clone())
+                        .on_click(move |_, window, cx| {
+                            let n = n2.clone();
+                            act(window, cx, move || actions::answer(id, true, &n))
+                        })
+                }))
+                .child(div().flex_1())
+                .child(
+                    Button::new(("deny", id))
+                        .small()
+                        .ghost()
+                        .label("Deny")
+                        .on_click(move |_, window, cx| act(window, cx, move || actions::answer(id, false, ""))),
+                ),
+        )
+        .into_any_element()
 }

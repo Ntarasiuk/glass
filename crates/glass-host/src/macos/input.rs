@@ -297,6 +297,7 @@ impl Injector {
                 super::privacy::INJECTED_MARK,
             );
             CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&ev));
+            super::front::injected();
         }
     }
 }
