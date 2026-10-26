@@ -24,6 +24,10 @@
   // Remote access: introduces browsers to hosts (see src/introducer.js).
   "durable_objects": { "bindings": [{ "name": "INTRODUCER", "class_name": "Introducer" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Introducer"] }],
+  // Feedback is emailed to FEEDBACK_TO (a secret); downloads also go to Google Analytics
+  // (GA_API_SECRET is a secret too).
+  "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["feedback@glassdesk.dev"] }],
+  "vars": { "GA_MEASUREMENT_ID": "G-LCYDPMQMLD" },
   "routes": [{ "pattern": "glassdesk.dev", "custom_domain": true }],
   "workers_dev": true,
   "observability": { "enabled": true }

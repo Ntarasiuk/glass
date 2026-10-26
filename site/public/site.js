@@ -8,6 +8,7 @@ for (const block of document.querySelectorAll('.command')) {
     try {
       await navigator.clipboard.writeText(block.dataset.copy);
       button.textContent = 'Copied';
+      globalThis.gtag?.('event', 'copy_command', { command: block.dataset.copy.slice(0, 100) });
     } catch {
       getSelection().selectAllChildren(block.querySelector('code'));
       button.textContent = 'Press ⌘C';

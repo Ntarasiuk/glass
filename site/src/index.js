@@ -1,5 +1,5 @@
-// glassdesk.dev: landing page, one-line installer, release downloads (counted in D1),
-// the feedback API, and the introducer for remote access (WebRTC signaling, one Durable
+// glassdesk.dev: landing page, one-line installer, release downloads (counted in D1 and
+// sent to Google Analytics), the feedback API (emailed to the maintainer), and the introducer for remote access (WebRTC signaling, one Durable
 // Object per host). Static files come from ./public via the ASSETS binding; the web client
 // for remote access is served from /app/.
 
@@ -39,11 +39,13 @@ export default {
 
     if (url.pathname === '/api/feedback') {
       if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
-      if (request.method === 'POST') return cors(await feedback(request, env));
+      if (request.method === 'POST') return cors(await feedback(request, env, ctx));
       return cors(json({ error: 'method not allowed' }, 405));
     }
 
     if (url.pathname === '/api/stats') return stats(request, env);
+    // Your own visitor id, so `node stats.mjs --mark-me` can leave this machine out of the numbers.
+    if (url.pathname === '/api/visitor') return json({ visitor: await visitorId(request, env) });
 
     if (url.pathname === '/api/support') {
       if (request.method === 'POST') return supportRegister(request, env, url);
@@ -66,7 +68,7 @@ export default {
     const wantsMarkdown = /\btext\/markdown\b/i.test(request.headers.get('accept') ?? '');
     // Quick support: `curl glassdesk.dev/help | sh` runs Glass for one session, installing nothing.
     if (url.pathname === '/help.sh' || (url.pathname === '/help' && CLI_AGENT.test(ua) && !wantsMarkdown)) {
-      ctx.waitUntil(recordDownload(env, request, 'script', 'help.sh'));
+      ctx.waitUntil(recordDownload(env, request, 'script', 'help.sh', 'quick_support'));
       const res = await env.ASSETS.fetch(new URL('/help.sh', url));
       return new Response(res.body, {
         headers: { 'content-type': 'text/x-shellscript; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
@@ -74,7 +76,7 @@ export default {
     }
     const wantsScript = url.pathname === '/install.sh' || (url.pathname === '/' && CLI_AGENT.test(ua) && !wantsMarkdown);
     if (wantsScript) {
-      ctx.waitUntil(recordDownload(env, request, 'script', 'install.sh'));
+      ctx.waitUntil(recordDownload(env, request, 'script', 'install.sh', 'install_script'));
       const res = await env.ASSETS.fetch(new URL('/install.sh', url));
       return new Response(res.body, {
         headers: { 'content-type': 'text/x-shellscript; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
@@ -103,7 +105,7 @@ export default {
 
     if (url.pathname.startsWith('/releases/') && url.pathname.endsWith('.tar.gz')) {
       const name = url.pathname.slice('/releases/'.length);
-      ctx.waitUntil(recordDownload(env, request, 'release', name));
+      ctx.waitUntil(recordDownload(env, request, 'release', name, 'download'));
       const res = await env.ASSETS.fetch(request);
       if (res.status !== 404) return res;
       // Too big to be an asset (over 25 MiB): the same file from the GitHub release.
@@ -150,7 +152,7 @@ export async function ranged(res, request) {
   return new Response(request.method === 'HEAD' ? null : body.slice(start, end + 1), { status: 206, headers });
 }
 
-async function feedback(request, env) {
+async function feedback(request, env, ctx) {
   let body;
   try {
     body = await request.json();
@@ -170,21 +172,41 @@ async function feedback(request, env) {
     .first('n');
   if (recent >= FEEDBACK_PER_HOUR) return json({ error: 'thanks! that is plenty for now, try again later' }, 429);
 
+  const row = {
+    message,
+    email,
+    source: clip(body.source, 20) ?? 'web',
+    version: clip(body.version, 40),
+    os: clip(body.os, 80),
+    country: request.cf?.country ?? null,
+  };
   await env.DB.prepare(
     'INSERT INTO feedback (ts, message, email, source, version, os, country, visitor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   )
-    .bind(
-      Date.now(),
-      message,
-      email,
-      clip(body.source, 20) ?? 'web',
-      clip(body.version, 40),
-      clip(body.os, 80),
-      request.cf?.country ?? null,
-      visitor,
-    )
+    .bind(Date.now(), row.message, row.email, row.source, row.version, row.os, row.country, visitor)
     .run();
+  ctx.waitUntil(Promise.all([emailFeedback(env, row), track(env, request, visitor, 'feedback', { source: row.source })]));
   return json({ ok: true });
+}
+
+/** Each piece of feedback, emailed to FEEDBACK_TO (a secret, so the address isn't in the repo). */
+async function emailFeedback(env, f) {
+  if (!env.EMAIL || !env.FEEDBACK_TO) return;
+  const about = [f.source, f.version && `Glass ${f.version}`, f.os, f.country].filter(Boolean).join(' · ');
+  const text = `${f.message}\n\n${about}${f.email ? `\nFrom: ${f.email}` : ''}`;
+  const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  try {
+    await env.EMAIL.send({
+      to: env.FEEDBACK_TO,
+      from: { email: 'feedback@glassdesk.dev', name: 'Glass feedback' },
+      ...(f.email ? { replyTo: f.email } : {}),
+      subject: `Glass feedback: ${f.message.replace(/\s+/g, ' ').slice(0, 60)}`,
+      text,
+      html: `<p style="white-space:pre-wrap">${esc(f.message)}</p><p style="color:#666">${esc(about)}${f.email ? `<br>From: ${esc(f.email)}` : ''}</p>`,
+    });
+  } catch (e) {
+    console.error('emailFeedback failed', e.code, e.message);
+  }
 }
 
 // ---- Quick support ----
@@ -280,31 +302,63 @@ async function secretHash(env, value) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function recordDownload(env, request, kind, file) {
+async function recordDownload(env, request, kind, file, event) {
   try {
-    await env.DB.prepare('INSERT INTO downloads (ts, kind, file, country, user_agent, visitor) VALUES (?, ?, ?, ?, ?, ?)')
-      .bind(
-        Date.now(),
-        kind,
-        file,
-        request.cf?.country ?? null,
-        clip(request.headers.get('user-agent'), 200),
-        await visitorId(request, env),
-      )
+    const visitor = await visitorId(request, env);
+    // The installer sends the version it replaces ('none' for a new install); older
+    // installers and direct downloads send nothing.
+    const said = request.headers.get('x-glass-previous');
+    const previous = said && said !== 'none' && /^[\w.+-]{1,40}$/.test(said) ? said : null;
+    const via = said === 'none' ? 'install' : previous ? 'update' : null;
+    await env.DB.prepare(
+      'INSERT INTO downloads (ts, kind, file, country, user_agent, visitor, via, previous) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    )
+      .bind(Date.now(), kind, file, request.cf?.country ?? null, clip(request.headers.get('user-agent'), 200), visitor, via, previous)
       .run();
+    const os = /darwin/.test(file) ? 'macos' : /linux/.test(file) ? 'linux' : undefined;
+    await track(env, request, visitor, via === 'update' ? 'update' : event, { file, os, via: via ?? 'unknown', previous });
   } catch (e) {
     console.error('recordDownload failed', e);
   }
 }
 
-/** Totals for the last 30 days. Requires `Authorization: Bearer <STATS_KEY>`. */
+/**
+ * The same event in Google Analytics (Measurement Protocol), next to the site's page views.
+ * Downloads come from curl, which never runs the page's tag. Our own machines are left out.
+ */
+async function track(env, request, visitor, name, params) {
+  if (!env.GA_MEASUREMENT_ID || !env.GA_API_SECRET) return;
+  try {
+    if (await env.DB.prepare('SELECT 1 FROM internal_visitors WHERE visitor = ?').bind(visitor).first()) return;
+    const clean = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== null));
+    const country = request.cf?.country;
+    const res = await fetch(
+      `https://www.google-analytics.com/mp/collect?measurement_id=${env.GA_MEASUREMENT_ID}&api_secret=${env.GA_API_SECRET}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          client_id: visitor,
+          ...(country ? { user_location: { country_id: country } } : {}),
+          // A session per visitor per half hour, so the events show up in GA's reports.
+          events: [{ name, params: { ...clean, session_id: String(Math.floor(Date.now() / 1800_000)), engagement_time_msec: 1 } }],
+        }),
+      },
+    );
+    if (!res.ok) console.error('track failed', res.status);
+  } catch (e) {
+    console.error('track failed', e);
+  }
+}
+
+/** Totals for the last 30 days, without our own machines. Requires `Authorization: Bearer <STATS_KEY>`. */
 async function stats(request, env) {
   const auth = request.headers.get('authorization') ?? '';
   if (!env.STATS_KEY || auth !== `Bearer ${env.STATS_KEY}`) return json({ error: 'unauthorized' }, 401);
   const since = Date.now() - 30 * 86400_000;
   const [downloads, feedbackRows] = await Promise.all([
     env.DB.prepare(
-      'SELECT kind, COUNT(*) AS total, COUNT(DISTINCT visitor) AS unique_visitors FROM downloads WHERE ts > ? GROUP BY kind',
+      `SELECT kind, via, COUNT(*) AS total, COUNT(DISTINCT visitor) AS unique_visitors FROM downloads
+       WHERE ts > ? AND visitor NOT IN (SELECT visitor FROM internal_visitors) GROUP BY kind, via`,
     )
       .bind(since)
       .all(),
@@ -313,12 +367,25 @@ async function stats(request, env) {
   return json({ downloads: downloads.results, feedback: feedbackRows.results });
 }
 
-/** Salted SHA-256 of the client IP: lets us count unique visitors without storing IPs. */
+/**
+ * Salted SHA-256 of the client IP: lets us count unique visitors without storing IPs. IPv6
+ * counts by its /64 (one household or office), since devices change the rest every day.
+ */
 async function visitorId(request, env) {
-  const ip = request.headers.get('cf-connecting-ip') ?? '';
+  const ip = network(request.headers.get('cf-connecting-ip') ?? '');
   const data = new TextEncoder().encode(`${env.VISITOR_SALT ?? ''}:${ip}`);
   const digest = await crypto.subtle.digest('SHA-256', data);
   return [...new Uint8Array(digest).slice(0, 12)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** An IPv6 address's /64 ("2001:0db8:0001:0002::/64"); IPv4 as it is. */
+export function network(ip) {
+  if (!ip.includes(':')) return ip;
+  const [head, tail] = ip.split('::');
+  const h = head ? head.split(':') : [];
+  const t = tail ? tail.split(':') : [];
+  const groups = tail === undefined ? h : [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t];
+  return `${groups.slice(0, 4).map((g) => g.toLowerCase().padStart(4, '0')).join(':')}::/64`;
 }
 
 function clip(value, max) {
