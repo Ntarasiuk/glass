@@ -389,6 +389,19 @@ pub fn app_token(client: &Client, domain: &str) -> Result<(Grant, Issued)> {
     })
 }
 
+/// Agents from other devices on or off. Off also stops publishing them with Funnel, since
+/// nothing there would answer; grants are kept for when they're back on.
+pub fn set_enabled(on: bool) -> Result<()> {
+    let published = update(|s| {
+        s.enabled = on;
+        s.public
+    })?;
+    if !on && published {
+        crate::oauth::publish(false)?;
+    }
+    Ok(())
+}
+
 /// The live grant an access token belongs to.
 pub fn by_access(token: &str) -> Option<Grant> {
     let store = load();
@@ -603,9 +616,9 @@ pub fn cli(action: &str, id: Option<&str>, json_out: bool) -> Result<()> {
             );
         }
         "on" | "off" => {
-            update(|s| s.enabled = action == "on")?;
+            set_enabled(action == "on")?;
             if action == "off" {
-                println!("Agents from other devices are refused until `glass agents on`. Grants are kept.");
+                println!("Agents from other devices are refused until `glass agents on`, and nothing is published with Funnel. Grants are kept.");
             } else {
                 println!("Agents can ask to use this computer again.");
             }

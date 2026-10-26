@@ -64,8 +64,8 @@ pub fn agent(op: &str) -> Result<String> {
 
 /// Lets agents from other devices ask (or refuses them all).
 pub fn agents_enabled(on: bool) -> Result<String> {
-    crate::grants::update(|s| s.enabled = on)?;
-    Ok(if on { "Agents can ask to use this computer." } else { "Agents from other devices are refused. Their grants are kept." }.into())
+    crate::grants::set_enabled(on)?;
+    Ok(if on { "Agents can ask to use this computer." } else { "Agents from other devices are refused, and nothing is published. Their grants are kept." }.into())
 }
 
 /// Publishes the agent sign-in and MCP endpoints with Tailscale Funnel (or stops).

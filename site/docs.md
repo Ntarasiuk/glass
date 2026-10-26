@@ -140,7 +140,7 @@ On your tailnet no publishing is needed: use `https://<computer>/mcp`. Publishin
 
 **In the Mac app** (AI agents): turn agents on or off, copy the MCP address, publish with Funnel, install apps that asked, see and revoke agents, and see what they did lately.
 
-**Revoking is immediate**: in the Mac app, with `glass agents revoke <id>` (or `all`), or from the agent's platform (Vercel's revoke calls Glass's). An old refresh token used again (a stolen copy) revokes its grant on the spot. Approving an agent again replaces its earlier grant. `glass agents off` refuses every agent until `glass agents on`.
+**Revoking is immediate**: in the Mac app, with `glass agents revoke <id>` (or `all`), or from the agent's platform (Vercel's revoke calls Glass's). An old refresh token used again (a stolen copy) revokes its grant on the spot. Approving an agent again replaces its earlier grant. **Turning it off:** the Mac app's Settings (AI agents), the console's settings, or `glass config agents off` (the same as `glass agents off`) refuses every agent from another device and stops publishing with Funnel. Grants are kept for when it's back on. Agents on the computer itself (`glass mcp`) aren't affected.
 
 **Every action is logged** to `agent-audit.jsonl`, each line chained to the one before by its hash: `glass agents log` shows the latest, `glass agents verify` checks nothing was changed.
 

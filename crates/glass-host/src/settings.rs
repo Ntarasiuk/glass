@@ -160,6 +160,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("recordings-dir", "folder for recordings"),
     ("privacy", "on/off: blank this screen and block local input while viewed"),
     ("hevc", "on/off: use HEVC when every viewer supports it"),
+    ("agents", "on/off: AI agents on other devices may ask to use this computer (glass agents)"),
     ("forward-ports", "comma-separated ports owner devices may open, e.g. 3000,8888"),
     ("name", "name shown in the viewer"),
     ("accent", "viewer accent colour, e.g. #ff8800"),
@@ -236,6 +237,8 @@ impl Settings {
             "recordings-dir" => recordings_dir(self).display().to_string(),
             "privacy" => show_bool(self.privacy),
             "hevc" => show_bool(self.hevc),
+            // Kept with the agents' grants, not here.
+            "agents" => show_bool(crate::grants::load().enabled),
             "forward-ports" => self
                 .forward_ports
                 .iter()
@@ -278,6 +281,7 @@ impl Settings {
             }
             "privacy" => self.privacy = on_off(value)?,
             "hevc" => self.hevc = on_off(value)?,
+            "agents" => crate::grants::set_enabled(on_off(value)?)?,
             "forward-ports" => {
                 self.forward_ports = value
                     .split([',', ' '])

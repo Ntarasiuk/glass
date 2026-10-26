@@ -433,11 +433,16 @@ it('speaks the protocols as written: registration management, JSON-RPC, versions
   const pre = await fetch(`${host.base}/oauth/token`, { method: 'OPTIONS', headers: { origin: 'http://localhost:6274', 'access-control-request-method': 'POST' } });
   expect(pre.headers.get('access-control-allow-origin')).toBe('*');
 
-  // Agents off: sign-in refused, tokens refused with proper OAuth errors.
-  host.cli('agents', 'off');
+  // Agents off, from Glass's settings (`glass config agents`, the console, the app's Settings):
+  // registering, sign-in and tokens refused with proper OAuth errors, and nothing can be published.
+  host.cli('config', 'agents', 'off');
+  expect(host.cli('config', 'agents').trim()).toBe('off');
+  expect((await fetch(`${host.base}/oauth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Late', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none' }) })).status).toBe(403);
   expect((await fetch(authorizeUrl(host, c2.client_id, pkce().challenge))).status).toBe(403);
   expect((await token(host, { grant_type: 'refresh_token', refresh_token: 'x', client_id: c2.client_id })).body.error).toBe('invalid_grant');
-  host.cli('agents', 'on');
+  expect(() => host.cli('agents', 'public', 'on')).toThrow();
+  host.cli('config', 'agents', 'on');
+  expect(host.cli('config', 'agents').trim()).toBe('on');
 });
 
 it('JSON-RPC as MCP expects: one message per request, unknown tools are protocol errors, versions negotiated', async ({ browser }) => {
