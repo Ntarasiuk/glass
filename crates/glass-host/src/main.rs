@@ -1,4 +1,5 @@
 mod access;
+mod account;
 #[cfg(target_os = "macos")]
 mod app;
 mod computer;
@@ -243,6 +244,14 @@ enum Command {
     Remote {
         #[arg(value_parser = ["on", "off", "status"], default_value = "status")]
         action: String,
+    },
+    /// Your computers at glassdesk.dev: add this one to the account you're signed in to
+    /// there (a one-time link), or remove it from every account.
+    Account {
+        #[arg(value_parser = ["add", "remove"])]
+        action: String,
+        #[arg(long)]
+        json: bool,
     },
     /// Check that a virtual display (for "fit this device" resolutions) can be created and
     /// removed cleanly: mirrors the main display onto one for a few seconds, then restores.
@@ -582,6 +591,32 @@ fn remote_cli(action: &str) -> Result<()> {
     Ok(())
 }
 
+fn account_cli(action: &str, json: bool) -> Result<()> {
+    if action == "remove" {
+        let n = account::remove()?;
+        if json {
+            println!("{}", serde_json::json!({ "removed": n }));
+        } else if n == 0 {
+            println!("This computer isn't on any account.");
+        } else {
+            println!("Removed this computer from {n} account{}.", if n == 1 { "" } else { "s" });
+        }
+        return Ok(());
+    }
+    let claim = account::add()?;
+    if json {
+        println!("{}", serde_json::json!({ "url": claim.url, "name": claim.name, "expires": claim.expires }));
+        return Ok(());
+    }
+    println!(
+        "Open this where you're signed in to glassdesk.dev/computers to add {} to your account (works once, for 15 minutes):\n\n{}\n{}",
+        claim.name,
+        setup::qr(&claim.url),
+        claim.url
+    );
+    Ok(())
+}
+
 /// `glass token --set`: prompts on a terminal, otherwise reads one line from stdin.
 fn set_token(path: &std::path::Path) -> Result<()> {
     use std::io::IsTerminal;
@@ -850,6 +885,7 @@ async fn async_main(args: Args) -> Result<()> {
             Ok(())
         }
         Some(Command::Remote { action }) => remote_cli(action),
+        Some(Command::Account { action, json }) => account_cli(action, *json),
         #[cfg(target_os = "macos")]
         Some(Command::DisplayTest { size, seconds }) => {
             let (w, h) = size

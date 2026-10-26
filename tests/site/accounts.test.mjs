@@ -198,3 +198,76 @@ test('deleting the account leaves its passkey unknown', async () => {
   assert.equal(res.status, 400);
   assert.equal(res.body.unknown, true);
 });
+
+/** A Glass host's key, signing like `glass account` does (raw P-256 point, P1363 signatures). */
+async function hostKey() {
+  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const key = b64(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey)));
+  const sign = async (text) => b64(new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, new TextEncoder().encode(text))));
+  return {
+    key,
+    async claim({ name = 'Studio', ts = Math.floor(Date.now() / 1000), signedName = name } = {}) {
+      const code = b64(crypto.getRandomValues(new Uint8Array(32)));
+      const sig = await sign(`glass-claim-v1\n${code}\n${ts}\n${signedName}`);
+      const res = await fetch(`${BASE}/api/claims`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key, code, ts, name, sig }) });
+      return { status: res.status, body: await res.json(), code };
+    },
+    async remove({ ts = Math.floor(Date.now() / 1000), other } = {}) {
+      const sig = await (other ?? this).signRemove(ts);
+      const res = await fetch(`${BASE}/api/claims/remove`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key, ts, sig }) });
+      return { status: res.status, body: await res.json() };
+    },
+    signRemove: (ts) => sign(`glass-unclaim-v1\n${ts}`),
+  };
+}
+
+test('a computer joins an account only by a claim its host signed, fresh, used once', async () => {
+  const host = await hostKey();
+  assert.equal((await host.claim({ signedName: 'Something else' })).status, 401);
+  assert.equal((await host.claim({ ts: Math.floor(Date.now() / 1000) - 3600 })).status, 400);
+
+  const { status, body, code } = await host.claim();
+  assert.equal(status, 200);
+  assert.equal(body.url, `${BASE}/computers#claim=${code}`);
+
+  // Signed out, or from another site: no.
+  assert.equal((await new Browser().call('/api/account/computers', { method: 'POST', body: { claim: code } })).status, 401);
+  const { browser } = await newAccount();
+  assert.equal((await browser.call('/api/account/computers', { method: 'POST', body: { claim: code }, origin: 'https://evil.example' })).status, 403);
+
+  assert.deepEqual((await browser.call(`/api/account/claim?code=${code}`)).body, { name: 'Studio' });
+  assert.deepEqual((await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } })).body, { name: 'Studio' });
+  const { body: list } = await browser.call('/api/account/computers');
+  assert.equal(list.computers.length, 1);
+  assert.equal(list.computers[0].key, host.key);
+  assert.equal(list.computers[0].online, false);
+
+  // Used: not again, not by anyone.
+  const { browser: other } = await newAccount();
+  assert.equal((await other.call('/api/account/computers', { method: 'POST', body: { claim: code } })).status, 404);
+  assert.equal((await other.call('/api/account/computers')).body.computers.length, 0);
+});
+
+test('only the computer itself takes itself off accounts', async () => {
+  const host = await hostKey();
+  const { browser } = await newAccount();
+  const { code } = await host.claim();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } });
+
+  const stranger = await hostKey();
+  assert.equal((await host.remove({ other: stranger })).status, 401);
+  assert.equal((await browser.call('/api/account/computers')).body.computers.length, 1);
+
+  assert.deepEqual((await host.remove()).body, { removed: 1 });
+  assert.equal((await browser.call('/api/account/computers')).body.computers.length, 0);
+});
+
+test('deleting an account deletes its list of computers', async () => {
+  const host = await hostKey();
+  const { browser, key } = await newAccount();
+  const { code } = await host.claim();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } });
+  await browser.call('/api/account', { method: 'DELETE' });
+  assert.deepEqual((await host.remove()).body, { removed: 0 });
+  assert.equal((await signIn(new Browser(), key)).body.unknown, true);
+});

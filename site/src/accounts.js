@@ -5,8 +5,11 @@
 //
 // WebAuthn without attestation (any authenticator), discoverable credentials (signing in
 // needs no name), ES256 or RS256, checked here with WebCrypto.
+//
+// A computer joins an account only through a claim its host signed (`glass account add`):
+// a one-time code in a link, used here by a signed-in browser.
 
-import { fromB64url, toB64url } from './introducer.js';
+import { fromB64url, hostsOnline, toB64url, verifySigned } from './introducer.js';
 import { visitorId } from './index.js';
 
 const SESSION_COOKIE = '__Host-session';
@@ -18,12 +21,28 @@ const PASSKEYS_PER_ACCOUNT = 20;
 const ES256 = -7;
 const RS256 = -257;
 const USER_NAME = 'Your computers';
+const CLAIM_MS = 15 * 60_000;
+// A host's signed claim must be this fresh (its clock may be off a little).
+const CLAIM_CLOCK_MS = 5 * 60_000;
+const CLAIMS_PER_HOUR = 20;
+const COMPUTERS_PER_ACCOUNT = 32;
+const NAME_MAX = 64;
 
-/** Routes under /api/account; `null` for anything else. */
+/** Routes under /api/account and /api/claims; `null` for anything else. */
 export async function accounts(request, env, url) {
   const path = url.pathname;
-  if (path !== '/api/account' && !path.startsWith('/api/account/')) return null;
   const { method } = request;
+  // From hosts (`glass account`), each request signed with the host's key.
+  if (path === '/api/claims' || path === '/api/claims/remove') {
+    if (method !== 'POST') return json({ error: 'method not allowed' }, 405);
+    try {
+      return await (path === '/api/claims' ? makeClaim(request, env, url) : unclaim(request, env));
+    } catch (e) {
+      if (e instanceof Refused) return json({ error: e.message }, e.status);
+      throw e;
+    }
+  }
+  if (path !== '/api/account' && !path.startsWith('/api/account/')) return null;
   // Changes only from this site's own pages (the cookie is SameSite=Strict too).
   if (method !== 'GET' && request.headers.get('origin') !== url.origin) return json({ error: 'cross-origin request' }, 403);
   try {
@@ -33,6 +52,11 @@ export async function accounts(request, env, url) {
     if (path === '/api/account/passkey' && method === 'POST') return await register(request, env, url);
     if (path === '/api/account/session' && method === 'POST') return await signIn(request, env, url);
     if (path === '/api/account/session' && method === 'DELETE') return await signOut(request, env);
+    if (path === '/api/account/claim' && method === 'GET') return await peekClaim(env, url);
+    if (path === '/api/account/computers' && method === 'GET') return await computers(request, env);
+    if (path === '/api/account/computers' && method === 'POST') return await addComputer(request, env);
+    const remove = path.match(/^\/api\/account\/computers\/([A-Za-z0-9_-]{22})$/);
+    if (remove && method === 'DELETE') return await removeComputer(request, env, remove[1]);
   } catch (e) {
     if (e instanceof Refused) return json({ error: e.message, ...e.extra }, e.status);
     throw e;
@@ -154,10 +178,89 @@ async function signOut(request, env) {
 async function deleteAccount(request, env) {
   const s = await session(request, env);
   if (!s) throw new Refused('Not signed in.', 401);
-  await env.DB.batch(['passkeys', 'sessions'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE account = ?`).bind(s.account)).concat(
+  await env.DB.batch(['passkeys', 'sessions', 'account_computers'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE account = ?`).bind(s.account)).concat(
     env.DB.prepare('DELETE FROM accounts WHERE id = ?').bind(s.account),
   ));
   return clearSession(json({ ok: true }));
+}
+
+/** A host asks for a one-time code that adds it to whichever account uses it. */
+async function makeClaim(request, env, url) {
+  const { key, code, ts, name, sig } = await body(request);
+  const clean = String(name ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, NAME_MAX);
+  if (!clean || !/^[A-Za-z0-9_-]{43}$/.test(String(code))) throw new Refused('expected key, code, ts, name and sig');
+  if (Math.abs(Date.now() - Number(ts) * 1000) > CLAIM_CLOCK_MS) throw new Refused('This computer\'s clock is off by more than a few minutes.');
+  // Signed over the name as sent: a name trimmed here still had to be signed whole.
+  const hostId = await verifySigned(String(key), `glass-claim-v1\n${code}\n${ts}\n${name}`, String(sig));
+  if (!hostId) throw new Refused('The claim isn\'t signed by that computer.', 401);
+  const now = Date.now();
+  const visitor = await visitorId(request, env);
+  const recent = await env.DB.prepare('SELECT COUNT(*) AS n FROM computer_claims WHERE visitor = ? AND created > ?').bind(visitor, now - 3600_000).first('n');
+  if (recent >= CLAIMS_PER_HOUR) throw new Refused('Too many links. Try again later.', 429);
+  await env.DB.prepare('DELETE FROM computer_claims WHERE expires < ?').bind(now).run();
+  const res = await env.DB.prepare(
+    'INSERT OR IGNORE INTO computer_claims (code_hash, host_id, host_key, name, created, expires, visitor) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  )
+    .bind(await sha256b64(`claim:${code}`), hostId, String(key), clean, now, now + CLAIM_MS, visitor)
+    .run();
+  if (!res.meta.changes) throw new Refused('That code was used already.', 409);
+  return json({ url: `${url.origin}/computers#claim=${code}`, expires: Math.floor((now + CLAIM_MS) / 1000) });
+}
+
+/** A host takes itself off every account (and drops its unused claims). */
+async function unclaim(request, env) {
+  const { key, ts, sig } = await body(request);
+  if (Math.abs(Date.now() - Number(ts) * 1000) > CLAIM_CLOCK_MS) throw new Refused('This computer\'s clock is off by more than a few minutes.');
+  const hostId = await verifySigned(String(key ?? ''), `glass-unclaim-v1\n${ts}`, String(sig ?? ''));
+  if (!hostId) throw new Refused('Not signed by that computer.', 401);
+  const [removed] = await env.DB.batch([
+    env.DB.prepare('DELETE FROM account_computers WHERE host_id = ?').bind(hostId),
+    env.DB.prepare('DELETE FROM computer_claims WHERE host_id = ?').bind(hostId),
+  ]);
+  return json({ removed: removed.meta.changes });
+}
+
+/** Which computer a claim link adds, so the page can ask first. */
+async function peekClaim(env, url) {
+  const claim = await env.DB.prepare('SELECT name FROM computer_claims WHERE code_hash = ? AND expires > ?')
+    .bind(await sha256b64(`claim:${url.searchParams.get('code') ?? ''}`), Date.now())
+    .first();
+  if (!claim) throw new Refused('This link has expired or was used already. Make a new one with: glass account add', 404);
+  return json({ name: claim.name });
+}
+
+async function addComputer(request, env) {
+  const s = await session(request, env);
+  if (!s) throw new Refused('Sign in first.', 401);
+  const { claim: code } = await body(request);
+  const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM account_computers WHERE account = ?').bind(s.account).first('n');
+  if (n >= COMPUTERS_PER_ACCOUNT) throw new Refused('This account has as many computers as it can hold.');
+  // Taken in one step, so two browsers can't both use one link.
+  const claim = await env.DB.prepare('DELETE FROM computer_claims WHERE code_hash = ? AND expires > ? RETURNING host_id, host_key, name')
+    .bind(await sha256b64(`claim:${code}`), Date.now())
+    .first();
+  if (!claim) throw new Refused('This link has expired or was used already. Make a new one with: glass account add', 404);
+  await env.DB.prepare('INSERT OR REPLACE INTO account_computers (account, host_id, host_key, name, added) VALUES (?, ?, ?, ?, ?)')
+    .bind(s.account, claim.host_id, claim.host_key, claim.name, Date.now())
+    .run();
+  return json({ name: claim.name });
+}
+
+async function computers(request, env) {
+  const s = await session(request, env);
+  if (!s) throw new Refused('Sign in first.', 401);
+  const { results } = await env.DB.prepare('SELECT host_id, host_key, name, added FROM account_computers WHERE account = ? ORDER BY name COLLATE NOCASE')
+    .bind(s.account)
+    .all();
+  const online = await hostsOnline(env, results.map((r) => r.host_id));
+  return json({ computers: results.map((r) => ({ id: r.host_id, key: r.host_key, name: r.name, added: r.added, online: online[r.host_id] })) });
+}
+
+async function removeComputer(request, env, hostId) {
+  const s = await session(request, env);
+  if (!s) throw new Refused('Sign in first.', 401);
+  await env.DB.prepare('DELETE FROM account_computers WHERE account = ? AND host_id = ?').bind(s.account, hostId).run();
+  return json({ ok: true });
 }
 
 /** Uses up a challenge this site made: the account it was made for (create), or ''. */

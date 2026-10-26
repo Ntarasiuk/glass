@@ -211,3 +211,50 @@ test('/computers: a passkey makes an account that signs in and out, and deleting
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.locator('#account-status')).toContainText("isn't on any account");
 });
+
+test('/computers: glass account add puts a computer on the account, once, until it takes itself off', async ({ page }) => {
+  const host = await remoteHost();
+  try {
+    host.cli('remote', 'on');
+    await passkeys(page);
+    await page.goto(`${base}/computers`);
+    await page.getByRole('button', { name: 'Create an account' }).click();
+    await expect(page.locator('#account-note')).toHaveText('Signed in with a passkey.');
+    const mine = page.locator('#mine-list li');
+    await expect(page.locator('#mine-note')).toContainText('glass account add');
+
+    const { url, name } = JSON.parse(host.cli('account', 'add', '--json'));
+    expect(url).toMatch(new RegExp(`^${base}/computers#claim=[A-Za-z0-9_-]{43}$`));
+    await page.goto(url);
+    await expect(page.locator('#claim-title')).toHaveText(`Add ${name}?`);
+    expect(page.url()).toBe(`${base}/computers`); // the code leaves the address bar
+    await page.getByRole('button', { name: `Add ${name}` }).click();
+    await expect(page.locator('#claim')).toBeHidden();
+    await expect(mine).toHaveCount(1);
+    await expect(mine.locator('.name')).toHaveText(name);
+    // Online once the host has reached the introducer (it checks every few seconds).
+    await expect(async () => {
+      await page.reload();
+      await expect(mine.locator('.detail')).toHaveText('online', { timeout: 1000 });
+    }).toPass({ timeout: 15_000 });
+    expect(await mine.locator('a.open').getAttribute('href')).toMatch(/^\/app\/#r=[A-Za-z0-9_-]+$/);
+
+    // One link, one computer, once.
+    await page.goto(url);
+    await expect(page.locator('#claim-title')).toHaveText("This link doesn't work");
+    await page.getByRole('button', { name: 'OK', exact: true }).click();
+    await expect(page.locator('#claim')).toBeHidden();
+
+    // The computer takes itself off every account.
+    expect(JSON.parse(host.cli('account', 'remove', '--json'))).toEqual({ removed: 1 });
+    await page.reload();
+    await expect(page.locator('#mine-note')).toContainText('glass account add');
+    await expect(mine).toHaveCount(0);
+
+    // Without remote access, there's no link to make.
+    host.cli('remote', 'off');
+    expect(() => host.cli('account', 'add')).toThrow(/remote access is off/);
+  } finally {
+    await host.stop();
+  }
+});
