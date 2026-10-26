@@ -239,8 +239,8 @@ const home = finish(readFileSync('index.html', 'utf8'), lastModified('index.html
 if (!home.includes('<style>')) throw new Error('index.html: stylesheet link not found');
 writeFileSync('public/index.html', home);
 
-// Features and quick support: hand-written pages with the shared placeholders.
-for (const [name, dir] of [['features', 'public/features'], ['help', 'public/help']]) {
+// Features, quick support and your computers: hand-written pages with the shared placeholders.
+for (const [name, dir] of [['features', 'public/features'], ['help', 'public/help'], ['computers', 'public/computers']]) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(`${dir}/index.html`, finish(readFileSync(`pages/${name}.html`, 'utf8'), lastModified(`pages/${name}.html`)));
 }
@@ -446,7 +446,7 @@ for (const p of PLATFORMS) {
   writeFileSync(`public/releases/${f}.sha256`, `${sum}  ${f}\n`);
 }
 
-console.log('built: index.html, features/, help/, guides/, vs/, skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, index.md, sitemap.xml, app/, releases/');
+console.log('built: index.html, features/, help/, computers/, guides/, vs/, skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, index.md, sitemap.xml, app/, releases/');
 
 /** YYYY-MM-DD of the first commit adding a file, if it's committed. */
 function firstCommitted(file) {

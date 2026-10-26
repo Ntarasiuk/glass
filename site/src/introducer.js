@@ -17,8 +17,10 @@ export class Introducer extends DurableObject {
   }
 
   async fetch(request) {
-    if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected a WebSocket', { status: 426 });
     const url = new URL(request.url);
+    // For glassdesk.dev/computers. Not secret: a browser that connects is told the same.
+    if (url.searchParams.get('role') === 'status') return Response.json({ online: Boolean(this.host()) });
+    if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected a WebSocket', { status: 426 });
     const role = url.searchParams.get('role');
     const hostId = url.searchParams.get('id');
     const { 0: client, 1: server } = new WebSocketPair();

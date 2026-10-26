@@ -54,6 +54,20 @@ export default {
     }
     if (url.pathname === '/api/support/claim' && request.method === 'POST') return supportClaim(request, env);
 
+    // /signal/online?ids=<id>,…: which of these computers are online (glassdesk.dev/computers).
+    if (url.pathname === '/signal/online') {
+      const ids = [...new Set((url.searchParams.get('ids') ?? '').split(','))].filter((id) => /^[A-Za-z0-9_-]{22}$/.test(id)).slice(0, 32);
+      const online = await Promise.all(
+        ids.map((id) =>
+          env.INTRODUCER.get(env.INTRODUCER.idFromName(id))
+            .fetch(`https://introducer/?role=status&id=${id}`)
+            .then((r) => r.json())
+            .then((r) => [id, r.online], () => [id, false]),
+        ),
+      );
+      return json({ online: Object.fromEntries(online) });
+    }
+
     // /signal/host/<id> (the host) and /signal/connect/<id> (a browser).
     const signal = url.pathname.match(/^\/signal\/(host|connect)\/([A-Za-z0-9_-]{22})$/);
     if (signal) {

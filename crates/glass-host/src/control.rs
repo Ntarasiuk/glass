@@ -177,6 +177,9 @@ pub enum ServerMsg {
         /// Branding from `glass config name` / `accent`.
         name: Option<String>,
         accent: Option<String>,
+        /// The computer's own name, for the list of computers at glassdesk.dev/computers.
+        /// Anyone let in sees the screen, which says as much.
+        computer: String,
         /// The codec the video arrives in: "h264" or "hevc".
         codec: &'static str,
     },

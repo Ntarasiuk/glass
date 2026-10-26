@@ -42,6 +42,7 @@ const CTRL_AS_CMD_KEY = 'glass.ctrlAsCmd';
 const DECODER_STEP_KEY = 'glass.decoderStep';
 const PC_KEYBOARD_KEY = 'glass.pcKeyboard';
 const MACHINE_KEY = 'glass.machine';
+const REMOTES_KEY = 'glass.remotes'; // computers opened from anywhere, for glassdesk.dev/computers
 // Give up on a remembered machine after this many failed connects and return to the
 // machine that served this page.
 const MACHINE_MAX_FAILURES = 3;
@@ -77,6 +78,11 @@ const hashToken = hashParams.get('t');
 const link = hashParams.get('l') ?? undefined;
 const remoteKey = hashParams.get('r') ?? undefined;
 const remoteId = remoteKey && (await hostIdFor(remoteKey));
+// glassdesk.dev/app/ without a computer: the list of your computers instead. Stops here.
+if (!remoteKey && location.pathname.startsWith('/app/')) {
+  location.replace('/computers');
+  await new Promise(() => {});
+}
 // Every remote computer shares this page's origin, so credentials are kept per computer:
 // one computer's token must never be offered to another.
 const tokenKey = remoteId ? `${TOKEN_KEY}.${remoteId}` : TOKEN_KEY;
@@ -772,7 +778,10 @@ function onControl(msg) {
       input.setHostOs(msg.host_os ?? 'macos');
       ui.setHostOs(msg.host_os ?? 'macos');
       applyKeyboard(msg.host_os ?? 'macos');
-      if (remoteKey) setLogSink((lines) => control({ t: 'log', lines }));
+      if (remoteKey) {
+        setLogSink((lines) => control({ t: 'log', lines }));
+        rememberRemote(msg.computer);
+      }
       guest = Boolean(msg.guest);
       // Remote: other machines aren't reachable from here, so no machines menu either.
       ui.setGuest(guest || Boolean(remoteKey));
@@ -959,6 +968,14 @@ function machineName(id) {
   if (brandNames[id]) return brandNames[id];
   if (remoteKey) return 'your computer';
   return machineNames[id] ?? id.split('.')[0].split(':')[0];
+}
+
+/** Lists this computer at glassdesk.dev/computers (same origin), newest first. */
+function rememberRemote(name) {
+  storage((s) => {
+    const others = JSON.parse(s.getItem(REMOTES_KEY) ?? '[]').filter((c) => c.key !== remoteKey);
+    s.setItem(REMOTES_KEY, JSON.stringify([{ key: remoteKey, name: name || 'Computer' }, ...others].slice(0, 32)));
+  });
 }
 
 // Branding (glass config name / accent), from a machine's welcome.

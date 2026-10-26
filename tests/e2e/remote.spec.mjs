@@ -152,3 +152,31 @@ test('says so when the computer is offline or remote access is off', async ({ pa
     await host.stop();
   }
 });
+
+test('/computers lists the computers opened from anywhere, online or not', async ({ page }) => {
+  const host = await remoteHost();
+  try {
+    const { url } = JSON.parse(host.cli('link', '--anywhere', '--json'));
+    await page.goto(url);
+    await expectVideo(page);
+
+    // /app/ without a computer is the list; the one just opened is on it, by name, online.
+    await page.goto(`${base}/app/`);
+    await expect(page).toHaveURL(`${base}/computers`);
+    const remote = page.locator('#browser-list li');
+    await expect(remote).toHaveCount(1);
+    await expect(remote.locator('.detail')).toHaveText('online');
+    await expect(remote.locator('.name')).not.toHaveText('Computer');
+    expect(await remote.locator('a.open').getAttribute('href')).toMatch(/^\/app\/#r=[A-Za-z0-9_-]+$/);
+
+    // Remote access off: offline. Forgetting it empties the list.
+    host.cli('remote', 'off');
+    await page.waitForTimeout(4000); // the host notices within ~3 s and disconnects
+    await page.reload();
+    await expect(remote.locator('.detail')).toHaveText('offline');
+    await remote.locator('button.forget').click();
+    await expect(remote).toHaveCount(0);
+  } finally {
+    await host.stop();
+  }
+});
