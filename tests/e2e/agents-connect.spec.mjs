@@ -220,9 +220,10 @@ it('on an owner device it is one tap; a view-only agent can look but not touch, 
     expect(refused.body.result.isError).toBe(true);
     expect(refused.body.result.content[0].text).toContain('protected');
 
-    // Revoking (Vercel's revoke button) ends it at once.
-    await fetch(`${host.base}/oauth/revoke`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: t2.body.refresh_token, client_id: client.client_id }) });
+    // Revoking (Vercel's revoke button sends just the access token) ends the whole grant.
+    await fetch(`${host.base}/oauth/revoke`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: t2.body.access_token, client_id: client.client_id }) });
     expect((await mcp(host, t2.body.access_token, 'ping')).status).toBe(401);
+    expect((await token(host, { grant_type: 'refresh_token', refresh_token: t2.body.refresh_token, client_id: client.client_id })).body.error).toBe('invalid_grant');
   } finally {
     await host.stop();
   }

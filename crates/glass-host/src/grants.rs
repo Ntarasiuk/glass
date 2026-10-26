@@ -408,14 +408,15 @@ pub fn by_access(token: &str) -> Option<Grant> {
 pub fn revoke_token(token: &str, client_id: &str) -> Result<()> {
     let h = hash(token);
     let ended = update(|s| {
-        for g in s.grants.iter_mut().filter(|g| g.client_id == client_id) {
-            if g.refresh.as_deref() == Some(h.as_str()) || g.retired.contains(&h) {
+        // Any of the grant's tokens ends all of it: Vercel Connect revokes just the access
+        // token and forgets the connection, which would leave a live grant no one holds.
+        for g in s.grants.iter_mut().filter(|g| g.client_id == client_id && !g.revoked) {
+            if g.refresh.as_deref() == Some(h.as_str()) || g.retired.contains(&h) || g.access.iter().any(|a| a.hash == h) {
                 g.revoked = true;
                 g.refresh = None;
                 g.access.clear();
                 return Some(g.clone());
             }
-            g.access.retain(|a| a.hash != h);
         }
         None
     })?;
