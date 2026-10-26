@@ -20,6 +20,7 @@
   <meta property="article:modified_time" content="{{modified}}">
   <style>
     .computers { display: grid; gap: clamp(28px, 4vw, 44px); padding: clamp(40px, 7vw, 88px) 0 clamp(48px, 8vw, 96px); max-width: 720px; }
+    .computers section { padding: 0; }
     .computers h1 { margin: 0; font-size: clamp(38px, 5.4vw, 64px); line-height: 1; }
     .computers h2 { margin: 0 0 6px; font-size: 26px; }
     .computers .lead, .computers .note { margin: 0; color: var(--text-dim); }
@@ -39,10 +40,12 @@
     .actions button.primary { border-color: transparent; background: var(--accent); color: #04121f; }
     .actions button.quiet { border-color: transparent; background: none; color: var(--text-faint); font-weight: 500; }
     .actions button:disabled { opacity: 0.6; cursor: default; }
-    .claim { padding: 18px 20px; border-radius: 16px; border: 1px solid rgb(255 255 255 / 0.14); background: rgb(255 255 255 / 0.06); }
+    .computers .claim { padding: 18px 20px; border-radius: 16px; border: 1px solid rgb(255 255 255 / 0.14); background: rgb(255 255 255 / 0.06); }
     .claim h2 { font-size: 22px; }
     .hidden { display: none !important; }
-    .form-status { margin: 10px 0 0; min-height: 1.4em; color: var(--text-dim); font-size: 15px; }
+    .form-status { margin: 10px 0 0; color: var(--text-dim); font-size: 15px; }
+    .form-status:empty, .list:empty { display: none; }
+    .note code { font-size: 0.92em; }
   </style>
 </head>
 <body>
@@ -80,7 +83,7 @@
       <p class="form-status" id="account-status" role="status"></p>
     </section>
 
-    <section aria-labelledby="browser-title">
+    <section id="browser" aria-labelledby="browser-title">
       <h2 id="browser-title">On this browser</h2>
       <p class="note" id="browser-note"></p>
       <ul class="list" id="browser-list"></ul>
@@ -94,6 +97,15 @@
     const REMOTES_KEY = 'glass.remotes';
     const REFRESH_MS = 30_000;
     const $ = (id) => document.getElementById(id);
+    /** Sets a note's text; `like this` becomes code. */
+    function say(id, text) {
+      $(id).replaceChildren(...text.split('`').map((part, i) => {
+        if (!(i % 2)) return part;
+        const code = document.createElement('code');
+        code.textContent = part;
+        return code;
+      }));
+    }
     const remotes = () => { try { return JSON.parse(localStorage.getItem(REMOTES_KEY) ?? '[]'); } catch { return []; } };
     const saveRemotes = (list) => { try { localStorage.setItem(REMOTES_KEY, JSON.stringify(list)); } catch {} };
 
@@ -137,8 +149,9 @@
 
     async function showBrowser() {
       const list = remotes();
+      $('browser').classList.toggle('hidden', !list.length && Boolean(account));
       if (!list.length) {
-        $('browser-note').textContent = 'Computers you open with a link from glass link --anywhere show up here.';
+        say('browser-note', 'Computers you open with a link from `glass link --anywhere` show up here.');
         $('browser-list').replaceChildren();
         return;
       }
@@ -258,11 +271,12 @@
 
     async function showMine() {
       $('mine').classList.toggle('hidden', !account);
+      $('browser').classList.toggle('hidden', !remotes().length && Boolean(account));
       if (!account) return;
       const { computers = [] } = await api('/api/account/computers').catch(() => ({}));
-      $('mine-note').textContent = computers.length
+      say('mine-note', computers.length
         ? 'Signed in on any device, these are here.'
-        : 'To add a computer, run glass account add on it and open the link here.';
+        : 'To add a computer, run `glass account add` on it and open the link here.');
       $('mine-list').replaceChildren(...computers.map((c) => row({
         name: c.name,
         on: c.online,
