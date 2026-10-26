@@ -149,6 +149,8 @@ glass config scim-token new   # SCIM provisioning at https://<computer>/scim/v2 
 glass config             # settings: ask-guests, record, privacy, hevc, forward-ports, name, accent, relay…
 glass mcp                # MCP server: an AI agent uses this computer while you watch
                          # (claude mcp add glass -- glass mcp; --machine mac-mini for another)
+glass agents             # agents from anywhere: list, revoke ID|all, install CLIENT, log, verify,
+                         # on|off, public on|off (publish with Tailscale Funnel)
 glass feedback "…"       # tell us what broke or what you want
 ```
 
