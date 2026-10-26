@@ -4,7 +4,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex, Disableable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -182,7 +182,7 @@ impl GlassApp {
                 (Some(u), true) => format!("Published with Tailscale Funnel: {u}"),
                 _ => "Publish just the agent sign-in and MCP endpoints with Tailscale Funnel, for agents outside your tailnet.".into(),
             },
-            Switch::new("agents-public").checked(agent.public).on_click(|on: &bool, window, cx| {
+            Switch::new("agents-public").checked(agent.public).disabled(!agent.enabled).on_click(|on: &bool, window, cx| {
                 let on = *on;
                 act(window, cx, move || actions::agents_public(on))
             }),

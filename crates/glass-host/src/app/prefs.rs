@@ -4,7 +4,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -152,6 +152,29 @@ impl GlassApp {
             ),
             self.field("relay", "Your own relay", "A self-hosted server for reaching from anywhere.", cx),
             self.field("forward-ports", "Forwarded ports", "Local web apps your devices may open through Glass.", cx),
+        ];
+
+        // The same switches as on AI agents, here too so they're easy to find and turn off.
+        let agent = &snap.agent;
+        let agents = vec![
+            ui::row(
+                "Agents from other devices",
+                "AI agents elsewhere (Vercel, claude.ai, a server) may ask to use this computer; you approve each once. Off refuses them all and keeps their grants.",
+                Switch::new("settings-agents-on").checked(agent.enabled).on_click(|on: &bool, window, cx| {
+                    let on = *on;
+                    act(window, cx, move || actions::agents_enabled(on))
+                }),
+                cx,
+            ),
+            ui::row(
+                "Publish for agents anywhere",
+                "Just the agent sign-in and MCP endpoints, with Tailscale Funnel.",
+                Switch::new("settings-agents-public").checked(agent.public).disabled(!agent.enabled).on_click(|on: &bool, window, cx| {
+                    let on = *on;
+                    act(window, cx, move || actions::agents_public(on))
+                }),
+                cx,
+            ),
         ];
 
         let rec_dir = settings::recordings_dir(s);
@@ -346,6 +369,7 @@ impl GlassApp {
 
         ui::page("Settings", "How Glass behaves, your access token, and the background service.", cx)
             .child(ui::section("Connections", connections, cx))
+            .child(ui::section("AI agents", agents, cx))
             .child(ui::section("Notifications on your devices", notify, cx))
             .child(ui::section("Video and recording", media, cx))
             .child(ui::section("Branding", brand, cx))

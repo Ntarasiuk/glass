@@ -138,6 +138,7 @@ pub fn serve_public() {
 /// Funnel (or stops). Returns the URL agents use. Tailscale may first need Funnel allowed
 /// for this machine: its link is passed on, and the result is checked, not assumed.
 pub fn publish(on: bool) -> anyhow::Result<Option<String>> {
+    anyhow::ensure!(!on || grants::load().enabled, "Agents from other devices are off. Turn them on first: glass agents on");
     // Known before anything changes, so a failure here leaves nothing published.
     let host = crate::status::read()
         .and_then(|s| s.url)

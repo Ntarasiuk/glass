@@ -114,7 +114,7 @@ An agent running anywhere (Vercel, claude.ai, ChatGPT, a server) asks to use you
 ## Controls
 
 - **Mac app, AI agents:**
-  - agents on/off
+  - agents on/off (also in Settings, the console's settings and `glass config agents`; off stops publishing with Funnel too)
   - the MCP address (with copy)
   - publishing with Funnel
   - install requests
