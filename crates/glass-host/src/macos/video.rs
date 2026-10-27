@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use glass_proto::MAX_STREAMS;
+use objc2_core_graphics::CGDisplayIsAsleep;
 use tokio::sync::broadcast;
 use tracing::info;
 
@@ -44,6 +45,8 @@ struct Stream {
     refresh: u32,
     /// Captured in Display P3 (a wide-colour display).
     p3: bool,
+    /// Its display was asleep, which ends the capture: restart it once the display wakes.
+    slept: AtomicBool,
 }
 
 /// What a stream captures.
@@ -295,6 +298,7 @@ impl Video {
             window,
             refresh,
             p3,
+            slept: Default::default(),
         })
     }
 
@@ -490,6 +494,52 @@ impl VideoSource for Video {
         }
         drop(streams);
         self.rebalance();
+    }
+
+    /// Restarts streams that ended. ScreenCaptureKit stops a stream when its display sleeps
+    /// (closing the lid, even for a second) and never resumes it, which froze the picture
+    /// while input still worked.
+    fn heal(&self) {
+        let mut streams = self.streams.lock().unwrap();
+        let mut displays = None;
+        for index in 0..streams.len() {
+            let s = &streams[index];
+            // Only displays sleep; a window stream has no display to wait for.
+            if s.window {
+                continue;
+            }
+            let id = s.display.id;
+            if CGDisplayIsAsleep(id) {
+                s.slept.store(true, Ordering::Relaxed);
+                continue;
+            }
+            if !s.slept.swap(false, Ordering::Relaxed) && !s.capture.stopped() {
+                continue;
+            }
+            let list = displays.get_or_insert_with(capture::list_displays);
+            let restarted = match list {
+                Ok(list) => match list.iter().find(|d| d.info.id == id) {
+                    Some(display) => {
+                        let audio = (index == 0).then(|| self.audio.clone());
+                        self.start(index as u8, &Target::Display(display), audio)
+                    }
+                    None => Err(anyhow::anyhow!("display {id} isn't back yet")),
+                },
+                Err(e) => Err(anyhow::anyhow!("listing displays: {e:#}")),
+            };
+            match restarted {
+                Ok(stream) => {
+                    // Same display and stream number, so viewers just get a new keyframe.
+                    drop(std::mem::replace(&mut streams[index], stream));
+                    info!("stream {index}: display {id} capture restarted");
+                }
+                Err(e) => {
+                    // Try again on the next check.
+                    streams[index].slept.store(true, Ordering::Relaxed);
+                    tracing::debug!("stream {index}: restart: {e:#}");
+                }
+            }
+        }
     }
 
     /// Splits the total between displays by recent activity, and applies the sharpness

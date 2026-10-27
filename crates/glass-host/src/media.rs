@@ -75,6 +75,9 @@ pub trait VideoSource: Send + Sync {
     fn set_bitrate(&self, bps: u32);
     /// Re-shares the bitrate between displays (called every second).
     fn rebalance(&self) {}
+    /// Restarts any capture that ended, e.g. when its display slept (called every second).
+    /// May block.
+    fn heal(&self) {}
     /// Encodes each stream at this width (`None` = native), from what viewers show.
     fn set_target_widths(&self, _widths: &[Option<u32>]) {}
     /// Frames per second viewers want (crate::refresh); capped by each display's refresh.

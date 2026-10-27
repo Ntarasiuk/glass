@@ -1165,13 +1165,16 @@ async fn run_host(args: Args) -> Result<()> {
         audio,
         rate: Mutex::new(rate::RateControl::new((args.mbps * 1_000_000) as u32)),
     });
-    // Re-share the bitrate between displays by activity, once a second.
+    // Once a second: restart any capture that ended, and re-share the bitrate between
+    // displays by activity.
     {
         let video = shared.video.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 tick.tick().await;
+                let v = video.clone();
+                let _ = tokio::task::spawn_blocking(move || v.heal()).await;
                 video.rebalance();
             }
         });
