@@ -226,6 +226,8 @@ Touch gestures: tap = click, drag = drag, long-press = right-click, two fingers 
 
 **Trackpad mode** (the trackpad button, in the keyboard group; on by default on phones): the screen works like a laptop trackpad. Drag to move the pointer (faster flicks go further), tap to click, two-finger tap to right-click, double-tap and hold (or press and hold) to drag, two fingers to scroll, pinch to zoom; when zoomed in, the view follows the pointer.
 
+**Keyboard and mouse mode** (touch screens: ⋯ menu › Keyboard and mouse mode): for when another screen shows the computer, such as a car's browser or a TV, and this phone is only its trackpad and keyboard. The picture is paused and hidden here (the computer stops sending it, and this device never raises the picture's size for others), the whole screen is the trackpad, and the toolbar's keyboard types. Tap **Show the screen** to go back.
+
 On a phone the toolbar folds each group into one button with a dropdown.
 
 Apple Pencil and other styluses draw with pressure and tilt: the Mac sees a pen tablet, so Photoshop, Affinity, Krita and other drawing apps vary the stroke. Hovering (Pencil hover on newer iPads) moves the pointer without clicking.
