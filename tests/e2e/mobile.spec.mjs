@@ -1,6 +1,6 @@
 // Phones: the toolbar's groups become dropdowns, and trackpad mode drives a cursor.
 
-import { Host, expectVideo, test, expect } from './harness.mjs';
+import { Host, expectVideo, test, expect, toolbarClick } from './harness.mjs';
 
 const it = test.extend({
   host: async ({}, use) => {
@@ -107,6 +107,38 @@ it('trackpad mode moves a cursor, clicks, right-clicks, drags and scrolls', asyn
   await page.locator('#tb-input .tb-trigger').click();
   await page.locator('#btn-trackpad').click();
   await expect(page.locator('#tp-cursor')).toBeHidden();
+});
+
+it('keyboard and mouse mode pauses and hides the picture, and the whole screen is the trackpad', async ({ browser, host }) => {
+  const page = await (await browser.newContext(phone)).newPage();
+  await page.goto(host.url());
+  await expectVideo(page);
+  await expect(page.locator('#pad-hint')).toBeHidden();
+
+  // From the Computer menu (the dots).
+  await toolbarClick(page, 'btn-more');
+  await page.getByRole('menuitemradio', { name: /Keyboard and mouse mode/ }).click();
+  await expect(page.locator('#pad-hint')).toBeVisible();
+  await expect(page.locator('#screens')).toHaveCSS('opacity', '0');
+  await expect(page.locator('#tp-cursor')).toBeHidden();
+  // The host is told to stop sending video here, and to count this device as the smallest viewer.
+  await expect.poll(() => host.clientLog(/^video paused/).length).toBeGreaterThan(0);
+
+  // The screen still drives the pointer.
+  await host.clearInput();
+  await fingers(page, [{ type: 'pointerdown', x: 20, y: 20 }, { type: 'pointermove', x: 30, y: 20 }, { type: 'pointermove', x: 60, y: 20 }, { type: 'pointerup', x: 60, y: 20 }]);
+  await expect.poll(async () => (await host.input('move')).events.length).toBeGreaterThan(0);
+  await host.clearInput();
+  await page.waitForTimeout(350);
+  await fingers(page, [{ type: 'pointerdown', x: 5, y: 5 }, { type: 'pointerup', x: 5, y: 5 }]);
+  await expect.poll(async () => (await host.input('down')).events.map((e) => e.button)).toEqual([0]);
+
+  // Back: the picture returns and the video resumes.
+  await page.locator('#pad-exit').click();
+  await expect(page.locator('#pad-hint')).toBeHidden();
+  await expect(page.locator('#screens')).toHaveCSS('opacity', '1');
+  await expect.poll(() => host.clientLog(/^video resumed/).length).toBeGreaterThan(0);
+  await expect(page.locator('#tp-cursor')).toBeVisible(); // trackpad mode was on (a phone), and still is
 });
 
 it('hiding the toolbar keeps the keyboard up, and the zoom pill clears the toolbar', async ({ browser, host }) => {

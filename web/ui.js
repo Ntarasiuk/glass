@@ -19,7 +19,7 @@ const storageSet = (key, value) => {
 };
 
 
-export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, onOpenDevice = () => {}, onTrackpad = () => {}, onExtend = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onToken, onTerminal = () => {}, onOpenDevice = () => {}, onTrackpad = () => {}, onPad = () => {}, onExtend = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -498,6 +498,13 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
         onSelect: () => { setMenuOpen('more', false); onToggleStats?.(); },
       }),
     ];
+    // Another screen shows the computer (a car, a TV); this one is its trackpad and keyboard.
+    if (padAvailable) {
+      items.push(menuItem('Keyboard and mouse mode', 'the picture is paused here', {
+        checked: padActive,
+        onSelect: () => { setMenuOpen('more', false); onPad(!padActive); },
+      }));
+    }
     if (!isOwner) {
       menus.more.panel.replaceChildren(...items);
       return;
@@ -540,6 +547,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     }
     menus.more.panel.replaceChildren(...items);
   }
+  let padAvailable = false; // a touch screen: it can be just a trackpad and keyboard
+  let padActive = false;
   let consoleUrl; // the owner's console (/admin/), from the Computer menu
   let extendAvailable = false; // owner, and the host can add a display
   let extended = false; // this device is a second display now
@@ -733,6 +742,11 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       $('btn-mic').setAttribute('aria-pressed', String(on));
     },
     /** Trackpad mode: offered on touch screens, and whether it's on. */
+    setPad({ available, on }) {
+      padAvailable = available;
+      padActive = on;
+      renderMore();
+    },
     setTrackpad({ available, on }) {
       if (available !== undefined) $('btn-trackpad').classList.toggle('hidden', !available);
       if (on !== undefined) $('btn-trackpad').setAttribute('aria-pressed', String(on));

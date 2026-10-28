@@ -408,6 +408,7 @@ const ui = createUI({
   },
   onTerminal: () => terminal.toggle(),
   onTrackpad: () => setTrackpad(!trackpadOn, true),
+  onPad: (on) => setPad(on, true),
   onExtend: (on) => setExtended(on),
   onOpenDevice: () => {
     storage((s) => s.setItem('glass.deviceSeen', '1'));
@@ -524,7 +525,7 @@ const device = createDevice({
   streams: () => (rtpVideo ? videos : canvases).slice(0, streamCount),
   sendClip: (clip) => sendClip(clip),
   displays: () => displays,
-  onPause: (away) => worker.postMessage({ type: 'visible', visible: !away && document.visibilityState === 'visible' }),
+  onPause: (away) => worker.postMessage({ type: 'visible', visible: !away && !padOn && document.visibilityState === 'visible' }),
   onPressure: (scale) => {
     if (scale === pressureScale) return;
     pressureScale = scale;
@@ -1153,6 +1154,12 @@ function sendViewport() {
   const elements = rtpVideo ? videos : canvases;
   const streams = [];
   for (let i = 0; i < streamCount; i++) {
+    // Keyboard and mouse mode shows no picture: ask for the least, so it never raises the
+    // size another viewer gets (the largest request wins).
+    if (padOn) {
+      streams.push([1, 1]);
+      continue;
+    }
     const area = areas.get(elements[i]);
     if (resolutionMode !== 'auto' || !area || !area[0]) {
       streams.push(null);
@@ -1454,7 +1461,7 @@ document.addEventListener('visibilitychange', () => {
   log('info', `visibility: ${document.visibilityState}`);
   clearTimeout(pauseTimer);
   if (document.visibilityState === 'visible') {
-    worker.postMessage({ type: 'visible', visible: true });
+    worker.postMessage({ type: 'visible', visible: !padOn });
     worker.postMessage({ type: 'wake' });
     reloadIfUpdated('visible');
     return;
@@ -1638,6 +1645,7 @@ async function onFirstWelcome() {
 const TRACKPAD_KEY = 'glass.trackpad';
 const touchScreen = matchMedia('(hover: none)').matches || navigator.maxTouchPoints > 0;
 const phone = touchScreen && Math.min(screen.width, screen.height) < 600;
+let padOn = false; // keyboard and mouse mode: see setPad
 let trackpadOn = touchScreen && (storage((s) => s.getItem(TRACKPAD_KEY)) ?? (phone ? '1' : '0')) === '1';
 function setTrackpad(on, chosen = false) {
   trackpadOn = on;
@@ -1654,3 +1662,26 @@ function setTrackpad(on, chosen = false) {
   });
 }
 setTrackpad(trackpadOn);
+
+// Keyboard and mouse mode (touch screens, from the Computer menu): another screen shows the
+// computer (a car, a TV) and this one is only its trackpad and keyboard. The picture is
+// paused here (the host stops sending it) and hidden, and the whole screen is the trackpad.
+let padWasTrackpad = false;
+function setPad(on, chosen = false) {
+  if (padOn === on) return;
+  padOn = on;
+  document.body.classList.toggle('pad', on);
+  if (on) {
+    padWasTrackpad = trackpadOn;
+    setTrackpad(true);
+  } else {
+    setTrackpad(padWasTrackpad);
+  }
+  worker.postMessage({ type: 'visible', visible: !on && document.visibilityState === 'visible' });
+  sendViewport();
+  ui.setPad({ available: touchScreen, on });
+  log('info', `keyboard and mouse mode ${on ? 'on' : 'off'}`);
+  if (chosen && on) ui.toast({ text: 'This screen is the trackpad now. Tap the keyboard button to type.', timeout: 5000 });
+}
+document.getElementById('pad-exit').addEventListener('click', () => setPad(false, true));
+ui.setPad({ available: touchScreen, on: false });
