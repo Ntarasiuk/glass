@@ -366,6 +366,13 @@ impl Page {
     }
 }
 
+/// Where an address on Home leads: this computer on your Tailscale network, or from anywhere.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Via {
+    Tailnet,
+    Anywhere,
+}
+
 pub struct GlassApp {
     store: Entity<Store>,
     page: Page,
@@ -384,6 +391,8 @@ pub struct GlassApp {
     /// Notes for the agent, per question.
     notes: HashMap<u64, Entity<InputState>>,
     link: links::LinkForm,
+    /// Which address Home shows, copies and puts in the QR code.
+    via: Via,
     rule: teams::RuleForm,
     show_token: bool,
     /// MCP clients: (client, installed here, glass added).
@@ -425,6 +434,7 @@ impl GlassApp {
             fields: HashMap::new(),
             notes: HashMap::new(),
             link: links::LinkForm::default(),
+            via: Via::Tailnet,
             rule: teams::RuleForm::default(),
             show_token: false,
             clients: Vec::new(),
