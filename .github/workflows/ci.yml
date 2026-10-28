@@ -25,7 +25,6 @@ jobs:
             host:
               - 'crates/**'
               - 'web/**'
-              - 'tests/e2e/**'
               - 'tests/unit/**'
               - 'site/src/**'
               - 'site/package*.json'
@@ -37,8 +36,7 @@ jobs:
               - 'tests/site/**'
               - '.github/workflows/**'
 
-  # Each OS builds once, then its e2e shards start as soon as its own build is done (Linux
-  # doesn't wait for the slower macOS build). See host.yml.
+  # Build and unit tests on each OS (host.yml). The browser e2e suite runs locally only.
   macos:
     name: macOS
     needs: changes
