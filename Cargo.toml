@@ -10,7 +10,9 @@ repository = "https://github.com/Ntarasiuk/glass"
 
 [profile.release]
 lto = "thin"
-codegen-units = 1
+# 16 units compile in parallel: a cold release build takes 157 s instead of 268 s (16 cores)
+# for a binary about 16% larger when compressed (one unit was the slowest crate of the build).
+codegen-units = 16
 
 # CI: optimized like release (the e2e tests stream video), but without LTO and with
 # parallel codegen, so it builds in a fraction of the time. Unit tests and the e2e binary

@@ -236,7 +236,7 @@ scripts/linux/build.sh [test]               # Linux x86_64 build/tests in an Arc
 cd site && npm install && npm run dev       # site locally (wrangler dev)
 ```
 
-`glass --test` runs the host with fakes: two 640×360 test-pattern displays, recorded input, an in-memory clipboard and `/test/*` hooks to drop or corrupt frames. It never touches your real screen, so the Playwright suite in `tests/e2e` (real Chrome) covers connection, auth, input, touch, keyboard modes, clipboard, files, audio, display layouts, loss and corruption recovery, reconnects, machine switching and updates. CI runs it on macOS and Linux.
+`glass --test` runs the host with fakes: two 640×360 test-pattern displays, recorded input, an in-memory clipboard and `/test/*` hooks to drop or corrupt frames. It never touches your real screen, so the Playwright suite in `tests/e2e` (real Chrome) covers connection, auth, input, touch, keyboard modes, clipboard, files, audio, display layouts, loss and corruption recovery, reconnects, machine switching and updates. It runs locally only (`scripts/test.sh e2e`), not in CI.
 
 ## Contributing
 

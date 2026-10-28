@@ -17,8 +17,10 @@ if [ "$only" = all ] || [ "$only" = js ]; then
 fi
 if [ "$only" = all ] || [ "$only" = e2e ]; then
   step "End-to-end (Chrome against glass --test)"
-  cargo build --release -p glass-host
-  (cd tests/e2e && npm ci --silent && npx playwright test)
+  # The `ci` profile (Cargo.toml) is optimized like release but builds in seconds; with
+  # incremental compilation on, an edit rebuilds in about 3 s (release: about 2 min).
+  CARGO_INCREMENTAL=1 cargo build --profile ci -p glass-host
+  (cd tests/e2e && npm ci --silent && GLASS_BIN="$PWD/../../target/ci/glass-host" npx playwright test)
 fi
 if [ "$only" = all ] || [ "$only" = site ]; then
   step "Site and API"

@@ -33,9 +33,12 @@ tarball() {
 }
 
 package_macos() {
-  for target in aarch64-apple-darwin x86_64-apple-darwin; do
-    cargo build --release -p glass-host --target "$target"
-  done
+  # CI builds the two architectures on separate runners and sets GLASS_PREBUILT.
+  if [ -z "${GLASS_PREBUILT:-}" ]; then
+    for target in aarch64-apple-darwin x86_64-apple-darwin; do
+      cargo build --release -p glass-host --target "$target"
+    done
+  fi
   universal=$(mktemp)
   lipo -create -output "$universal" \
     target/aarch64-apple-darwin/release/glass-host \

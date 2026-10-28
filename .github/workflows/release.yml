@@ -1,24 +1,59 @@
 name: Release
 
 # Push a tag like v0.2.0 (matching Cargo.toml) to build, sign and publish a release.
+# Run it by hand (Actions › Release › Run workflow) to check the build and signing without
+# publishing anything.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  macos:
+  # Each architecture builds on its own runner, at the same time.
+  macos-build:
     runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with: { targets: 'aarch64-apple-darwin,x86_64-apple-darwin' }
+        with: { targets: '${{ matrix.target }}' }
+      # A tag can only restore caches saved on main (warm-release-cache.yml saves them), and
+      # saves none of its own.
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install --locked apple-codesign
+        with: { shared-key: 'release-${{ matrix.target }}', save-if: "${{ github.ref == 'refs/heads/main' }}" }
+      - run: cargo build --release -p glass-host --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glass-host-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/glass-host
+          if-no-files-found: error
+
+  # One universal binary, the audio driver and the signature.
+  macos:
+    needs: macos-build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: glass-host-aarch64-apple-darwin, path: target/aarch64-apple-darwin/release }
+      - uses: actions/download-artifact@v4
+        with: { name: glass-host-x86_64-apple-darwin, path: target/x86_64-apple-darwin/release }
+      - name: Install rcodesign (prebuilt, pinned and checked)
+        run: |
+          v=0.29.0
+          curl -fsSL -o "$RUNNER_TEMP/rcodesign.tgz" "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F$v/apple-codesign-$v-macos-universal.tar.gz"
+          echo "d98372d5524226ccf9dc0eda03d4e4f5826182dabb2fc3f2bd303ed9113a748d  $RUNNER_TEMP/rcodesign.tgz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/rcodesign.tgz" -C "$RUNNER_TEMP/bin" --strip-components=1 "apple-codesign-$v-macos-universal/rcodesign"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Package and sign
         env:
+          GLASS_PREBUILT: '1'
           SIGNING_KEY: ${{ secrets.GLASS_SIGNING_KEY }}
           SIGNING_CERT: ${{ secrets.GLASS_SIGNING_CERT }}
         run: |
@@ -37,15 +72,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libpipewire-0.3-dev libclang-dev pkg-config nasm
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev pkg-config nasm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with: { shared-key: release-linux, save-if: "${{ github.ref == 'refs/heads/main' }}" }
       - run: scripts/package.sh linux
       - uses: actions/upload-artifact@v4
         with: { name: dist-linux, path: dist/ }
 
   publish:
     needs: [macos, linux]
+    # A hand-run build stops before here: nothing is published.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     env:
       # Optional: without these the site is deployed by hand (cd site && npm run deploy).
@@ -54,7 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { path: dist, merge-multiple: true }
+        with: { path: dist, pattern: 'dist-*', merge-multiple: true }
       - name: Check the tag matches Cargo.toml
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)

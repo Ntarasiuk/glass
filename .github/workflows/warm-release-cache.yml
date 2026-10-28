@@ -1,0 +1,38 @@
+name: Warm release cache
+
+# A release runs on a tag, and a tag can only restore caches saved on main. This builds the
+# release profile on main whenever the dependencies change, so a release compiles only glass-host.
+# Run it by hand to refresh the cache.
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - 'crates/*/Cargo.toml'
+      - .github/workflows/warm-release-cache.yml
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: '${{ matrix.target }}' }
+      - uses: Swatinem/rust-cache@v2
+        with: { shared-key: 'release-${{ matrix.target }}' }
+      - run: cargo build --release -p glass-host --target ${{ matrix.target }}
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev pkg-config nasm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { shared-key: release-linux }
+      - run: cargo build --release -p glass-host
