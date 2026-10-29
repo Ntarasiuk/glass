@@ -477,7 +477,7 @@ async fn control(
     if auth.is_none()
         && let Some(code) = &link
     {
-        match crate::access::redeem_link(&access_file, code, &device) {
+        match crate::access::redeem_link(&access_file, code, &device, peer) {
             Ok(Some(g)) => {
                 auth = Some(Auth::Guest {
                     pass: g.pass,

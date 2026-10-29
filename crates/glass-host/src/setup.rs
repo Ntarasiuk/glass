@@ -202,7 +202,7 @@ fn finish(tailnet: Option<String>) -> Result<()> {
                     format!(
                         "{qr}\n\
                          Scan this, or open the link on the iPad:\n{url}\n\n\
-                         Works once, within {ttl}, and gives that device {grant}.\n\
+                         Works on one device, within {ttl}, and gives that device {grant}.\n\
                          Make another any time: {again}",
                         qr = qr(&url),
                         url = style(&url).cyan().underlined(),

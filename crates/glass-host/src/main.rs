@@ -370,7 +370,7 @@ fn print_link(
             "link_expires": link.expires,
             "grant_secs": link.grant.as_secs(),
             "scope": link.scope,
-            "summary": format!("Works once, within {}. Gives that device {} of access ({}).", access::describe(access::LINK_TTL), access::describe(link.grant), link.scope.describe()),
+            "summary": format!("Works on one device, within {}. Gives that device {} of access ({}).", access::describe(access::LINK_TTL), access::describe(link.grant), link.scope.describe()),
         });
         println!("{out}");
         return Ok(());
@@ -378,7 +378,7 @@ fn print_link(
     println!("{}", setup::qr(&url));
     println!("{url}\n");
     println!(
-        "Works once, within {}. Gives that device {} of access ({}).\nSee who's in: glass link --list · cut off everyone: glass link --revoke",
+        "Works on one device, within {}. Gives that device {} of access ({}).\nSee who's in: glass link --list · cut off everyone: glass link --revoke",
         access::describe(access::LINK_TTL),
         access::describe(link.grant),
         link.scope.describe(),
