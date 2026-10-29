@@ -348,18 +348,38 @@ struct IceServer {
     credential: String,
 }
 
+/// Where remote access stands, for `glass status`: 0 off, 1 connecting to the introducer,
+/// 2 ready (the introducer has accepted this computer, so a link or account can reach it).
+static STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn set_state(state: u8) {
+    STATE.store(state, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// "off", "connecting" or "ready".
+pub fn state() -> &'static str {
+    match STATE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => "off",
+        1 => "connecting",
+        _ => "ready",
+    }
+}
+
 /// Keeps a connection to the introducer while remote access is on.
 pub fn watch(wt_port: u16) {
     tokio::spawn(async move {
         let mut delay = Duration::from_secs(1);
         loop {
             if !enabled() {
+                set_state(0);
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
             }
+            set_state(1);
             match signal(wt_port).await {
                 Ok(()) => delay = Duration::from_secs(1),
                 Err(e) => {
+                    set_state(1);
                     warn!("remote access: {e:#}; retrying in {}s", delay.as_secs());
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(Duration::from_secs(60));
@@ -399,7 +419,10 @@ async fn signal(wt_port: u16) -> Result<()> {
                         let auth = ToIntroducer::Auth { key: key.public(), sig };
                         tx.send(Message::text(serde_json::to_string(&auth)?)).await?;
                     }
-                    Ok(FromIntroducer::Ready) => info!("remote access ready (host {})", key.id()),
+                    Ok(FromIntroducer::Ready) => {
+                        set_state(2);
+                        info!("remote access ready (host {})", key.id());
+                    }
                     Ok(FromIntroducer::Offer { session, sdp, ip, ice_servers }) => {
                         let (key, out_tx) = (key.clone(), out_tx.clone());
                         let ip = ip.and_then(|ip| ip.parse::<IpAddr>().ok());

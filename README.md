@@ -123,7 +123,7 @@ Run it again any time to update. Prefer to read it first? [install.sh](site/publ
 ```sh
 glass app                # the Glass app (macOS): setup, connections, links, agents, settings
 glass setup              # guided setup: Tailscale, background service, permissions, QR code
-glass status             # running? capturing? permissions? connect URL
+glass status             # running? capturing? permissions? remote ready? connect URL
 glass restart            # restart the background service
 glass link               # one-time link + QR code for another device
 glass link --anywhere    # the same, from any network (WebRTC, end-to-end encrypted)
