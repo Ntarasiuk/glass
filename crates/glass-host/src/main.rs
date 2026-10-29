@@ -710,9 +710,15 @@ async fn async_main(args: Args) -> Result<()> {
         Some(Command::Status { json: false }) => print_status(),
         Some(Command::Status { json: true }) => {
             let status = status::read().filter(|s| s.is_fresh());
+            let problems = status.as_ref().map(status::Status::remote_problems);
             println!(
                 "{}",
-                serde_json::json!({ "running": status.is_some(), "status": status })
+                serde_json::json!({
+                    "running": status.is_some(),
+                    "remote_ready": problems.as_ref().is_some_and(Vec::is_empty),
+                    "remote_problems": problems.unwrap_or_else(|| vec!["Glass isn't running"]),
+                    "status": status,
+                })
             );
             Ok(())
         }
@@ -937,8 +943,20 @@ fn print_status() -> Result<()> {
             println!("  capturing:        {}", yes_no(s.capturing));
             println!("  screen recording: {}", yes_no(s.screen_recording));
             println!("  accessibility:    {}", yes_no(s.accessibility));
-            if let Some(url) = s.url {
+            let remote = match s.remote.as_str() {
+                "ready" => "ready (glass link --anywhere makes a link)",
+                "connecting" => "connecting to glassdesk.dev…",
+                _ => "off (glass remote on)",
+            };
+            println!("  remote:           {remote}");
+            if let Some(url) = &s.url {
                 println!("  open:             {url}");
+            }
+            let problems = s.remote_problems();
+            if problems.is_empty() {
+                println!("Ready to be reached from anywhere: yes");
+            } else {
+                println!("Ready to be reached from anywhere: no, {}", problems.join("; "));
             }
         }
         None => println!(

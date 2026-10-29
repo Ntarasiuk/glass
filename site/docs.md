@@ -166,7 +166,7 @@ Then ask, for example: "set up Glass on my Mac mini". The target needs SSH: Tail
 The skill drives two commands you can also use in your own scripts:
 
 - `glass setup --yes --json`: does every setup step that needs no human (using `sudo` only if it needs no password), opens the macOS permission panes on the machine's screen, and prints a report: `ok`, `url`, `running`, `capturing`, `input`, and `needs`, the steps left, each with an `action` and whether it must happen `on_screen`.
-- `glass status --json`: whether the service is running, capturing, and allowed to inject input.
+- `glass status --json`: whether the service is running, capturing, and allowed to inject input, and whether it's ready to be reached from anywhere (`remote_ready`, with `remote_problems` saying why not).
 
 ## Connecting
 
@@ -338,7 +338,7 @@ glass               Run the host in the foreground (the background service runs 
 glass app           Open the Glass app (macOS); --install just adds Glass.app to ~/Applications
 glass setup         Guided setup: Tailscale, background service, permissions, connect
 glass setup --yes [--json]   Unattended setup for scripts and agents; reports what's left
-glass status [--json]        Is the service running? Capturing? Permissions? Connect URL
+glass status [--json]        Is the service running? Capturing? Permissions? Ready from anywhere? Connect URL
 glass link [--for 24h]   One-time magic link (and QR code) for a device outside your tailnet
 glass link --anywhere    The same, working from any network (WebRTC via glassdesk.dev)
 glass link --view-only --no-files --no-clipboard --ask --passkey   Links with limits

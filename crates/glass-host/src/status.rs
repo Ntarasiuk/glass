@@ -20,6 +20,9 @@ pub struct Status {
     pub capturing: bool,
     /// Where to open the client, if known.
     pub url: Option<String>,
+    /// Remote access: "off", "connecting" (to glassdesk.dev) or "ready".
+    #[serde(default)]
+    pub remote: String,
     /// Unix seconds of the last write; a stale value means the host isn't running.
     pub updated: u64,
 }
@@ -33,6 +36,23 @@ pub fn read() -> Option<Status> {
 }
 
 impl Status {
+    /// Why this computer can't be reached from anywhere right now (empty: it can).
+    pub fn remote_problems(&self) -> Vec<&'static str> {
+        let mut why = Vec::new();
+        match self.remote.as_str() {
+            "ready" => {}
+            "connecting" => why.push("still connecting to glassdesk.dev"),
+            _ => why.push("remote access is off (glass remote on)"),
+        }
+        if !self.capturing {
+            why.push(if self.screen_recording { "not capturing the screen yet" } else { "Screen Recording isn't allowed" });
+        }
+        if !self.accessibility {
+            why.push("remote mouse and keyboard aren't allowed (accessibility)");
+        }
+        why
+    }
+
     /// True when written recently by a live process.
     pub fn is_fresh(&self) -> bool {
         unix_now().saturating_sub(self.updated) <= 5
@@ -53,6 +73,7 @@ pub fn start(url: Option<String>) {
         loop {
             let snapshot = CURRENT.lock().unwrap().as_mut().map(|s| {
                 s.accessibility = crate::input::has_accessibility();
+                s.remote = crate::remote::state().into();
                 s.screen_recording = s.capturing || crate::permissions::has_screen_recording();
                 s.updated = unix_now();
                 s.clone()
@@ -85,4 +106,34 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn up() -> Status {
+        Status { remote: "ready".into(), capturing: true, screen_recording: true, accessibility: true, ..Default::default() }
+    }
+
+    #[test]
+    fn ready_when_connected_and_capturing() {
+        assert!(up().remote_problems().is_empty());
+    }
+
+    #[test]
+    fn says_why_it_is_not_ready() {
+        assert_eq!(Status { remote: "off".into(), ..up() }.remote_problems(), ["remote access is off (glass remote on)"]);
+        assert_eq!(Status { remote: "connecting".into(), ..up() }.remote_problems(), ["still connecting to glassdesk.dev"]);
+        assert_eq!(Status { capturing: false, ..up() }.remote_problems(), ["not capturing the screen yet"]);
+        assert_eq!(Status { capturing: false, screen_recording: false, ..up() }.remote_problems(), ["Screen Recording isn't allowed"]);
+        assert_eq!(Status { accessibility: false, ..up() }.remote_problems().len(), 1);
+    }
+
+    #[test]
+    fn an_old_status_file_without_remote_still_reads() {
+        let s: Status = serde_json::from_str(r#"{"version":"0.8.2","pid":1,"screen_recording":true,"accessibility":true,"capturing":true,"url":null,"updated":0}"#).unwrap();
+        assert_eq!(s.remote, "");
+        assert_eq!(s.remote_problems(), ["remote access is off (glass remote on)"]);
+    }
 }

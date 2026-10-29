@@ -104,6 +104,8 @@ Done when `running`, `status.capturing` and `status.accessibility` are all true.
 curl -fsS https://<host>:8080/config.json   # :8080 always works; the URL from status may have no port
 ```
 
+`glass status --json` also has `remote_ready` (true when the computer is capturing, allowed to take input and connected to glassdesk.dev, so a link or account claim will work) and `remote_problems`, a list saying why not. Before giving the user a `--anywhere` link, check `remote_ready`.
+
 Finish by telling the user the URL from `glass status --json` (usually `https://<host>/`, else `https://<host>:8080/`). It also appears in the **Machines** menu of any Glass tab, and devices on their tailnet connect without a token.
 
 ## Get someone a link
