@@ -43,7 +43,7 @@ test.afterAll(() => {
 });
 
 async function remoteHost() {
-  const host = await new Host({ env: { GLASS_BASE: base } }).start();
+  const host = await new Host({ env: { GLASS_BASE: base, GLASS_FLEET_FAKE: '1' } }).start();
   // `glass link` needs the running host's status file.
   await expect.poll(() => { try { return host.cli('status', '--json').includes('"running":true'); } catch { return false; } }).toBe(true);
   return host;
@@ -254,6 +254,43 @@ test('/computers: glass account add puts a computer on the account, once, until 
     // Without remote access, there's no link to make.
     host.cli('remote', 'off');
     expect(() => host.cli('account', 'add')).toThrow(/remote access is off/);
+  } finally {
+    await host.stop();
+  }
+});
+
+test('/computers: glass fleet on shows what the computer says about itself, and off takes it back', async ({ page }) => {
+  const host = await remoteHost();
+  try {
+    host.cli('remote', 'on');
+    await passkeys(page);
+    await page.goto(`${base}/computers`);
+    await page.getByRole('button', { name: 'Create an account' }).click();
+    await expect(page.locator('#account-note')).toHaveText('Signed in with a passkey.');
+    const { url, name } = JSON.parse(host.cli('account', 'add', '--json'));
+    await page.goto(url);
+    await page.getByRole('button', { name: `Add ${name}` }).click();
+    const mine = page.locator('#mine-list li');
+    await expect(mine).toHaveCount(1);
+    await expect(mine.locator('.meta')).toHaveCount(0); // nothing is sent until it's turned on
+
+    expect(host.cli('fleet')).toContain('off');
+    expect(host.cli('fleet', 'on')).toContain('every 15 minutes');
+    expect(JSON.parse(host.cli('fleet', 'report', '--json'))).toMatchObject({ model: 'MacBook Pro', filevault: true });
+    expect(host.cli('fleet')).toContain('last sent');
+
+    await page.reload();
+    const meta = mine.locator('.meta');
+    await expect(meta).toContainText('MacBook Pro Apple M3 Max');
+    await expect(meta).toContainText('64 GB memory');
+    await expect(meta).toContainText('FileVault on');
+    await expect(meta.locator('.warn')).toHaveText('firewall off'); // the one thing to look at
+    await expect(meta).toContainText('reported just now');
+
+    expect(host.cli('fleet', 'off')).toContain('deleted');
+    await page.reload();
+    await expect(mine.locator('.meta')).toHaveCount(0);
+    expect(host.cli('fleet')).toContain('off');
   } finally {
     await host.stop();
   }

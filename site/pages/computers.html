@@ -32,6 +32,11 @@
     .list .on .dot { background: #34c759; }
     .list .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
     .list .detail { flex: none; color: var(--text-faint); font-size: 14px; }
+    .list .who { flex: 1; min-width: 0; display: grid; gap: 3px; }
+    .list .who .name { flex: none; }
+    .list .meta { color: var(--text-faint); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+    .list .meta .warn { color: #ffb86b; }
+    #find { width: 100%; box-sizing: border-box; margin: 4px 0 12px; padding: 12px 14px; border-radius: 12px; border: 1px solid rgb(255 255 255 / 0.12); background: rgb(0 0 0 / 0.3); color: inherit; font: inherit; }
     .list a.open { flex: none; padding: 7px 14px; border-radius: 10px; background: var(--accent); color: #04121f; font-weight: 650; font-size: 14px; text-decoration: none; }
     .list button.forget { flex: none; padding: 0 4px; border: 0; background: none; color: var(--text-faint); font-size: 18px; line-height: 1; cursor: pointer; }
     .list button.forget:hover { color: var(--text-dim); }
@@ -73,6 +78,7 @@
     <section class="hidden" id="mine" aria-labelledby="mine-title">
       <h2 id="mine-title">On your account</h2>
       <p class="note" id="mine-note"></p>
+      <input id="find" type="search" class="hidden" placeholder="Search your computers" aria-label="Search your computers" autocomplete="off">
       <ul class="list" id="mine-list"></ul>
     </section>
 
@@ -109,7 +115,7 @@
     const remotes = () => { try { return JSON.parse(localStorage.getItem(REMOTES_KEY) ?? '[]'); } catch { return []; } };
     const saveRemotes = (list) => { try { localStorage.setItem(REMOTES_KEY, JSON.stringify(list)); } catch {} };
 
-    function row({ name, on, href, onForget }) {
+    function row({ name, on, href, onForget, meta = [] }) {
       const li = document.createElement('li');
       if (on) li.className = 'on';
       const dot = document.createElement('span');
@@ -117,10 +123,25 @@
       const label = document.createElement('span');
       label.className = 'name';
       label.textContent = name;
+      const who = document.createElement('span');
+      who.className = 'who';
+      who.append(label);
+      if (meta.length) {
+        const line = document.createElement('span');
+        line.className = 'meta';
+        meta.forEach((m, i) => {
+          if (i) line.append(' · ');
+          const part = document.createElement('span');
+          part.textContent = m.text;
+          if (m.warn) part.className = 'warn';
+          line.append(part);
+        });
+        who.append(line);
+      }
       const info = document.createElement('span');
       info.className = 'detail';
       info.textContent = on ? 'online' : 'offline';
-      li.append(dot, label, info);
+      li.append(dot, who, info);
       if (!href) return li;
       const a = document.createElement('a');
       a.className = 'open';
@@ -269,17 +290,36 @@
       );
     }
 
-    async function showMine() {
-      $('mine').classList.toggle('hidden', !account);
-      $('browser').classList.toggle('hidden', !remotes().length && Boolean(account));
-      if (!account) return;
-      const { computers = [] } = await api('/api/account/computers').catch(() => ({}));
-      say('mine-note', computers.length
-        ? 'Signed in on any device, these are here.'
-        : 'To add a computer, run `glass account add` on it and open the link here.');
-      $('mine-list').replaceChildren(...computers.map((c) => row({
+    const ago = (ms) => {
+      const m = Math.max(0, Math.round((Date.now() - ms) / 60_000));
+      return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+    };
+    /** What a computer said about itself (glass fleet on), as short facts; a problem is `warn`. */
+    function facts(r) {
+      if (!r) return [];
+      const out = [];
+      const add = (text, warn = false) => text && out.push({ text, warn });
+      add([r.model, r.chip].filter(Boolean).join(' '));
+      add(r.os);
+      add(r.ram_gb && `${r.ram_gb} GB memory`);
+      if (r.disk_total_gb) add(`${r.disk_free_gb} GB free of ${r.disk_total_gb}`, r.disk_free_gb < Math.max(10, r.disk_total_gb * 0.1));
+      if (r.filevault !== undefined) add(r.filevault ? 'FileVault on' : 'FileVault off', !r.filevault);
+      if (r.firewall !== undefined) add(r.firewall ? 'firewall on' : 'firewall off', !r.firewall);
+      if (r.battery !== undefined) add(`battery ${r.battery}%`, r.battery < 15);
+      add(r.uptime_h !== undefined && (r.uptime_h < 48 ? `up ${r.uptime_h} h` : `up ${Math.round(r.uptime_h / 24)} days`));
+      add(r.version && `Glass ${r.version}`);
+      add(r.at && `reported ${ago(r.at)}`, r.at && Date.now() - r.at > 3 * 3600_000);
+      return out;
+    }
+
+    let mineList = [];
+    function drawMine() {
+      const q = $('find').value.trim().toLowerCase();
+      const shown = mineList.filter((c) => !q || [c.name, c.online ? 'online' : 'offline', ...facts(c.report).map((f) => f.text)].join(' ').toLowerCase().includes(q));
+      $('mine-list').replaceChildren(...shown.map((c) => row({
         name: c.name,
         on: c.online,
+        meta: facts(c.report),
         href: `/app/#r=${encodeURIComponent(c.key)}`,
         onForget: async () => {
           if (!confirm(`Take ${c.name} off your account? To add it back, run glass account add on it.`)) return;
@@ -287,6 +327,20 @@
           showMine();
         },
       })));
+    }
+    $('find').addEventListener('input', drawMine);
+
+    async function showMine() {
+      $('mine').classList.toggle('hidden', !account);
+      $('browser').classList.toggle('hidden', !remotes().length && Boolean(account));
+      if (!account) return;
+      const { computers = [] } = await api('/api/account/computers').catch(() => ({}));
+      mineList = computers;
+      say('mine-note', computers.length
+        ? 'Signed in on any device, these are here. A computer shows its details once you run `glass fleet on` on it.'
+        : 'To add a computer, run `glass account add` on it and open the link here.');
+      $('find').classList.toggle('hidden', computers.length < 4);
+      drawMine();
     }
 
     // A link from `glass account add` (#claim=…): kept for this tab until used or dismissed,

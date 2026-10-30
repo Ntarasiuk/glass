@@ -33,9 +33,10 @@ export async function accounts(request, env, url) {
   const path = url.pathname;
   const { method } = request;
   // From hosts (`glass account`), each request signed with the host's key.
-  if (path === '/api/claims' || path === '/api/claims/remove') {
+  if (path === '/api/claims' || path === '/api/claims/remove' || path === '/api/fleet/report') {
     if (method !== 'POST') return json({ error: 'method not allowed' }, 405);
     try {
+      if (path === '/api/fleet/report') return await fleetReport(request, env);
       return await (path === '/api/claims' ? makeClaim(request, env, url) : unclaim(request, env));
     } catch (e) {
       if (e instanceof Refused) return json({ error: e.message }, e.status);
@@ -180,6 +181,7 @@ async function deleteAccount(request, env) {
   if (!s) throw new Refused('Not signed in.', 401);
   await env.DB.batch(['passkeys', 'sessions', 'account_computers'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE account = ?`).bind(s.account)).concat(
     env.DB.prepare('DELETE FROM accounts WHERE id = ?').bind(s.account),
+    dropOrphanReports(env),
   ));
   return clearSession(json({ ok: true }));
 }
@@ -216,6 +218,7 @@ async function unclaim(request, env) {
   const [removed] = await env.DB.batch([
     env.DB.prepare('DELETE FROM account_computers WHERE host_id = ?').bind(hostId),
     env.DB.prepare('DELETE FROM computer_claims WHERE host_id = ?').bind(hostId),
+    dropOrphanReports(env),
   ]);
   return json({ removed: removed.meta.changes });
 }
@@ -249,17 +252,82 @@ async function addComputer(request, env) {
 async function computers(request, env) {
   const s = await session(request, env);
   if (!s) throw new Refused('Sign in first.', 401);
-  const { results } = await env.DB.prepare('SELECT host_id, host_key, name, added FROM account_computers WHERE account = ? ORDER BY name COLLATE NOCASE')
+  const { results } = await env.DB.prepare(
+    `SELECT c.host_id, c.host_key, c.name, c.added, r.reported, r.data
+       FROM account_computers c LEFT JOIN computer_reports r ON r.host_id = c.host_id
+      WHERE c.account = ? ORDER BY c.name COLLATE NOCASE`,
+  )
     .bind(s.account)
     .all();
   const online = await hostsOnline(env, results.map((r) => r.host_id));
-  return json({ computers: results.map((r) => ({ id: r.host_id, key: r.host_key, name: r.name, added: r.added, online: online[r.host_id] })) });
+  return json({
+    computers: results.map((r) => ({
+      id: r.host_id,
+      key: r.host_key,
+      name: r.name,
+      added: r.added,
+      online: online[r.host_id],
+      ...(r.data && { report: { ...JSON.parse(r.data), at: r.reported } }),
+    })),
+  });
+}
+
+/** Drops reports of computers that are on no account any more (statement for a batch). */
+function dropOrphanReports(env) {
+  return env.DB.prepare('DELETE FROM computer_reports WHERE host_id NOT IN (SELECT host_id FROM account_computers)');
+}
+
+const REPORT_MAX = 4096;
+const REPORT_EVERY_MS = 30_000;
+const REPORT_STRINGS = ['os', 'model', 'chip', 'version'];
+const REPORT_NUMBERS = ['ram_gb', 'disk_total_gb', 'disk_free_gb', 'uptime_h', 'battery'];
+const REPORT_FLAGS = ['filevault', 'firewall'];
+
+/** Only the fields a report may have, each the right kind and size; anything else is dropped. */
+export function cleanReport(raw) {
+  const out = {};
+  for (const k of REPORT_STRINGS) if (typeof raw[k] === 'string') out[k] = raw[k].replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 80);
+  for (const k of REPORT_NUMBERS) if (Number.isFinite(raw[k]) && raw[k] >= 0 && raw[k] < 1e7) out[k] = Math.round(raw[k]);
+  for (const k of REPORT_FLAGS) if (typeof raw[k] === 'boolean') out[k] = raw[k];
+  return out;
+}
+
+/** A computer's report, signed with its key. Empty data deletes it. Only computers on an account. */
+async function fleetReport(request, env) {
+  const { key, ts, data, sig } = await body(request);
+  if (typeof data !== 'string' || data.length > REPORT_MAX) throw new Refused('expected key, ts, data and sig');
+  if (Math.abs(Date.now() - Number(ts) * 1000) > CLAIM_CLOCK_MS) throw new Refused('This computer\'s clock is off by more than a few minutes.');
+  const hostId = await verifySigned(String(key ?? ''), `glass-fleet-v1\n${ts}\n${data}`, String(sig ?? ''));
+  if (!hostId) throw new Refused('Not signed by that computer.', 401);
+  if (data === '') {
+    await env.DB.prepare('DELETE FROM computer_reports WHERE host_id = ?').bind(hostId).run();
+    return json({ deleted: true });
+  }
+  const onAccount = await env.DB.prepare('SELECT 1 AS x FROM account_computers WHERE host_id = ? LIMIT 1').bind(hostId).first();
+  if (!onAccount) throw new Refused('This computer isn\'t on an account. Add it with: glass account add', 403);
+  let raw;
+  try {
+    raw = JSON.parse(data);
+  } catch {
+    throw new Refused('data isn\'t JSON');
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Refused('data isn\'t an object');
+  const now = Date.now();
+  const last = await env.DB.prepare('SELECT reported FROM computer_reports WHERE host_id = ?').bind(hostId).first('reported');
+  if (last && now - last < REPORT_EVERY_MS) throw new Refused('Reports come at most every half minute.', 429);
+  await env.DB.prepare('INSERT OR REPLACE INTO computer_reports (host_id, reported, data) VALUES (?, ?, ?)')
+    .bind(hostId, now, JSON.stringify(cleanReport(raw)))
+    .run();
+  return json({ ok: true });
 }
 
 async function removeComputer(request, env, hostId) {
   const s = await session(request, env);
   if (!s) throw new Refused('Sign in first.', 401);
-  await env.DB.prepare('DELETE FROM account_computers WHERE account = ? AND host_id = ?').bind(s.account, hostId).run();
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM account_computers WHERE account = ? AND host_id = ?').bind(s.account, hostId),
+    dropOrphanReports(env),
+  ]);
   return json({ ok: true });
 }
 

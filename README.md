@@ -134,6 +134,7 @@ glass link --revoke [id] # cut off one device, or every device let in by a link
 glass remote off         # turn off access from outside your tailnet
 glass account add        # one-time link that puts this computer on your glassdesk.dev/computers account
 glass account remove     # take this computer off every account
+glass fleet on           # tell your account this computer's state (model, OS, disk, FileVault…); off deletes it
 glass viewers / kick     # who's connected now; end a session
 glass requests / allow / deny   # answer connection requests (glass config ask-guests on)
 glass chat "be right there"     # message everyone viewing
@@ -200,7 +201,7 @@ NSPasteboard, files ◀─▶ control + file streams ◀────────
 - A device gets in only if Tailscale says it's yours, or it has the access token or a one-time pass. Nothing is sent until then.
 - Narrow it further: limited or passkey-bound links, ask-first, single sign-on or LDAP with access rules, SCIM deprovisioning and device posture checks. Secrets are stored owner-only.
 - Remote access from outside your tailnet is off until you make a link or run `glass remote on`.
-- Glass runs as your user, never as root. The app sends nothing to glassdesk.dev except feedback you choose to send, and, if you run `glass account add`, this computer's name and public key for your account's list.
+- Glass runs as your user, never as root. The app sends nothing to glassdesk.dev except feedback you choose to send, and, if you run `glass account add`, this computer's name and public key for your account's list (and, only if you also run `glass fleet on`, its model, system, memory, disk space, FileVault and firewall state, uptime, battery and Glass version).
 
 Found a security issue? Please open a [private security advisory](https://github.com/Ntarasiuk/glass/security/advisories/new) rather than a public issue.
 

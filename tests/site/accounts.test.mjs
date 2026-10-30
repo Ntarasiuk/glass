@@ -218,6 +218,12 @@ async function hostKey() {
       return { status: res.status, body: await res.json() };
     },
     signRemove: (ts) => sign(`glass-unclaim-v1\n${ts}`),
+    /** A fleet report: `data` is sent as given (a string), signed as sent. */
+    async report(data, { ts = Math.floor(Date.now() / 1000), signedData = data } = {}) {
+      const sig = await sign(`glass-fleet-v1\n${ts}\n${signedData}`);
+      const res = await fetch(`${BASE}/api/fleet/report`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key, ts, data, sig }) });
+      return { status: res.status, body: await res.json() };
+    },
   };
 }
 
@@ -270,4 +276,75 @@ test('deleting an account deletes its list of computers', async () => {
   await browser.call('/api/account', { method: 'DELETE' });
   assert.deepEqual((await host.remove()).body, { removed: 0 });
   assert.equal((await signIn(new Browser(), key)).body.unknown, true);
+});
+
+const REPORT = { os: 'macOS 15.1', model: 'MacBook Pro', chip: 'Apple M3 Max', ram_gb: 64, disk_total_gb: 994, disk_free_gb: 412, filevault: true, firewall: false, uptime_h: 52, battery: 83, version: '0.9.0' };
+
+test('a computer on an account reports about itself, signed, and only its account sees it', async () => {
+  const host = await hostKey();
+  // Not on an account: nothing is kept.
+  assert.equal((await host.report(JSON.stringify(REPORT))).status, 403);
+
+  const { browser } = await newAccount();
+  const { code } = await host.claim();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } });
+
+  // Not signed by that computer, or stale: refused.
+  assert.equal((await host.report(JSON.stringify(REPORT), { signedData: '{}' })).status, 401);
+  assert.equal((await host.report(JSON.stringify(REPORT), { ts: Math.floor(Date.now() / 1000) - 3600 })).status, 400);
+  assert.equal((await host.report('not json')).status, 400);
+
+  assert.equal((await host.report(JSON.stringify(REPORT))).status, 200);
+  const { computers } = (await browser.call('/api/account/computers')).body;
+  assert.equal(computers[0].report.model, 'MacBook Pro');
+  assert.equal(computers[0].report.filevault, true);
+  assert.equal(computers[0].report.firewall, false);
+  assert.equal(computers[0].report.battery, 83);
+  assert.ok(computers[0].report.at > Date.now() - 60_000);
+
+  // Another account sees nothing of it.
+  const { browser: other } = await newAccount();
+  assert.equal((await other.call('/api/account/computers')).body.computers.length, 0);
+
+  // At most one every half minute.
+  assert.equal((await host.report(JSON.stringify(REPORT))).status, 429);
+});
+
+test('a report keeps only the fields it may, each the right kind and size', async () => {
+  const host = await hostKey();
+  const { browser } = await newAccount();
+  const { code } = await host.claim();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } });
+  const data = JSON.stringify({ ...REPORT, os: 'x'.repeat(500), model: 'Mac\u0007Book', secret: 'nope', ram_gb: 'lots', battery: -5, filevault: 'yes' });
+  assert.equal((await host.report(data)).status, 200);
+  const r = (await browser.call('/api/account/computers')).body.computers[0].report;
+  assert.equal(r.os.length, 80);
+  assert.equal(r.model, 'MacBook');
+  assert.equal(r.secret, undefined);
+  assert.equal(r.ram_gb, undefined);
+  assert.equal(r.battery, undefined);
+  assert.equal(r.filevault, undefined);
+  assert.equal((await host.report('x'.repeat(5000))).status, 400);
+});
+
+test('a report goes when the computer asks, leaves its account, or the account is deleted', async () => {
+  const host = await hostKey();
+  const { browser } = await newAccount();
+  const { code } = await host.claim();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } });
+  await host.report(JSON.stringify(REPORT));
+  // Empty data, signed, deletes it.
+  assert.deepEqual((await host.report('')).body, { deleted: true });
+  assert.equal((await browser.call('/api/account/computers')).body.computers[0].report, undefined);
+
+  // Taken off the account (by the account, then again by the computer): the report isn't kept.
+  await new Promise((r) => setTimeout(r, 100));
+  const host2 = await hostKey();
+  const { browser: b2 } = await newAccount();
+  const c2 = await host2.claim();
+  await b2.call('/api/account/computers', { method: 'POST', body: { claim: c2.code } });
+  await host2.report(JSON.stringify(REPORT));
+  const id = (await b2.call('/api/account/computers')).body.computers[0].id;
+  await b2.call(`/api/account/computers/${id}`, { method: 'DELETE' });
+  assert.equal((await host2.report(JSON.stringify(REPORT))).status, 403);
 });
