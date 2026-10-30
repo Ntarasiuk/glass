@@ -18,6 +18,7 @@ Features:
 - **120 fps and wide colour.** A viewer on a fast screen (120 Hz and up) gets up to 120 frames a second from a Mac whose display refreshes that fast; a wide-colour (Display P3) Mac display arrives in P3 instead of being clipped to sRGB.
 - **Works in the browser.** Open a URL on the iPad; there's no app to install. Add it to the Home Screen for a true fullscreen app.
 - **Full control.** Mouse, trackpad, keyboard, and touch (tap to click, drag, long-press to right-click, two-finger scroll), plus an on-screen keyboard button.
+- **Fleet (new).** See every computer on your account in one list (model, system, disk, FileVault, firewall, battery), restart or update them from the page with a passkey confirmation, and mark the ones that break your rules. Off until you turn it on, computer by computer: [Glass Fleet](#glass-fleet-new).
 - **Trackpad mode on phones.** The screen works like a laptop trackpad: drag to move the pointer, tap to click, two-finger tap to right-click; zoomed in, the view follows the pointer. The toolbar folds into menus on small screens.
 - **Unlocks a locked Mac.** Type the password at the lock screen from the remote device.
 - **Apple Pencil.** Pressure and tilt reach the Mac as tablet input, so drawing apps (Photoshop, Affinity, Krita) respond as they do to a drawing tablet.
@@ -180,11 +181,7 @@ Devices that aren't on your tailnet, or belong to another tailnet user, are aske
 
 **From anywhere (no Tailscale on the device).** `glass link --anywhere` makes a link like `https://glassdesk.dev/app/#r=…&l=…` that works from any network. The browser and your computer connect directly over WebRTC: UDP, end-to-end encrypted, about as fast as on the tailnet. When a direct path is impossible (some cellular and corporate networks), traffic goes through Cloudflare's TURN relay, still end-to-end encrypted. glassdesk.dev only introduces the two sides; your computer keeps one outgoing connection to it and opens no ports. The link carries your computer's public key and the computer signs every connection answer, so the browser refuses anyone else, glassdesk.dev included. Remote access is off until you make such a link (or run `glass remote on`); `glass remote off` turns it off. One thing to know: in this mode the viewer page itself comes from glassdesk.dev, whereas on your tailnet it comes from your own computer.
 
-**Your computers (glassdesk.dev/computers).** Sign in there with a passkey (no email, no password; it syncs through iCloud Keychain, Google Password Manager or your password manager) to see which of your computers are online and open any of them from any device. To add a computer, run `glass account add` on it (remote access must be on) and open the one-time link, or scan its QR code, where you're signed in. Your computer signs that claim with its key, so nobody can add a computer they don't control. The account only lists computers: opening one still takes that computer's own sign-in, so someone who got into your account would see names and who's online, never a screen. `glass account remove` takes a computer off every account; deleting the account on the page deletes its list. glassdesk.dev keeps the passkey's public key, each computer's name and public key, and a hash of each sign-in cookie. **Fleet details (opt-in):** `glass fleet on` makes a computer on your account report its model, chip, system version, memory, disk space, FileVault and firewall state, uptime, battery and Glass version every 15 minutes, signed with its key, so /computers can show them and flag what needs attention (FileVault or firewall off, a full disk, a report gone stale). Nothing else is sent, and only computers on an account are stored. `glass fleet off` stops reporting and deletes what was sent; so does `glass account remove`.
-
-**Actions (opt-in).** `glass fleet manage` prints a link (and turns reporting on). Open it where you're signed in and confirm with your passkey, and your account's page then offers that computer **Actions**: refresh its details, update Glass, restart Glass, restart the computer, or run a script you put in `~/.config/glass/fleet/scripts` (a plain file you own that nobody else can write, run for at most a minute). Each action needs your passkey again (fingerprint, face or PIN). glassdesk.dev only relays: the computer checks the passkey's signature itself against the passkey it pinned, a command expires in minutes and runs once, the list of actions is fixed, and each one is logged (`glass fleet manage status`). `glass fleet manage off` forgets the passkeys. The one moment of trust in the website is the pinning, which happens on the page it serves; after that it can't run anything on its own. Only ES256 passkeys (nearly all phones, Macs and security keys) can manage computers.
-
-**Policy.** Under *Your computers*, **Policy** holds the rules you want every computer to meet: disk encryption on, firewall on, Glass up to date, a minimum free disk space, a minimum macOS version, and details no older than some hours. Each computer's report is checked against them on the page, computers that break a rule say which, and the count of computers that meet the policy sits beside it. A check that can't be made (FileVault on Linux) isn't failed, and a computer that hasn't reported isn't judged. The rules are stored with your account; they can't change a computer, but the *Actions* can fix what a rule finds.
+**Your computers (glassdesk.dev/computers).** Sign in there with a passkey (no email, no password; it syncs through iCloud Keychain, Google Password Manager or your password manager) to see which of your computers are online and open any of them from any device. To add a computer, run `glass account add` on it (remote access must be on) and open the one-time link, or scan its QR code, where you're signed in. Your computer signs that claim with its key, so nobody can add a computer they don't control. The account only lists computers: opening one still takes that computer's own sign-in, so someone who got into your account would see names and who's online, never a screen. `glass account remove` takes a computer off every account; deleting the account on the page deletes its list. glassdesk.dev keeps the passkey's public key, each computer's name and public key, and a hash of each sign-in cookie. To look after your computers rather than just reach them (their state, actions you can take, rules they should meet), see [Glass Fleet](#glass-fleet-new).
 
 ## Help someone (quick support)
 
@@ -196,6 +193,108 @@ For helping a parent or a friend who doesn't have Glass, and shouldn't have to i
 4. They click **Stop sharing** (or press Ctrl+C, or close the window) when you're done.
 
 Nothing stays on their computer: Glass runs from a temporary folder with its own temporary settings, token and keys, not as a background service and not at login, and stopping deletes all of it. The connection is the same as `glass link --anywhere`: direct, end-to-end encrypted, no ports opened. Each code works once, for an hour; glassdesk.dev keeps only a salted hash of it, and a code typed wrong too often is locked out for that browser. **New code** in the window (or `n` in the terminal) replaces it. A downloadable app for the same thing needs Apple notarization and is coming; for now it's the one line.
+
+## Glass Fleet (new)
+
+**Fleet is a new set of things in Glass, separate from connecting to a computer.** Until now Glass got you *into* a computer. Fleet is for looking *after* the computers on your account: seeing what state they're in, doing things to them without opening a screen, and checking them against rules you set. It needs Glass 0.9 or newer on each computer, and everything in it is **off until you turn it on, computer by computer**. If you never use it, nothing else in Glass changes.
+
+| | What it is | Turn it on | What authorizes it |
+|---|---|---|---|
+| **Details** | Each computer tells your account its model, system, disk, encryption, firewall, battery and more, so you can see them all in one list. | `glass fleet on` | The computer signs each report with its own key. |
+| **Actions** | From your account's page: refresh details, update Glass, restart Glass, restart the computer, or run a script you placed there. | `glass fleet manage` | Your passkey signs each action, and the computer checks it. |
+| **Policy** | Rules every computer should meet (FileVault on, a minimum macOS…). The page marks the ones that don't. | Set it on the page. | Nothing: it only reads the details. It can't change a computer. |
+
+### Set it up
+
+1. Update Glass to 0.9 or newer on the computer, and turn on remote access: `glass remote on`.
+2. Put the computer on your account: `glass account add`, then open the link where you're signed in at [glassdesk.dev/computers](https://glassdesk.dev/computers).
+3. For **details**: `glass fleet on`. It sends the first report straight away, and the details appear on the computer's row. (If it says "not sent yet", the computer isn't on an account: do step 2.)
+4. For **actions**: `glass fleet manage` on the computer prints a link and a QR code. Open it where you're signed in, press **Allow** and confirm with your passkey. The computer's row gets an **Actions** button.
+5. For **policy**: open **Policy** on the page and tick the rules you want.
+
+### Details
+
+Every 15 minutes (and when you ask), a computer on your account sends this, and only this:
+
+- Model and chip (`MacBook Pro`, `Apple M3 Max`), and the system (`macOS 15.1`, or the Linux distribution's name).
+- Memory, disk size and free disk space.
+- Whether disk encryption (FileVault) and the firewall are on. A computer that can't say (FileVault doesn't exist on Linux) leaves it out.
+- Uptime, battery percentage (when there is a battery), the Glass version, and whether actions are set up on it.
+
+The computer signs each report with its own key. glassdesk.dev keeps only each computer's latest report, and only for computers that are on an account. The page shows it under the computer's name and marks what needs attention: FileVault or firewall off, a nearly full disk, a low battery, a report that has gone stale. With four or more computers there's a search box that matches names, status and these details.
+
+`glass fleet status` shows whether it's on and when it last sent. `glass fleet report` sends one now and prints it. `glass fleet off` stops reporting **and deletes what was sent**; so does `glass account remove`.
+
+### Actions
+
+An action is something your account asks a computer to do. The list is fixed:
+
+| Action | What happens |
+|---|---|
+| Refresh details | The computer sends a report now. |
+| Update Glass | The computer updates itself and restarts. |
+| Restart Glass | Glass restarts and anyone viewing reconnects in a few seconds. |
+| Restart computer | The computer restarts (open apps are asked to quit); Glass is back once someone is logged in. |
+| Run a script | Runs a script you placed on the computer, by name. |
+
+**Scripts.** Put them in `~/.config/glass/fleet/scripts/`. Glass only runs a script when the folder and the file are both yours and nobody else can write them (`chmod go-w`), the file is executable and a plain file (not a link), and its name is letters, digits, dots, dashes and underscores. It runs for at most a minute (and is stopped, along with anything it started, after that), and the last 2,000 characters of its output come back to the page. Glass never runs anything you didn't put there.
+
+**How an action is authorized.** Each time, the page asks for your passkey, so you confirm with your fingerprint, face or PIN, and builds a command: this computer, this action, a one-time number, an expiry a couple of minutes away. The passkey signs that exact command. glassdesk.dev passes it to the computer, and **the computer checks the signature itself** against the passkey it saved when you set it up. It refuses a command that is expired, was already run, is for another computer, was signed for another site, wasn't confirmed by you, or whose passkey it doesn't know. The page has no way to run anything the computer hasn't checked.
+
+**Setting up a passkey (`glass fleet manage`).** The link holds a one-time code that never goes to glassdesk.dev, because it sits after the `#`, which browsers don't send. The page uses that code to vouch for your passkey's public key, and the computer saves the key only if the vouch checks out. The link works once, for 15 minutes, for one passkey. Run it again to add another passkey (up to 8). Only ES256 passkeys can manage computers, which covers nearly all phones, Macs and security keys.
+
+Every action, and every refusal, is logged on the computer: `glass fleet manage status` shows the latest, and the full log is `~/.config/glass/fleet/actions.log`. `glass fleet manage off` forgets every passkey and stops all actions at once.
+
+### Policy
+
+The rules live under **Policy** on the page, stored with your account:
+
+- Disk encryption (FileVault) on.
+- Firewall on.
+- Glass up to date (the newest release).
+- At least a set amount of free disk space.
+- At least a set macOS version.
+- Details no older than a set number of hours.
+
+Each computer's latest details are checked against the rules in the page. A computer that breaks one says so under its name (`Not compliant: firewall off, system older than 16`), and the count of computers that meet the policy sits next to **Policy**. A check that can't be made (FileVault on Linux) isn't failed, and a computer that hasn't reported yet isn't judged. Setting a rule changes nothing on any computer; to fix what it finds, use an action.
+
+### What can and can't happen
+
+| | |
+|---|---|
+| **glassdesk.dev can** | Store each computer's latest details; store your policy; relay a signed command to a computer that's online. |
+| **glassdesk.dev can't** | Run an action by itself, forge a command (it has no passkey), keep an action's result (it passes through to the page and isn't stored), or see a screen: opening a computer still takes that computer's own sign-in. |
+| **Someone who steals your signed-in browser** | Can see names, status and details, but can't run an action: each one needs your passkey, confirmed with your fingerprint, face or PIN. They could add a passkey of their own to the account, but a computer only takes commands from a passkey you pinned with a link printed on the computer itself. |
+| **The one moment of trust** | Pinning happens on the page glassdesk.dev serves. After that, the website alone can't act. |
+
+Treat the `glass fleet manage` link like a password for 15 minutes: don't paste it into a shared chat or an agent's transcript.
+
+### Commands
+
+```
+glass fleet                      Is reporting on, and when was the last report?
+glass fleet on | off             Start reporting; stop and delete what was sent
+glass fleet report [--json]      Send a report now
+glass fleet manage [--json]      Link to let your account run actions here (also turns reporting on)
+glass fleet manage status        Passkeys that can run actions, and the latest actions
+glass fleet manage off           Forget every passkey; stop all actions
+```
+
+### Not included
+
+- **Teams and roles.** An account is one passkey identity (up to 20 passkeys), so a team shares an account; there are no per-person permissions yet.
+- **Zero-touch setup and an MDM.** Fleet doesn't enroll computers through Apple Business Manager or install profiles; use your MDM to install Glass, then Fleet to look after it.
+- **Automatic fixes.** A policy only flags; an action fixes, when you press it.
+- **Offline computers.** An action needs the computer to be online. A computer that's off shows its last details with their age.
+
+### If something's wrong
+
+- **No Actions button.** The computer must be online and have details on (`glass fleet on`) and a passkey saved (`glass fleet manage`). It appears after its next report, within a few seconds of saving the passkey.
+- **"this computer isn't set up for actions".** No passkey is saved here: run `glass fleet manage` and open the link.
+- **"that command has expired".** The computer's clock is off by minutes: fix its date and time.
+- **"that passkey isn't pinned on this computer".** You confirmed with a different passkey than the one you saved. Run `glass fleet manage` again while using that passkey.
+- **"no enrollment is open".** The link was used or is older than 15 minutes: run `glass fleet manage` again.
+- **"This computer isn't on an account".** Add it first: `glass account add`.
 
 ## Links with limits
 
@@ -440,8 +539,9 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 - Access control: a device is let in if Tailscale reports it belongs to the same user as the Mac, or if it presents the access token. Glass sends nothing to a session (video, audio, clipboard, input) until it is authenticated. Links, single sign-on, LDAP, access rules, posture checks and passkeys can narrow that further; see above.
 - Glass runs as your user (a LaunchAgent on macOS, a systemd user service on Linux), never as root.
 - The file browser is for the computer's owner only (not links or guests), sees only the home folder (no `..`, no symlinks out), and moves to the Trash rather than deleting.
+- Fleet (opt-in) sends a computer's details to your glassdesk.dev account and lets that account ask for a fixed set of actions, each signed by your passkey and checked by the computer itself. See [Glass Fleet](#glass-fleet-new) for what's sent and what can and can't happen.
 - Notifications are the one thing that leaves your network: the computer sends them through your browser's push service (Apple, Google, Mozilla or Microsoft), encrypted end to end (RFC 8291), so the push service can't read them. Only devices you turn them on for get them; guests only ever get messages.
-- The glassdesk.dev website uses Google Analytics on its pages (not on the remote viewer at glassdesk.dev/app), counts downloads using a salted hash of the IP address (no raw IPs stored) and stores feedback you choose to send, which is emailed to the maintainer. Downloads are also counted in Google Analytics under that same hash, with the country. The installer says which version it replaces, if any, so updates are counted apart from new installs. The Glass app itself sends nothing to glassdesk.dev except feedback you submit, its check for a new version, and, when you run `glass account add`, the computer's name and public key (plus, only if you run `glass fleet on`, the details listed under *Your computers*). The /computers page loads no analytics.
+- The glassdesk.dev website uses Google Analytics on its pages (not on the remote viewer at glassdesk.dev/app), counts downloads using a salted hash of the IP address (no raw IPs stored) and stores feedback you choose to send, which is emailed to the maintainer. Downloads are also counted in Google Analytics under that same hash, with the country. The installer says which version it replaces, if any, so updates are counted apart from new installs. The Glass app itself sends nothing to glassdesk.dev except feedback you submit, its check for a new version, and, when you run `glass account add`, the computer's name and public key (plus, only if you run `glass fleet on`, the details listed under *Glass Fleet*). The /computers page loads no analytics.
 
 ## Requirements
 
