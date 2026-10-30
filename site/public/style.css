@@ -371,8 +371,35 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
 .doc code { background: rgb(255 255 255 / 0.06); padding: 2px 6px; border-radius: 6px; }
 .doc pre { padding: 16px; overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-raised); }
 .doc pre code { background: none; padding: 0; }
-.doc table { border-collapse: collapse; width: 100%; font-size: 15px; }
-.doc th, .doc td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+/* Comparison tables: a framed card that scrolls sideways, the row label stays put, Glass's row or column is lit. */
+.table-wrap {
+  margin: 24px 0 32px; overflow-x: auto; border-radius: 18px; background: rgb(13 14 18 / 0.93); backdrop-filter: blur(14px);
+  box-shadow: inset 0 0 0 1px var(--line); -webkit-overflow-scrolling: touch;
+}
+.table-wrap.wide { width: min(1120px, calc(100vw - 40px)); }
+.table-wrap.wide th, .table-wrap.wide td { padding: 13px 12px; }
+.table-wrap.wide tbody td { min-width: 0; }
+.table-wrap.wide tbody th { min-width: 132px; }
+.table-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.doc table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 15px; line-height: 1.45; }
+.doc th, .doc td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.doc tbody tr:last-child > * { border-bottom: 0; }
+.doc thead th {
+  font: 650 12px var(--display); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint);
+  background: rgb(255 255 255 / 0.05); white-space: nowrap; vertical-align: bottom;
+}
+.doc tbody th { font-weight: 650; color: var(--text); min-width: 150px; position: sticky; left: 0; background: #101216; z-index: 1; box-shadow: 1px 0 0 var(--line); }
+.doc tbody td { min-width: 128px; color: #d3d7df; }
+.doc tbody tr:hover > td { background: rgb(255 255 255 / 0.035); }
+.doc tbody tr:hover > th { background: #171a20; }
+.doc .us, .doc tr.us > * { background: rgb(92 178 255 / 0.11); }
+.doc thead th.us { color: var(--accent); background: rgb(92 178 255 / 0.16); box-shadow: inset 0 3px 0 var(--accent); }
+.doc tr.us > th { background: #13202e; color: #fff; box-shadow: inset 3px 0 0 var(--accent), 1px 0 0 var(--line); }
+.doc tbody tr:hover > .us { background: rgb(92 178 255 / 0.15); }
+.pill { display: inline-block; padding: 1px 9px; border-radius: 99px; font: 650 13px var(--display); letter-spacing: 0.01em; }
+.pill.yes { color: #6fe09d; background: rgb(95 211 141 / 0.14); }
+.pill.no { color: var(--text-faint); background: rgb(255 255 255 / 0.07); }
+.note { color: var(--text-dim); font-size: 14px; }
 
 @media (max-width: 880px) {
   .hero, .agent, .feedback { grid-template-columns: minmax(0, 1fr); }
@@ -414,8 +441,9 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
 .compare-links { display: grid; gap: 8px; padding-left: 20px; }
 footer.site nav[aria-label="Guides and comparisons"] { flex-basis: 100%; gap: 8px 20px; }
 @media (max-width: 760px) {
-  .doc table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .doc th, .doc td { min-width: 120px; }
+  .table-wrap.wide { width: 100%; }
+  .doc th, .doc td { padding: 12px 12px; }
+  .doc tbody th { min-width: 118px; }
 }
 .shot { margin: 40px 0 0; }
 .shot img { width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--line); }
