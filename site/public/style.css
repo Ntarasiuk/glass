@@ -236,20 +236,21 @@ header.site nav a:hover, footer.site a:hover { color: var(--text); }
 .use.main .after { margin-top: 24px; padding-top: 0; }
 .use .steps + .after { margin-top: 24px; }
 
-.use.main .top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: clamp(20px, 4vw, 56px); align-items: center; }
-.diagram { width: 100%; height: auto; color: var(--text-faint); overflow: visible; }
-.diagram .ln { color: var(--line-strong); }
-.diagram .node { fill: rgb(255 255 255 / 0.04); stroke: var(--accent); stroke-width: 1.5; }
-.diagram .ts { fill: var(--text); }
-.diagram .sub { fill: var(--text-dim); font: 600 13px var(--display); }
-.diagram .sub.dim { fill: var(--text-faint); font-weight: 500; font-size: 12px; }
-.diagram .cap { fill: var(--text-faint); font: 650 12px var(--display); letter-spacing: 0.08em; text-transform: uppercase; }
-.diagram .addr { fill: var(--text-faint); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
-.diagram .dev2 { fill: rgb(255 255 255 / 0.04); stroke: currentColor; stroke-width: 2; }
-.diagram path.dev2 { fill: none; stroke-linecap: round; }
-.diagram .flow { stroke: var(--accent); stroke-dasharray: 2 12; opacity: 0.9; }
-@media (prefers-reduced-motion: no-preference) { .diagram .flow { animation: flow 1.4s linear infinite; } }
-@keyframes flow { to { stroke-dashoffset: -28; } }
+.diagram { width: 100%; height: auto; margin-top: 26px; color: var(--text-faint); overflow: visible; }
+.diagram.tall { display: none; max-width: 420px; margin-inline: auto; }
+.defs { position: absolute; }
+.diagram .panel { fill: rgb(255 255 255 / 0.035); stroke: var(--line); }
+.diagram .node { fill: rgb(92 178 255 / 0.07); stroke: var(--accent); stroke-width: 1.6; }
+.diagram .dg { fill: rgb(255 255 255 / 0.05); stroke: var(--text-dim); stroke-width: 2; }
+.diagram .pill { fill: rgb(255 255 255 / 0.07); stroke: var(--line-strong); }
+.diagram .pt { fill: var(--text); font: 650 16px var(--display); dominant-baseline: middle; }
+.diagram .tsm, .diagram .tsw { color: var(--text); }
+.diagram .ttl { fill: var(--text); font: 650 19px var(--display); letter-spacing: -0.01em; }
+.diagram .sub { fill: var(--text-dim); font: 500 14px var(--body, system-ui); }
+.diagram .cap { fill: var(--text-faint); font: 650 13px var(--display); letter-spacing: 0.1em; text-transform: uppercase; }
+.diagram .flow { fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round; stroke-dasharray: 3 9; }
+@media (prefers-reduced-motion: no-preference) { .diagram .flow { animation: flow 1.2s linear infinite; } }
+@keyframes flow { to { stroke-dashoffset: -24; } }
 
 .vis { margin-top: 20px; }
 .vis.support { display: grid; grid-template-columns: 1fr 34px 1fr; gap: 10px; align-items: center; }
@@ -376,7 +377,8 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
   .hero, .agent, .feedback { grid-template-columns: minmax(0, 1fr); }
   .pillars { grid-template-columns: 1fr; gap: 20px; }
   .uses { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-  .use.main .top { grid-template-columns: minmax(0, 1fr); }
+  .diagram.wide { display: none; }
+  .diagram.tall { display: block; }
   .steps { grid-template-columns: 1fr; gap: 36px; }
 }
 @media (max-width: 560px) {
