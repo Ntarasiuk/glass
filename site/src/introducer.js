@@ -10,6 +10,7 @@ const MAX_CLIENTS = 32;
 const MAX_OFFERS_PER_SOCKET = 5;
 // How long a command waits for its computer (a script may take a minute).
 const RELAY_WAIT_MS = 70_000;
+const RELAY_IN_FLIGHT = 4;
 
 export class Introducer extends DurableObject {
   constructor(ctx, env) {
@@ -52,8 +53,16 @@ export class Introducer extends DurableObject {
   async relay(request) {
     const host = this.host();
     if (!host) return Response.json({ ok: false, message: 'This computer is offline, or remote access is turned off on it.' }, { status: 409 });
-    const { kind, ...payload } = await request.json();
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json({ ok: false, message: 'bad request' }, { status: 400 });
+    }
+    const { kind, ...payload } = body ?? {};
     if (kind !== 'command' && kind !== 'enroll') return Response.json({ ok: false, message: 'bad request' }, { status: 400 });
+    // A few at a time: a flood of commands never reaches the computer.
+    if (this.pending.size >= RELAY_IN_FLIGHT) return Response.json({ ok: false, message: 'This computer is busy with other actions. Try again in a moment.' }, { status: 429 });
     const id = randomId(12);
     const answer = new Promise((resolve) => {
       const timer = setTimeout(() => {

@@ -37,7 +37,7 @@ const SPKI_P256: [u8; 26] = [
 ];
 
 fn dir() -> PathBuf {
-    crate::config_dir().join("fleet")
+    crate::fleet::dir()
 }
 
 fn now() -> u64 {
@@ -59,11 +59,10 @@ fn managers() -> Vec<Manager> {
 }
 
 fn save_managers(list: &[Manager]) -> Result<()> {
-    std::fs::create_dir_all(dir())?;
+    crate::fleet::ensure_dir()?;
     let path = dir().join("managers.json");
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(list)?)?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    crate::fleet::write_private(&tmp, &serde_json::to_vec_pretty(list)?)?;
     std::fs::rename(tmp, path)?;
     Ok(())
 }
@@ -98,10 +97,8 @@ pub fn start_enrollment() -> Result<String> {
     let mut raw = [0u8; 16];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut raw).map_err(|_| anyhow::anyhow!("random"))?;
     let pin = b64url(&raw);
-    std::fs::create_dir_all(dir())?;
-    let path = dir().join("enroll.json");
-    std::fs::write(&path, serde_json::to_vec(&Enrollment { pin: pin.clone(), expires: now() + ENROLL_SECS })?)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    crate::fleet::ensure_dir()?;
+    crate::fleet::write_private(&dir().join("enroll.json"), &serde_json::to_vec(&Enrollment { pin: pin.clone(), expires: now() + ENROLL_SECS })?)?;
     let id = HostKey::load_or_create()?.id();
     Ok(format!("{}/computers#manage={id}.{pin}", crate::remote::base().trim_end_matches('/')))
 }
@@ -216,8 +213,8 @@ fn first_use(nonce: &str, exp: u64) -> Result<()> {
     seen.retain(|(_, e)| *e > now());
     ensure!(!seen.iter().any(|(n, _)| n == nonce), "that command was already run");
     seen.push((nonce.into(), exp));
-    std::fs::create_dir_all(dir())?;
-    std::fs::write(path, serde_json::to_vec(&seen)?)?;
+    crate::fleet::ensure_dir()?;
+    crate::fleet::write_private(&path, &serde_json::to_vec(&seen)?)?;
     Ok(())
 }
 
@@ -291,28 +288,45 @@ fn run(action: &str, arg: &str) -> Result<(String, Option<Deferred>)> {
     }
 }
 
-/// Runs `fleet/scripts/<name>`: a plain file you own, executable, not writable by others.
+/// Runs `fleet/scripts/<name>`: a plain file you own, executable, not writable by others, in a
+/// folder you own that others can't write either (or they could swap it).
 fn run_script(name: &str) -> Result<String> {
+    run_script_for(name, Duration::from_secs(SCRIPT_SECS))
+}
+
+fn run_script_for(name: &str, limit: Duration) -> Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::process::CommandExt;
     ensure!(
         !name.is_empty() && name.len() <= 64 && name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) && name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)),
         "a script name is letters, digits, dots, dashes and underscores"
     );
+    // SAFETY: geteuid has no preconditions.
+    let me = unsafe { libc::geteuid() };
     let scripts = dir().join("scripts");
+    let dir_meta = std::fs::symlink_metadata(&scripts).with_context(|| format!("no folder {}", scripts.display()))?;
+    ensure!(dir_meta.is_dir(), "{} isn't a plain folder", scripts.display());
+    ensure!(dir_meta.uid() == me, "{} isn't yours", scripts.display());
+    ensure!(dir_meta.permissions().mode() & 0o022 == 0, "{} can be written by others (chmod go-w)", scripts.display());
     let path = scripts.join(name);
     let meta = std::fs::symlink_metadata(&path).with_context(|| format!("no script {name} in {}", scripts.display()))?;
     ensure!(meta.is_file(), "{name} isn't a plain file");
     let mode = meta.permissions().mode();
     ensure!(mode & 0o111 != 0, "{name} isn't executable (chmod +x)");
     ensure!(mode & 0o022 == 0, "{name} can be written by others (chmod go-w)");
-    // SAFETY: geteuid has no preconditions.
-    ensure!(std::os::unix::fs::MetadataExt::uid(&meta) == unsafe { libc::geteuid() }, "{name} isn't yours");
-    let out_path = dir().join("script.out");
-    let out = std::fs::File::create(&out_path)?;
+    ensure!(meta.uid() == me, "{name} isn't yours");
+    // Its output goes to a file only this user can read, one per run.
+    crate::fleet::ensure_dir()?;
+    let out_path = dir().join(format!("script-{}-{}.out", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default()));
+    crate::fleet::write_private(&out_path, b"")?;
+    let out = std::fs::OpenOptions::new().append(true).open(&out_path)?;
     let mut child = std::process::Command::new(&path)
         .current_dir(&scripts)
         .stdin(std::process::Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out)
+        // Its own process group, so a stop takes everything it started.
+        .process_group(0)
         .spawn()
         .with_context(|| format!("starting {name}"))?;
     let started = std::time::Instant::now();
@@ -320,12 +334,13 @@ fn run_script(name: &str) -> Result<String> {
         if let Some(s) = child.try_wait()? {
             break Some(s);
         }
-        if started.elapsed() > Duration::from_secs(SCRIPT_SECS) {
-            let _ = child.kill();
+        if started.elapsed() > limit {
+            // SAFETY: killpg on the group we just created for this child.
+            unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
             let _ = child.wait();
             break None;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(50));
     };
     let mut text = String::new();
     std::fs::File::open(&out_path)?.take(1 << 20).read_to_string(&mut text).ok();
@@ -334,7 +349,7 @@ fn run_script(name: &str) -> Result<String> {
     match status {
         Some(s) if s.success() => Ok(format!("{name} finished.\n{}", tail.trim())),
         Some(s) => bail!("{name} exited with {}.\n{}", s.code().map_or("a signal".into(), |c| c.to_string()), tail.trim()),
-        None => bail!("{name} took longer than {SCRIPT_SECS} s and was stopped.\n{}", tail.trim()),
+        None => bail!("{name} took longer than {} s and was stopped.\n{}", limit.as_secs().max(1), tail.trim()),
     }
 }
 
@@ -343,8 +358,11 @@ fn run_script(name: &str) -> Result<String> {
 fn audit(action: &str, arg: &str, who: &str, ok: bool, message: &str) {
     use std::io::Write;
     let line = json!({ "t": now(), "action": action, "arg": arg, "passkey": who, "ok": ok, "message": message.chars().take(200).collect::<String>() });
-    let _ = std::fs::create_dir_all(dir());
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir().join("actions.log")) {
+    use std::os::unix::fs::OpenOptionsExt;
+    if crate::fleet::ensure_dir().is_err() {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(dir().join("actions.log")) {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -466,6 +484,70 @@ mod tests {
         // (rp_id and origin read the live base; their pieces are plain string handling.)
         assert_eq!("https://glassdesk.dev".split("://").nth(1).unwrap().split('/').next().unwrap().split(':').next().unwrap(), "glassdesk.dev");
         assert_eq!("http://localhost:8787".split("://").nth(1).unwrap().split(':').next().unwrap(), "localhost");
+    }
+
+    /// A scratch fleet folder (the config dir is process-wide, so one test owns it).
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("glass-fleet-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: set before any other thread in this test reads it; only this test sets it.
+        unsafe { std::env::set_var("GLASS_CONFIG_DIR", &dir) };
+        dir
+    }
+
+    fn script(dir: &std::path::Path, name: &str, body: &str, mode: u32) {
+        let scripts = dir.join("fleet").join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        let path = scripts.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn scripts_run_only_from_a_private_folder_as_yours_and_are_stopped_on_time() {
+        let dir = scratch();
+        script(&dir, "hi.sh", "#!/bin/sh\necho hi there\n", 0o755);
+        let scripts = dir.join("fleet").join("scripts");
+        std::fs::set_permissions(&scripts, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(run_script("hi.sh").unwrap().contains("hi there"));
+
+        // The folder others can write: a script there could be swapped.
+        std::fs::set_permissions(&scripts, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(run_script("hi.sh").unwrap_err().to_string().contains("written by others"));
+        std::fs::set_permissions(&scripts, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The script others can write, one that isn't executable, a symlink, a failing one.
+        script(&dir, "loose.sh", "#!/bin/sh\necho x\n", 0o777);
+        std::fs::set_permissions(scripts.join("loose.sh"), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(run_script("loose.sh").unwrap_err().to_string().contains("written by others"));
+        script(&dir, "plain.txt", "echo x\n", 0o644);
+        assert!(run_script("plain.txt").unwrap_err().to_string().contains("executable"));
+        std::os::unix::fs::symlink("/bin/echo", scripts.join("link.sh")).unwrap();
+        assert!(run_script("link.sh").unwrap_err().to_string().contains("plain file"));
+        script(&dir, "bad.sh", "#!/bin/sh\necho nope >&2\nexit 3\n", 0o755);
+        let e = run_script("bad.sh").unwrap_err().to_string();
+        assert!(e.contains("exited with 3") && e.contains("nope"));
+
+        // A script that runs on is stopped, along with what it started.
+        script(&dir, "slow.sh", "#!/bin/sh\nsleep 30 &\necho $! > child.pid\nsleep 30\n", 0o755);
+        let started = std::time::Instant::now();
+        assert!(run_script_for("slow.sh", Duration::from_millis(500)).unwrap_err().to_string().contains("was stopped"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(300));
+        let pid: i32 = std::fs::read_to_string(scripts.join("child.pid")).unwrap().trim().parse().unwrap();
+        // SAFETY: signal 0 only checks that the process exists.
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "what the script started is gone too");
+
+        // The fleet folder and what's in it are private.
+        script(&dir, "p.sh", "#!/bin/sh\ntrue\n", 0o755);
+        run_script("p.sh").unwrap();
+        audit("test", "", "abc", true, "x");
+        let mode = |p: PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(dir.join("fleet")), 0o700);
+        assert_eq!(mode(dir.join("fleet").join("actions.log")), 0o600);
+        assert!(std::fs::read_dir(dir.join("fleet")).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".out")), "no output left behind");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

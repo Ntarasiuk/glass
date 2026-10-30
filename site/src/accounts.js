@@ -310,7 +310,7 @@ async function relayToComputer(request, env, hostId, what) {
     body: JSON.stringify(payload),
   });
   const out = await res.json();
-  return res.status === 409 ? json({ error: out.message }, 409) : json(out);
+  return res.status === 409 || res.status === 429 ? json({ error: out.message }, res.status) : json(out);
 }
 
 /** Drops reports of computers that are on no account any more (statement for a batch). */

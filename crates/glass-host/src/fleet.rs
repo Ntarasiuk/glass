@@ -16,8 +16,25 @@ use crate::remote::HostKey;
 
 const EVERY: Duration = Duration::from_secs(15 * 60);
 
-fn dir() -> PathBuf {
+pub(crate) fn dir() -> PathBuf {
     crate::config_dir().join("fleet")
+}
+
+/// The fleet folder, readable by this user only (it holds the action log, pinned keys and
+/// script output).
+pub(crate) fn ensure_dir() -> Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir())?;
+    std::fs::set_permissions(dir(), std::fs::Permissions::from_mode(0o700))?;
+    Ok(dir())
+}
+
+/// Writes a file only this user can read, from the moment it exists.
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    f.write_all(bytes)
 }
 
 pub fn enabled() -> bool {
@@ -25,10 +42,10 @@ pub fn enabled() -> bool {
 }
 
 pub fn set_enabled(on: bool) -> Result<()> {
-    std::fs::create_dir_all(dir())?;
+    ensure_dir()?;
     let flag = dir().join("enabled");
     if on {
-        std::fs::write(flag, b"")?;
+        write_private(&flag, b"")?;
     } else {
         let _ = std::fs::remove_file(flag);
     }
@@ -196,8 +213,9 @@ pub fn send(forget: bool) -> Result<Inventory> {
     let sig = key.sign(format!("glass-fleet-v1\n{ts}\n{data}").as_bytes())?;
     crate::account::post("/api/fleet/report", json!({ "key": key.public(), "ts": ts, "data": data, "sig": sig }))?;
     if !forget {
-        let _ = std::fs::create_dir_all(dir());
-        let _ = std::fs::write(dir().join("last"), ts.to_string());
+        if ensure_dir().is_ok() {
+            let _ = write_private(&dir().join("last"), ts.to_string().as_bytes());
+        }
     }
     Ok(inv)
 }
