@@ -432,12 +432,47 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
 .updated, .crumbs { color: var(--text-faint); font-size: 14px; margin: 0 0 6px; }
 .crumbs a, .updated a { color: var(--text-dim); }
 .doc .lede { color: var(--text-dim); font-size: 19px; }
-.guide-list { list-style: none; padding: 0; display: grid; gap: 18px; }
-.guide-list a { font: 650 20px var(--display); color: var(--text); }
-.guide-list span { display: block; color: var(--text-dim); margin-top: 4px; }
 .related { margin-top: 56px; }
 .doc .cta { margin-top: 48px; max-width: none; }
 .answer { font-size: clamp(17px, 1.5vw, 19px); color: var(--text); }
+/* Guides and comparisons: a wide header (title beside the short answer), a row of jump links, a centred
+   reading column, tables that break out of it, and cards to the other guides. */
+.doc.guide { max-width: none; padding-top: 28px; }
+.g-hero { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); gap: clamp(28px, 5vw, 72px); align-items: start; }
+.guide .g-hero h1 { margin: 14px 0 0; font-size: clamp(38px, 5.4vw, 68px); line-height: 1.02; max-width: 15ch; }
+.g-answer { padding: 24px 28px 26px; border-radius: 24px; background: rgb(13 14 18 / 0.78); backdrop-filter: blur(14px); box-shadow: inset 0 0 0 1px var(--line), inset 4px 0 0 var(--accent); }
+.g-kicker { display: block; margin-bottom: 8px; font: 650 12px var(--display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
+.guide .g-answer p { margin: 0; font-size: clamp(16px, 1.35vw, 18px); line-height: 1.6; color: #e3e6ec; }
+.g-install { margin-top: 30px; max-width: 470px; }
+.g-hint { max-width: 470px; }
+.toc { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 36px 0 0; padding: 14px 0 0; border-top: 1px solid var(--line); }
+.toc span { margin-right: 6px; font: 650 12px var(--display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); }
+.toc a { padding: 5px 13px; border-radius: 99px; font-size: 14px; color: var(--text-dim); text-decoration: none; background: rgb(255 255 255 / 0.05); box-shadow: inset 0 0 0 1px var(--line); transition: background-color 140ms ease, color 140ms ease; }
+.toc a:hover { color: var(--text); background: rgb(92 178 255 / 0.16); }
+.g-body { max-width: 800px; margin: 8px auto 0; font-size: 17.5px; }
+.g-body > :first-child { margin-top: 0; }
+.g-body > h2:first-child { margin-top: 32px; border-top: 0; padding-top: 0; }
+.g-body h2 { margin-top: 64px; font-size: clamp(28px, 3.2vw, 36px); scroll-margin-top: 28px; }
+.g-body h3 { scroll-margin-top: 28px; }
+.g-body p, .g-body li { line-height: 1.7; }
+.guide .table-wrap.mid, .guide .table-wrap.wide { position: relative; left: 50%; transform: translateX(-50%); }
+.guide .table-wrap.mid { width: min(980px, calc(100vw - 40px)); }
+.guide > .shot, .guide > .about, .guide > .cta, .guide > .hint { max-width: 800px; margin-inline: auto; }
+.guide > .related { margin-top: 64px; }
+.guide .related ul, .guide-list { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; }
+.guide .related a, .guide-list a { display: block; height: 100%; padding: 18px 20px; border-radius: 18px; text-decoration: none; background: rgb(13 14 18 / 0.7); box-shadow: inset 0 0 0 1px var(--line); transition: background-color 140ms ease, box-shadow 140ms ease; }
+.guide .related a:hover, .guide-list a:hover { background: rgb(92 178 255 / 0.1); box-shadow: inset 0 0 0 1px rgb(92 178 255 / 0.5); }
+.guide .related strong, .guide-list strong { display: block; font: 650 18px var(--display); letter-spacing: -0.01em; color: var(--text); }
+.guide .related span, .guide-list span { display: block; margin-top: 6px; font-size: 14.5px; line-height: 1.45; color: var(--text-dim); }
+.guide-index h1 { margin: 0; font-size: clamp(40px, 5.6vw, 68px); line-height: 1; }
+.guide-index .lede { max-width: 60ch; margin-bottom: 36px; }
+@media (max-width: 880px) {
+  .g-hero { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .guide .g-hero h1 { max-width: none; }
+  .g-install, .g-hint { display: none; }
+  .guide .table-wrap.mid, .guide .table-wrap.wide { position: static; transform: none; width: 100%; }
+  .g-body { font-size: 17px; }
+}
 .compare-links { display: grid; gap: 8px; padding-left: 20px; }
 footer.site nav[aria-label="Guides and comparisons"] { flex-basis: 100%; gap: 8px 20px; }
 @media (max-width: 760px) {
