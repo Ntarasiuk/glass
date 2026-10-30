@@ -54,6 +54,8 @@ export async function accounts(request, env, url) {
     if (path === '/api/account/session' && method === 'POST') return await signIn(request, env, url);
     if (path === '/api/account/session' && method === 'DELETE') return await signOut(request, env);
     if (path === '/api/account/claim' && method === 'GET') return await peekClaim(env, url);
+    if (path === '/api/account/policy' && method === 'GET') return await getPolicy(request, env);
+    if (path === '/api/account/policy' && method === 'PUT') return await putPolicy(request, env);
     if (path === '/api/account/computers' && method === 'GET') return await computers(request, env);
     if (path === '/api/account/computers' && method === 'POST') return await addComputer(request, env);
     const remove = path.match(/^\/api\/account\/computers\/([A-Za-z0-9_-]{22})$/);
@@ -182,7 +184,7 @@ async function signOut(request, env) {
 async function deleteAccount(request, env) {
   const s = await session(request, env);
   if (!s) throw new Refused('Not signed in.', 401);
-  await env.DB.batch(['passkeys', 'sessions', 'account_computers'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE account = ?`).bind(s.account)).concat(
+  await env.DB.batch(['passkeys', 'sessions', 'account_computers', 'account_policy'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE account = ?`).bind(s.account)).concat(
     env.DB.prepare('DELETE FROM accounts WHERE id = ?').bind(s.account),
     dropOrphanReports(env),
   ));
@@ -273,6 +275,33 @@ async function computers(request, env) {
       ...(r.data && { report: { ...JSON.parse(r.data), at: r.reported } }),
     })),
   });
+}
+
+const POLICY = { filevault: false, firewall: false, glass_current: false, disk_free_gb: 0, fresh_hours: 0, os_min: '' };
+
+/** Only the fields a policy may have, each the right kind and size; the rest is dropped. */
+export function cleanPolicy(raw) {
+  const out = { ...POLICY };
+  for (const k of ['filevault', 'firewall', 'glass_current']) if (raw?.[k] === true) out[k] = true;
+  if (Number.isFinite(raw?.disk_free_gb)) out.disk_free_gb = Math.min(100_000, Math.max(0, Math.round(raw.disk_free_gb)));
+  if (Number.isFinite(raw?.fresh_hours)) out.fresh_hours = Math.min(24 * 365, Math.max(0, Math.round(raw.fresh_hours)));
+  if (typeof raw?.os_min === 'string' && /^\d{1,3}(\.\d{1,3}){0,2}$/.test(raw.os_min.trim())) out.os_min = raw.os_min.trim();
+  return out;
+}
+
+async function getPolicy(request, env) {
+  const s = await session(request, env);
+  if (!s) throw new Refused('Sign in first.', 401);
+  const row = await env.DB.prepare('SELECT data FROM account_policy WHERE account = ?').bind(s.account).first('data');
+  return json({ policy: cleanPolicy(row ? JSON.parse(row) : {}) });
+}
+
+async function putPolicy(request, env) {
+  const s = await session(request, env);
+  if (!s) throw new Refused('Sign in first.', 401);
+  const policy = cleanPolicy(await body(request));
+  await env.DB.prepare('INSERT OR REPLACE INTO account_policy (account, data) VALUES (?, ?)').bind(s.account, JSON.stringify(policy)).run();
+  return json({ policy });
 }
 
 const RELAY_MAX = 4096;

@@ -380,3 +380,49 @@ test('/computers: a passkey you pin lets the account run actions on a computer, 
     await host.stop();
   }
 });
+
+test('/computers: a policy flags the computers that break it, and says how many meet it', async ({ page }) => {
+  const host = await remoteHost();
+  try {
+    host.cli('remote', 'on');
+    await passkeys(page);
+    await page.goto(`${base}/computers`);
+    await page.getByRole('button', { name: 'Create an account' }).click();
+    await expect(page.locator('#account-note')).toHaveText('Signed in with a passkey.');
+    const { url, name } = JSON.parse(host.cli('account', 'add', '--json'));
+    await page.goto(url);
+    await page.getByRole('button', { name: `Add ${name}` }).click();
+    const mine = page.locator('#mine-list li');
+    await expect(mine).toHaveCount(1);
+    host.cli('fleet', 'report'); // the fake report: FileVault on, firewall off, 412 of 994 GB free, macOS 15.1
+    await page.reload();
+    const count = page.locator('#policy-count');
+    await expect(count).toHaveText('· none set');
+    await expect(mine.locator('.meta')).not.toContainText('Not compliant');
+
+    await page.locator('#policy summary').click();
+    await page.locator('#policy-form [name=firewall]').check();
+    await page.locator('#policy-form [name=filevault]').check();
+    await page.locator('#policy-form [name=os_min]').fill('16');
+    await page.locator('#policy-form [name=disk_free_gb]').fill('100');
+    await page.getByRole('button', { name: 'Save policy' }).click();
+    await expect(page.locator('#policy-status')).toHaveText('Saved.');
+    // Firewall is off and macOS 15.1 is older than 16; FileVault is on and the disk has room.
+    await expect(mine.locator('.meta .warn', { hasText: 'Not compliant' })).toHaveText('Not compliant: firewall off, system older than 16');
+    await expect(count).toHaveText('· 0 of 1 meet it');
+
+    // It's kept: another page load, and searching finds the non-compliant ones.
+    await page.reload();
+    await expect(page.locator('#policy-form [name=os_min]')).toHaveValue('16');
+    await expect(count).toHaveText('· 0 of 1 meet it');
+
+    await page.locator('#policy summary').click();
+    await page.locator('#policy-form [name=firewall]').uncheck();
+    await page.locator('#policy-form [name=os_min]').fill('15');
+    await page.getByRole('button', { name: 'Save policy' }).click();
+    await expect(count).toHaveText('· 1 of 1 meet it');
+    await expect(mine.locator('.meta')).not.toContainText('Not compliant');
+  } finally {
+    await host.stop();
+  }
+});

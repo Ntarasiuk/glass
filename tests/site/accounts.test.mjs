@@ -380,3 +380,29 @@ test('an action or enrollment goes only to a computer on the signed-in account, 
   assert.equal(offline.status, 409);
   assert.match(offline.body.error, /offline/);
 });
+
+test('an account keeps a policy: only its own fields, sized and typed, its own, gone with the account', async () => {
+  const { browser, key } = await newAccount();
+  assert.deepEqual((await browser.call('/api/account/policy')).body.policy, { filevault: false, firewall: false, glass_current: false, disk_free_gb: 0, fresh_hours: 0, os_min: '' });
+  assert.equal((await new Browser().call('/api/account/policy')).status, 401);
+  assert.equal((await new Browser().call('/api/account/policy', { method: 'PUT', body: {} })).status, 401);
+  assert.equal((await browser.call('/api/account/policy', { method: 'PUT', body: { filevault: true }, origin: 'https://evil.example' })).status, 403);
+
+  const saved = await browser.call('/api/account/policy', { method: 'PUT', body: { filevault: true, firewall: 'yes', glass_current: true, disk_free_gb: 50.4, fresh_hours: -3, os_min: '15.1', extra: 'nope' } });
+  assert.deepEqual(saved.body.policy, { filevault: true, firewall: false, glass_current: true, disk_free_gb: 50, fresh_hours: 0, os_min: '15.1' });
+  assert.deepEqual((await browser.call('/api/account/policy')).body.policy, saved.body.policy);
+  // A bad version is dropped, huge numbers are capped.
+  const odd = (await browser.call('/api/account/policy', { method: 'PUT', body: { os_min: '15; drop table', disk_free_gb: 1e12, fresh_hours: 1e9 } })).body.policy;
+  assert.equal(odd.os_min, '');
+  assert.equal(odd.disk_free_gb, 100000);
+  assert.equal(odd.fresh_hours, 8760);
+
+  // Another account has its own.
+  const { browser: other } = await newAccount();
+  assert.equal((await other.call('/api/account/policy')).body.policy.filevault, false);
+
+  // Gone with the account.
+  await browser.call('/api/account/policy', { method: 'PUT', body: { filevault: true } });
+  await browser.call('/api/account', { method: 'DELETE' });
+  assert.equal((await signIn(new Browser(), key)).body.unknown, true);
+});

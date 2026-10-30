@@ -41,6 +41,13 @@
     .list .acts button, .list .manage { padding: 6px 12px; border-radius: 10px; border: 1px solid rgb(255 255 255 / 0.18); background: rgb(255 255 255 / 0.06); color: inherit; font: inherit; font-size: 14px; cursor: pointer; }
     .list .acts button:disabled { opacity: 0.5; cursor: default; }
     .list .acts .act-status { flex-basis: 100%; font-size: 13px; color: var(--text-faint); white-space: pre-wrap; overflow-wrap: anywhere; }
+    #policy { margin: 0 0 14px; padding: 12px 16px; border-radius: 14px; background: rgb(255 255 255 / 0.04); }
+    #policy summary { cursor: pointer; font-weight: 600; }
+    #policy summary .count { color: var(--text-faint); font-weight: 400; }
+    #policy form { display: grid; gap: 10px; margin-top: 12px; }
+    #policy label { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    #policy input[type=number], #policy input[type=text] { width: 90px; padding: 6px 8px; border-radius: 8px; border: 1px solid rgb(255 255 255 / 0.15); background: rgb(0 0 0 / 0.3); color: inherit; font: inherit; }
+    #policy .save { display: flex; gap: 12px; align-items: center; }
     #find { width: 100%; box-sizing: border-box; margin: 4px 0 12px; padding: 12px 14px; border-radius: 12px; border: 1px solid rgb(255 255 255 / 0.12); background: rgb(0 0 0 / 0.3); color: inherit; font: inherit; }
     .list a.open { flex: none; padding: 7px 14px; border-radius: 10px; background: var(--accent); color: #04121f; font-weight: 650; font-size: 14px; text-decoration: none; }
     .list button.forget { flex: none; padding: 0 4px; border: 0; background: none; color: var(--text-faint); font-size: 18px; line-height: 1; cursor: pointer; }
@@ -83,6 +90,19 @@
     <section class="hidden" id="mine" aria-labelledby="mine-title">
       <h2 id="mine-title">On your account</h2>
       <p class="note" id="mine-note"></p>
+      <details id="policy" class="hidden">
+        <summary>Policy <span class="count" id="policy-count"></span></summary>
+        <form id="policy-form">
+          <label><input type="checkbox" name="filevault"> Disk encryption on (FileVault)</label>
+          <label><input type="checkbox" name="firewall"> Firewall on</label>
+          <label><input type="checkbox" name="glass_current"> Glass up to date</label>
+          <label>Free disk space at least <input type="number" name="disk_free_gb" min="0" max="100000"> GB</label>
+          <label>macOS at least <input type="text" name="os_min" inputmode="decimal" placeholder="15.1" autocomplete="off"></label>
+          <label>Details reported within <input type="number" name="fresh_hours" min="0" max="8760"> hours</label>
+          <div class="save"><button type="submit">Save policy</button><span class="form-status" id="policy-status" role="status"></span></div>
+          <p class="note">A check that can't be made (a Linux computer has no FileVault) isn't failed. 0 or empty turns a rule off.</p>
+        </form>
+      </details>
       <input id="find" type="search" class="hidden" placeholder="Search your computers" aria-label="Search your computers" autocomplete="off">
       <ul class="list" id="mine-list"></ul>
     </section>
@@ -432,14 +452,75 @@
       if (!out.ok) throw new Error(out.message);
     }
 
+    // ---- Policy: the rules, checked here against each computer's report ----
+    let policy = null;
+    let latest = null; // the newest Glass release
+    const parts = (v) => (String(v ?? '').match(/\d+(\.\d+)*/)?.[0] ?? '').split('.').filter(Boolean).map(Number);
+    /** Is `have` at least `want`? `null` when either has no version to compare. */
+    function atLeast(have, want) {
+      const a = parts(have), b = parts(want);
+      if (!a.length || !b.length) return null;
+      for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        const d = (a[i] ?? 0) - (b[i] ?? 0);
+        if (d) return d > 0;
+      }
+      return true;
+    }
+    /** What a report breaks in the policy; `null` when there's no report to check. */
+    function breaks(r) {
+      if (!r || !policy) return null;
+      const out = [];
+      if (policy.filevault && r.filevault === false) out.push('FileVault off');
+      if (policy.firewall && r.firewall === false) out.push('firewall off');
+      if (policy.disk_free_gb && r.disk_total_gb && r.disk_free_gb < policy.disk_free_gb) out.push(`under ${policy.disk_free_gb} GB free`);
+      if (policy.os_min && atLeast(r.os, policy.os_min) === false) out.push(`system older than ${policy.os_min}`);
+      if (policy.glass_current && latest && atLeast(r.version, latest) === false) out.push('Glass out of date');
+      if (policy.fresh_hours && r.at && Date.now() - r.at > policy.fresh_hours * 3600_000) out.push(`no report for ${policy.fresh_hours}+ hours`);
+      return out;
+    }
+    const hasRules = () => policy && (policy.filevault || policy.firewall || policy.glass_current || policy.disk_free_gb || policy.os_min || policy.fresh_hours);
+
+    function fillPolicy() {
+      const f = $('policy-form');
+      for (const el of f.elements) {
+        if (!el.name) continue;
+        if (el.type === 'checkbox') el.checked = Boolean(policy[el.name]);
+        else el.value = policy[el.name] || '';
+      }
+    }
+    $('policy-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target.elements;
+      const body = {
+        filevault: f.filevault.checked, firewall: f.firewall.checked, glass_current: f.glass_current.checked,
+        disk_free_gb: Number(f.disk_free_gb.value) || 0, fresh_hours: Number(f.fresh_hours.value) || 0, os_min: f.os_min.value.trim(),
+      };
+      try {
+        ({ policy } = await api('/api/account/policy', { method: 'PUT', body }));
+        fillPolicy();
+        $('policy-status').textContent = 'Saved.';
+        drawMine();
+      } catch (err) {
+        $('policy-status').textContent = err.message;
+      }
+    });
+
+    /** The facts about a computer, then what it breaks of the policy. */
+    function metaFor(c) {
+      const out = facts(c.report);
+      const bad = breaks(c.report);
+      if (bad?.length) out.push({ text: `Not compliant: ${bad.join(', ')}`, warn: true });
+      return out;
+    }
+
     let mineList = [];
     function drawMine() {
       const q = $('find').value.trim().toLowerCase();
-      const shown = mineList.filter((c) => !q || [c.name, c.online ? 'online' : 'offline', ...facts(c.report).map((f) => f.text)].join(' ').toLowerCase().includes(q));
+      const shown = mineList.filter((c) => !q || [c.name, c.online ? 'online' : 'offline', ...metaFor(c).map((f) => f.text)].join(' ').toLowerCase().includes(q));
       $('mine-list').replaceChildren(...shown.map((c) => row({
         name: c.name,
         on: c.online,
-        meta: facts(c.report),
+        meta: metaFor(c),
         acts: c.report?.managed ? { build: () => actionsPanel(c), wasOpen: openActs.has(c.id), remember: (on) => (on ? openActs.add(c.id) : openActs.delete(c.id)) } : null,
         href: `/app/#r=${encodeURIComponent(c.key)}`,
         onForget: async () => {
@@ -448,8 +529,16 @@
           showMine();
         },
       })));
+      drawPolicy();
     }
     $('find').addEventListener('input', drawMine);
+    function drawPolicy() {
+      $('policy').classList.toggle('hidden', !account || !mineList.length || !policy);
+      if (!policy) return;
+      const checked = mineList.map((c) => breaks(c.report)).filter(Boolean);
+      const meet = checked.filter((b) => !b.length).length;
+      $('policy-count').textContent = !hasRules() ? '· none set' : `· ${meet} of ${checked.length} meet it${mineList.length > checked.length ? ` · ${mineList.length - checked.length} without details` : ''}`;
+    }
 
     async function showMine() {
       $('mine').classList.toggle('hidden', !account);
@@ -457,6 +546,13 @@
       if (!account) return;
       const { computers = [] } = await api('/api/account/computers').catch(() => ({}));
       mineList = computers;
+      const [p, v] = await Promise.all([api('/api/account/policy').catch(() => null), fetch('/version.json').then((r) => r.json()).catch(() => ({}))]);
+      if (p) {
+        const first = !policy;
+        policy = p.policy;
+        if (first || !$('policy').open) fillPolicy();
+      }
+      latest = v.version ?? latest;
       say('mine-note', computers.length
         ? 'Signed in on any device, these are here. A computer shows its details once you run `glass fleet on` on it.'
         : 'To add a computer, run `glass account add` on it and open the link here.');
