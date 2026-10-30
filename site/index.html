@@ -220,9 +220,36 @@
       <h2 id="uses-h">How people use Glass</h2>
 
       <article class="use main lg-glass-surface">
-        <p class="kind">Most common</p>
-        <h3>Tailscale + Glass: your own computers, from your own devices</h3>
-        <p>Put Glass on the Mac or Linux box you want to reach and Tailscale on everything you own. Your iPad or phone opens it like a website, over your private tailnet: no ports opened, no account, nothing to install on the device in your hand.</p>
+        <div class="top">
+          <div>
+            <p class="kind">Most common</p>
+            <h3>Tailscale + Glass: your own computers, from your own devices</h3>
+            <p>Put Glass on the Mac or Linux box you want to reach and Tailscale on everything you own. Your iPad or phone opens it like a website, over your private tailnet: no ports opened, no account, nothing to install on the device in your hand.</p>
+          </div>
+          <svg class="diagram" viewBox="0 0 520 240" role="img" aria-label="An iPad, phone and laptop connect through your private Tailscale network to your computer running Glass.">
+          <g class="ln" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path class="flow" d="M64 42C130 42 130 120 190 120"/>
+            <path class="flow" d="M94 111C140 111 150 120 190 120"/>
+            <path class="flow" d="M94 172C140 172 130 120 190 120"/>
+            <path class="flow" d="M360 120H418"/>
+          </g>
+          <g class="dev" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="26" y="14" width="38" height="58" rx="8"/><path d="M40 63h10" stroke-linecap="round"/>
+            <rect x="14" y="86" width="80" height="54" rx="8"/>
+            <rect x="12" y="152" width="76" height="42" rx="5"/><path d="M4 202h92" stroke-linecap="round"/>
+          </g>
+          <text class="cap" x="52" y="228" text-anchor="middle">Your devices</text>
+          <rect class="node" x="190" y="64" width="170" height="112" rx="22"/>
+          <g class="ts" transform="translate(212 92) scale(.84)"><path d="M3.5 17.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM14 17.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM14 28a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM24.5 17.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><g opacity=".4"><path d="M3.5 28a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM24.5 28a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM3.5 7a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM14 7a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM24.5 7a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/></g><path d="M46.17 24.5c.91 0 1.66-.09 2.54-.26v-3.31c-.54.2-1.14.26-1.71.26-1.4 0-1.91-.69-1.91-2v-6.74h3.62V9.15h-3.62V4.24h-3.99v4.91H38.5v3.31h2.6v7.1c0 3.14 1.65 4.94 5.07 4.94zM55.24 24.5c2.14 0 3.56-.71 4.28-1.83.06.49.23 1.14.46 1.54h3.59a9.2 9.2 0 0 1-.34-2.48v-7.82c0-3.22-2.31-5.05-6.22-5.05-2.97 0-5.28 1.11-6.56 2.74l2.28 2.25c1.03-1.14 2.34-1.74 3.94-1.74 1.94 0 2.8.66 2.8 1.63 0 .83-.57 1.4-3.65 1.4-2.97 0-5.96 1.23-5.96 4.65 0 3.17 2.28 4.71 5.39 4.71zm.8-3.02c-1.54 0-2.25-.66-2.25-1.83 0-1.03.86-1.71 2.28-1.71 2.28 0 2.91-.14 3.4-.62v1.23c0 1.63-1.37 2.93-3.43 2.93zM65.82 7.24h4.17V3.5h-4.17v3.74zm.09 16.98h3.99V9.15h-3.99v15.07zM72.81 24.21h4V3.96h-4v20.25zM85.11 24.5c4.39 0 6.64-2.31 6.64-4.74 0-2.2-1.11-3.82-4.76-4.48-2.57-.46-4.17-1.03-4.17-1.91 0-.77.91-1.31 2.45-1.31 1.37 0 2.51.46 3.37 1.45l2.54-2.14c-1.28-1.6-3.4-2.51-5.91-2.51-3.85 0-6.25 2.05-6.25 4.57 0 2.74 2.51 3.97 5.22 4.45 2.25.4 3.51.83 3.51 1.8 0 .83-.88 1.51-2.57 1.51-1.65 0-2.94-.77-3.54-1.91l-3.37 1.6c.83 2.05 3.65 3.62 6.82 3.62zM100.69 24.5c2.85 0 4.9-1.14 6.45-3.71l-3.2-1.63c-.6 1.2-1.57 2.03-3.26 2.03-2.54 0-3.91-2.05-3.91-4.53 0-2.48 1.46-4.48 3.91-4.48 1.54 0 2.57.83 3.17 2.08l3.22-1.71c-1.08-2.37-3.22-3.68-6.39-3.68-5.22 0-7.9 3.82-7.9 7.79 0 4.31 3.25 7.84 7.9 7.84zM113.5 24.5c2.14 0 3.56-.71 4.28-1.83.06.49.23 1.14.46 1.54h3.59a9.2 9.2 0 0 1-.34-2.48v-7.82c0-3.22-2.31-5.05-6.22-5.05-2.97 0-5.28 1.11-6.56 2.74l2.28 2.25c1.03-1.14 2.34-1.74 3.94-1.74 1.94 0 2.8.66 2.8 1.63 0 .83-.57 1.4-3.65 1.4-2.97 0-5.96 1.23-5.96 4.65 0 3.17 2.28 4.71 5.39 4.71zm.8-3.02c-1.54 0-2.25-.66-2.25-1.83 0-1.03.86-1.71 2.28-1.71 2.28 0 2.91-.14 3.4-.62v1.23c0 1.63-1.37 2.93-3.43 2.93zM123.83 24.21h4V3.96h-4v20.25zM137.41 24.5c2.94 0 5.31-1.17 6.62-3.25l-3.02-1.94c-.8 1.26-1.85 1.94-3.6 1.94-1.97 0-3.4-1.08-3.77-3.2H145v-1.4c0-3.96-2.42-7.79-7.62-7.79-4.93 0-7.62 3.85-7.62 7.82 0 5.65 4.25 7.82 7.65 7.82zm-3.62-9.59c.63-1.91 1.94-2.8 3.68-2.8 1.97 0 3.17 1.17 3.57 2.8h-7.25z"/></g>
+          <text class="sub" x="275" y="146" text-anchor="middle">private tailnet</text>
+          <text class="sub dim" x="275" y="164" text-anchor="middle">end-to-end encrypted</text>
+          <rect class="dev2" x="418" y="76" width="92" height="66" rx="8"/>
+          <image href="/icon.svg" x="446" y="91" width="36" height="36"/>
+          <path class="dev2" d="M464 142v18M444 162h40"/>
+          <text class="cap" x="464" y="228" text-anchor="middle">Your computer</text>
+          <text class="addr" x="464" y="188" text-anchor="middle">mac-studio.ts.net</text>
+        </svg>
+        </div>
         <ol class="steps">
           <li><strong>Install Tailscale</strong><span>On the computer and on your iPad, phone or laptop, signed in to the same account. The free plan is enough.</span></li>
           <li><strong>Run <code>curl -fsSL glassdesk.dev | sh</code></strong><span>Then <code>glass setup</code> on the computer. It checks Tailscale, starts Glass in the background and asks for the two macOS permissions.</span></li>
@@ -235,6 +262,11 @@
         <p class="kind">Support</p>
         <h3>Help someone who has nothing installed</h3>
         <p>A parent, a friend, a customer. They paste one line; you type the nine-digit code they read out. They approve before you see anything, and Stop sharing removes every trace.</p>
+        <div class="vis support" aria-hidden="true">
+          <div class="pane"><em>Their computer</em><b>482 913 075</b><span>Share my screen with whoever has this code</span></div>
+          <svg viewBox="0 0 40 24"><path d="M2 12h32m-8-8 8 8-8 8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <div class="pane"><em>glassdesk.dev/help</em><b class="ok">You're helping</b><span>They approved. Stop sharing ends it.</span></div>
+        </div>
         <div class="command lg-glass-surface" data-lg-preset="control" data-copy="curl -fsSL glassdesk.dev/help | sh">
           <code><span class="prompt" aria-hidden="true">$</span> curl -fsSL glassdesk.dev/help | sh</code>
           <button type="button" class="copy">Copy</button>
@@ -246,6 +278,12 @@
         <p class="kind">Fleet <span class="badge">New</span></p>
         <h3>Look after a handful of computers</h3>
         <p>Sign in with a passkey to see every computer on one page: online or not, disk, FileVault, firewall, Glass version. Check them against your rules, then update or restart them without opening a screen. Each action is signed by your passkey and checked by the computer itself.</p>
+        <div class="vis fleet" aria-hidden="true">
+          <div><i class="ok"></i><b>Mac Studio</b><span>macOS 15.1</span><em class="ok">Meets policy</em></div>
+          <div><i class="warn"></i><b>Mac mini</b><span>macOS 15.1</span><em class="warn">FileVault off</em></div>
+          <div><i class="ok"></i><b>Omarchy desktop</b><span>Arch Linux</span><em class="ok">Meets policy</em></div>
+          <div><i class="off"></i><b>MacBook Air</b><span>Glass 0.8</span><em>Offline 3 days</em></div>
+        </div>
         <div class="command lg-glass-surface" data-lg-preset="control" data-copy="glass account add && glass fleet on">
           <code><span class="prompt" aria-hidden="true">$</span> glass account add &amp;&amp; glass fleet on</code>
           <button type="button" class="copy">Copy</button>

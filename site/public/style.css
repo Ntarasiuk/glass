@@ -236,6 +236,42 @@ header.site nav a:hover, footer.site a:hover { color: var(--text); }
 .use.main .after { margin-top: 24px; padding-top: 0; }
 .use .steps + .after { margin-top: 24px; }
 
+.use.main .top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: clamp(20px, 4vw, 56px); align-items: center; }
+.diagram { width: 100%; height: auto; color: var(--text-faint); overflow: visible; }
+.diagram .ln { color: var(--line-strong); }
+.diagram .node { fill: rgb(255 255 255 / 0.04); stroke: var(--accent); stroke-width: 1.5; }
+.diagram .ts { fill: var(--text); }
+.diagram .sub { fill: var(--text-dim); font: 600 13px var(--display); }
+.diagram .sub.dim { fill: var(--text-faint); font-weight: 500; font-size: 12px; }
+.diagram .cap { fill: var(--text-faint); font: 650 12px var(--display); letter-spacing: 0.08em; text-transform: uppercase; }
+.diagram .addr { fill: var(--text-faint); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.diagram .dev2 { fill: rgb(255 255 255 / 0.04); stroke: currentColor; stroke-width: 2; }
+.diagram path.dev2 { fill: none; stroke-linecap: round; }
+.diagram .flow { stroke: var(--accent); stroke-dasharray: 2 12; opacity: 0.9; }
+@media (prefers-reduced-motion: no-preference) { .diagram .flow { animation: flow 1.4s linear infinite; } }
+@keyframes flow { to { stroke-dashoffset: -28; } }
+
+.vis { margin-top: 20px; }
+.vis.support { display: grid; grid-template-columns: 1fr 34px 1fr; gap: 10px; align-items: center; }
+.vis.support svg { width: 34px; color: var(--accent); }
+.vis .pane { padding: 14px 14px 16px; border-radius: 14px; background: rgb(255 255 255 / 0.04); box-shadow: inset 0 0 0 1px var(--line); display: grid; gap: 5px; min-width: 0; }
+.vis .pane em { font-style: normal; font: 650 11px var(--display); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
+.vis .pane b { font: 650 22px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.02em; color: var(--text); }
+.vis .pane b.ok { font: 650 20px var(--display); color: #5fd38d; letter-spacing: -0.01em; }
+.vis .pane span { font-size: 13px; line-height: 1.35; color: var(--text-dim); }
+
+.vis.fleet { display: grid; border-radius: 14px; background: rgb(255 255 255 / 0.04); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
+.vis.fleet div { display: grid; grid-template-columns: 10px minmax(0, 1.3fr) minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 11px 14px; font-size: 14px; }
+.vis.fleet div + div { border-top: 1px solid var(--line); }
+.vis.fleet b { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vis.fleet span { color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vis.fleet i { width: 9px; height: 9px; border-radius: 50%; background: var(--text-faint); }
+.vis.fleet i.ok { background: #5fd38d; box-shadow: 0 0 8px #5fd38d88; }
+.vis.fleet i.warn { background: #f2b84b; box-shadow: 0 0 8px #f2b84b88; }
+.vis.fleet em { font-style: normal; font-size: 12.5px; padding: 2px 9px; border-radius: 99px; background: rgb(255 255 255 / 0.07); color: var(--text-dim); white-space: nowrap; }
+.vis.fleet em.ok { color: #5fd38d; background: #5fd38d1c; }
+.vis.fleet em.warn { color: #f2b84b; background: #f2b84b1f; }
+
 /* Three reasons, then the way to everything else */
 .pillars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px 40px; padding-top: 0; }
 .pillars div { padding: 22px 24px 24px; border-radius: 22px; }
@@ -340,9 +376,14 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
   .hero, .agent, .feedback { grid-template-columns: minmax(0, 1fr); }
   .pillars { grid-template-columns: 1fr; gap: 20px; }
   .uses { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .use.main .top { grid-template-columns: minmax(0, 1fr); }
   .steps { grid-template-columns: 1fr; gap: 36px; }
 }
 @media (max-width: 560px) {
+  .vis.fleet div { grid-template-columns: 10px minmax(0, 1fr) auto; }
+  .vis.fleet span { display: none; }
+  .vis.support { grid-template-columns: 1fr; }
+  .vis.support svg { transform: rotate(90deg); justify-self: center; }
   .features, .all-features .features { grid-template-columns: 1fr; }
   header.site nav { gap: 16px; font-size: 14px; }
   header.site { padding-inline: 14px 18px; }
