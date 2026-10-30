@@ -26,7 +26,7 @@ Features:
 ## Guides and comparisons
 
 - [How to control a Mac from an iPad, wirelessly or from afar](https://glassdesk.dev/guides/control-mac-from-ipad): Four ways to control a Mac from an iPad, wirelessly or from anywhere: what Sidecar, Universal Control, Screen Sharing and Glass can and can't do.
-- [Best free and open-source remote desktops for Mac (2026)](https://glassdesk.dev/guides/free-remote-desktop-mac): Free and open-source remote desktops for a Mac compared honestly: Glass, RustDesk, Chrome Remote Desktop, Moonlight, Screen Sharing, TeamViewer, Parsec.
+- [Best free remote desktop software for Mac (2026)](https://glassdesk.dev/guides/free-remote-desktop-mac): The best free remote desktop software for Mac, compared honestly: Glass, RustDesk, Chrome Remote Desktop, Moonlight, Screen Sharing, TeamViewer, Parsec.
 - [iPad as a second Mac display: Sidecar, Luna, Duet, Glass](https://glassdesk.dev/guides/ipad-second-display): How to use an iPad as a second monitor for a Mac: Sidecar, Luna Display, Duet Display and Glass compared on price, range, wired or wireless.
 - [Remote desktop on Wayland: GNOME, KDE, Hyprland and wlroots](https://glassdesk.dev/guides/wayland-remote-desktop): Which remote desktops work on Linux with Wayland: GNOME Remote Desktop, KRdp, wayvnc, RustDesk and Glass, what each supports, and how to set one up.
 - [Remote support with nothing to install: free tools compared](https://glassdesk.dev/guides/remote-support-without-installing): Free ways to help someone with their computer remotely when they can't install software: Glass, TeamViewer QuickSupport, AnyDesk, Chrome Remote Desktop.
