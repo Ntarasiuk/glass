@@ -107,9 +107,10 @@ header.site nav a:hover, footer.site a:hover { color: var(--text); }
 .hero-solo .hero-copy { display: grid; justify-items: center; }
 .hero-solo .lede, .hero-solo .hint { margin-inline: auto; }
 .hero-solo .command { width: min(520px, 100%); text-align: left; }
-/* The logo, rendered as liquid glass; its black background blends into the page. */
+/* The logo, rendered as liquid glass; its black background blends into the page. The artwork fills about
+   55% of the frame, so the frame is sized to make the logo about 45% of the window's height. */
 .mark {
-  display: block; width: clamp(170px, 21vw, 240px); height: auto; aspect-ratio: 10 / 9; margin: -28px 0 2px; mix-blend-mode: screen;
+  --w: min(100vw, calc(80vh * 10 / 9)); display: block; width: min(var(--w), 100%); height: auto; aspect-ratio: 10 / 9; margin: calc(min(var(--w), 100%) * -0.16) 0 calc(min(var(--w), 100%) * -0.13); mix-blend-mode: screen;
   mask: linear-gradient(90deg, transparent, #000 9% 91%, transparent), linear-gradient(transparent, #000 9% 91%, transparent);
   mask-composite: intersect;
 }
