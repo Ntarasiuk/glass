@@ -13,6 +13,28 @@ marked.use({
       const id = text.toLowerCase().replace(/<[^>]+>|`/g, '').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '-');
       return `<h${depth} id="${id}">${this.parser.parseInline(tokens)}</h${depth}>\n`;
     },
+    // Tables: the row label is a header cell, a leading Yes / No / None becomes a coloured pill (the word stays
+    // in the text), Glass's own row or column is highlighted, and the table scrolls inside its own frame.
+    table(t) {
+      const inline = (c) => this.parser.parseInline(c.tokens);
+      const isUs = (c) => /^Glass\b/.test(c.text.replace(/[*_`]/g, ''));
+      const usCol = t.header.findIndex((c, i) => i > 0 && isUs(c));
+      const value = (c) => {
+        const html = inline(c);
+        const m = c.text.replace(/[*_`]/g, '').match(/^(Yes|No|None)\b/);
+        if (!m) return html;
+        const rest = html.replace(new RegExp(`^(<[^>]+>)*${m[1]}`), '').replace(/^[\s;,:]+/, '').trim();
+        return `<span class="pill ${m[1] === 'No' ? 'no' : 'yes'}">${m[1]}</span>${rest ? ` <span class="note">${rest}</span>` : ''}`;
+      };
+      const head = t.header.map((c, i) => `<th scope="col"${i === usCol ? ' class="us"' : ''}>${inline(c)}</th>`).join('');
+      const rows = t.rows.map((r) => {
+        const us = isUs(r[0]);
+        const cells = r.map((c, i) => (i === 0 ? `<th scope="row">${inline(c)}</th>` : `<td${i === usCol ? ' class="us"' : ''}>${value(c)}</td>`)).join('');
+        return `<tr${us ? ' class="us"' : ''}>${cells}</tr>`;
+      }).join('\n');
+      const wide = t.header.length > 5 ? ' wide' : '';
+      return `<div class="table-wrap${wide}" role="region" aria-label="Comparison table" tabindex="0"><table><thead><tr>${head}</tr></thead><tbody>\n${rows}\n</tbody></table></div>\n`;
+    },
   },
 });
 
