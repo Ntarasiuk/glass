@@ -5,7 +5,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { BINARY, Host, expectVideo, freePort, test, expect, toolbarClick } from './harness.mjs';
 
 const SITE = resolve(import.meta.dirname, '../../site');
@@ -43,7 +43,7 @@ test.afterAll(() => {
 });
 
 async function remoteHost() {
-  const host = await new Host({ env: { GLASS_BASE: base } }).start();
+  const host = await new Host({ env: { GLASS_BASE: base, GLASS_FLEET_FAKE: '1' } }).start();
   // `glass link` needs the running host's status file.
   await expect.poll(() => { try { return host.cli('status', '--json').includes('"running":true'); } catch { return false; } }).toBe(true);
   return host;
@@ -254,6 +254,174 @@ test('/computers: glass account add puts a computer on the account, once, until 
     // Without remote access, there's no link to make.
     host.cli('remote', 'off');
     expect(() => host.cli('account', 'add')).toThrow(/remote access is off/);
+  } finally {
+    await host.stop();
+  }
+});
+
+test('/computers: glass fleet on shows what the computer says about itself, and off takes it back', async ({ page }) => {
+  const host = await remoteHost();
+  try {
+    host.cli('remote', 'on');
+    await passkeys(page);
+    await page.goto(`${base}/computers`);
+    await page.getByRole('button', { name: 'Create an account' }).click();
+    await expect(page.locator('#account-note')).toHaveText('Signed in with a passkey.');
+    const { url, name } = JSON.parse(host.cli('account', 'add', '--json'));
+    await page.goto(url);
+    await page.getByRole('button', { name: `Add ${name}` }).click();
+    const mine = page.locator('#mine-list li');
+    await expect(mine).toHaveCount(1);
+    await expect(mine.locator('.meta')).toHaveCount(0); // nothing is sent until it's turned on
+
+    expect(host.cli('fleet')).toContain('off');
+    expect(host.cli('fleet', 'on')).toContain('every 15 minutes');
+    expect(JSON.parse(host.cli('fleet', 'report', '--json'))).toMatchObject({ model: 'MacBook Pro', filevault: true });
+    expect(host.cli('fleet')).toContain('last sent');
+
+    await page.reload();
+    const meta = mine.locator('.meta');
+    await expect(meta).toContainText('MacBook Pro Apple M3 Max');
+    await expect(meta).toContainText('64 GB memory');
+    await expect(meta).toContainText('FileVault on');
+    await expect(meta.locator('.warn')).toHaveText('firewall off'); // the one thing to look at
+    await expect(meta).toContainText('reported just now');
+
+    expect(host.cli('fleet', 'off')).toContain('deleted');
+    await page.reload();
+    await expect(mine.locator('.meta')).toHaveCount(0);
+    expect(host.cli('fleet')).toContain('off');
+  } finally {
+    await host.stop();
+  }
+});
+
+test('/computers: a passkey you pin lets the account run actions on a computer, and nothing else can', async ({ page }) => {
+  const host = await remoteHost();
+  try {
+    host.cli('remote', 'on');
+    await passkeys(page);
+    await page.goto(`${base}/computers`);
+    await page.getByRole('button', { name: 'Create an account' }).click();
+    await expect(page.locator('#account-note')).toHaveText('Signed in with a passkey.');
+    const { url, name } = JSON.parse(host.cli('account', 'add', '--json'));
+    await page.goto(url);
+    await page.getByRole('button', { name: `Add ${name}` }).click();
+    const mine = page.locator('#mine-list li');
+    await expect(mine).toHaveCount(1);
+    host.cli('fleet', 'report');
+    // The computer has to be connected to be asked anything.
+    await expect(async () => {
+      await page.reload();
+      await expect(mine.locator('.detail')).toHaveText('online', { timeout: 1000 });
+    }).toPass({ timeout: 15_000 });
+    // Nothing is set up yet: no Actions button, and the computer refuses a command.
+    await expect(mine.locator('button.manage')).toHaveCount(0);
+    expect(host.cli('fleet', 'manage', 'status')).toContain('0 passkeys');
+
+    // Pin the passkey with the computer's link; the page vouches for it with a code only the link holds.
+    const { url: manageUrl } = JSON.parse(host.cli('fleet', 'manage', '--json'));
+    expect(manageUrl).toMatch(new RegExp(`^${base}/computers#manage=[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{22}$`));
+    await page.goto(manageUrl);
+    expect(page.url()).toBe(`${base}/computers`); // the code leaves the address bar
+    await expect(page.locator('#claim-title')).toHaveText(`Let your account manage ${name}?`);
+    await page.getByRole('button', { name: 'Allow' }).click();
+    await expect(page.locator('#claim')).toBeHidden();
+    expect(host.cli('fleet', 'manage', 'status')).toContain('1 passkey can run actions');
+    // The link was for one passkey, once.
+    await page.goto(manageUrl);
+    await expect(page.locator('#claim-title')).toHaveText(`Let your account manage ${name}?`);
+    await page.getByRole('button', { name: 'Allow' }).click();
+    await expect(page.locator('#claim-status')).toContainText('no enrollment is open');
+    await page.getByRole('button', { name: 'Not now' }).click();
+
+    // The computer reports that it can be managed (at once, on pinning); then the page offers actions.
+    await expect(async () => {
+      await page.reload();
+      await expect(mine.locator('button.manage')).toHaveCount(1, { timeout: 1000 });
+    }).toPass({ timeout: 20_000 });
+    await mine.locator('button.manage').click();
+    const status = mine.locator('.act-status');
+
+    // A refresh, signed by the passkey and checked by the computer.
+    await mine.getByRole('button', { name: 'Refresh details' }).click();
+    await expect(status).toContainText('Details sent', { timeout: 15_000 });
+
+    // A script you placed, run by name; and one you didn't place, or that others can write, doesn't run.
+    const scripts = join(host.configDir, 'fleet', 'scripts');
+    mkdirSync(scripts, { recursive: true });
+    writeFileSync(join(scripts, 'hello.sh'), '#!/bin/sh\necho hello from the fleet\n', { mode: 0o755 });
+    writeFileSync(join(scripts, 'loose.sh'), '#!/bin/sh\necho no\n', { mode: 0o777 });
+    chmodSync(join(scripts, 'loose.sh'), 0o777);
+    let script = 'hello.sh';
+    page.on('dialog', (d) => d.accept(d.type() === 'prompt' ? script : undefined));
+    await mine.getByRole('button', { name: 'Run a script…' }).click();
+    await expect(status).toContainText('hello from the fleet', { timeout: 15_000 });
+    script = 'loose.sh';
+    await mine.getByRole('button', { name: 'Run a script…' }).click();
+    await expect(status).toContainText('can be written by others', { timeout: 15_000 });
+    script = 'missing.sh';
+    await mine.getByRole('button', { name: 'Run a script…' }).click();
+    await expect(status).toContainText('no script missing.sh', { timeout: 15_000 });
+
+    // Everything that ran is in the computer's own log.
+    const log = host.cli('fleet', 'manage', 'status');
+    expect(log).toContain('report');
+    expect(log).toContain('hello.sh');
+
+    // Restart Glass is recorded (test mode doesn't restart), and `off` forgets the passkey.
+    await mine.getByRole('button', { name: 'Restart Glass' }).click();
+    await expect(status).toContainText('Restarting Glass', { timeout: 15_000 });
+    await expect.poll(async () => JSON.stringify(await host.get('/test/records?kind=restart'))).toContain('glass');
+    expect(host.cli('fleet', 'manage', 'off')).toContain('1 passkey forgotten');
+    await mine.getByRole('button', { name: 'Refresh details' }).click();
+    await expect(status).toContainText("isn't set up for actions", { timeout: 15_000 });
+  } finally {
+    await host.stop();
+  }
+});
+
+test('/computers: a policy flags the computers that break it, and says how many meet it', async ({ page }) => {
+  const host = await remoteHost();
+  try {
+    host.cli('remote', 'on');
+    await passkeys(page);
+    await page.goto(`${base}/computers`);
+    await page.getByRole('button', { name: 'Create an account' }).click();
+    await expect(page.locator('#account-note')).toHaveText('Signed in with a passkey.');
+    const { url, name } = JSON.parse(host.cli('account', 'add', '--json'));
+    await page.goto(url);
+    await page.getByRole('button', { name: `Add ${name}` }).click();
+    const mine = page.locator('#mine-list li');
+    await expect(mine).toHaveCount(1);
+    host.cli('fleet', 'report'); // the fake report: FileVault on, firewall off, 412 of 994 GB free, macOS 15.1
+    await page.reload();
+    const count = page.locator('#policy-count');
+    await expect(count).toHaveText('· none set');
+    await expect(mine.locator('.meta')).not.toContainText('Not compliant');
+
+    await page.locator('#policy summary').click();
+    await page.locator('#policy-form [name=firewall]').check();
+    await page.locator('#policy-form [name=filevault]').check();
+    await page.locator('#policy-form [name=os_min]').fill('16');
+    await page.locator('#policy-form [name=disk_free_gb]').fill('100');
+    await page.getByRole('button', { name: 'Save policy' }).click();
+    await expect(page.locator('#policy-status')).toHaveText('Saved.');
+    // Firewall is off and macOS 15.1 is older than 16; FileVault is on and the disk has room.
+    await expect(mine.locator('.meta .warn', { hasText: 'Not compliant' })).toHaveText('Not compliant: firewall off, system older than 16');
+    await expect(count).toHaveText('· 0 of 1 meet it');
+
+    // It's kept: another page load, and searching finds the non-compliant ones.
+    await page.reload();
+    await expect(page.locator('#policy-form [name=os_min]')).toHaveValue('16');
+    await expect(count).toHaveText('· 0 of 1 meet it');
+
+    await page.locator('#policy summary').click();
+    await page.locator('#policy-form [name=firewall]').uncheck();
+    await page.locator('#policy-form [name=os_min]').fill('15');
+    await page.getByRole('button', { name: 'Save policy' }).click();
+    await expect(count).toHaveText('· 1 of 1 meet it');
+    await expect(mine.locator('.meta')).not.toContainText('Not compliant');
   } finally {
     await host.stop();
   }

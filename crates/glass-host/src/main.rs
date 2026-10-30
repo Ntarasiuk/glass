@@ -1,5 +1,7 @@
 mod access;
 mod account;
+mod actions;
+mod fleet;
 #[cfg(target_os = "macos")]
 mod app;
 mod computer;
@@ -250,6 +252,17 @@ enum Command {
     Account {
         #[arg(value_parser = ["add", "remove"])]
         action: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Tell your glassdesk.dev account what state this computer is in (model, system,
+    /// memory, disk, encryption, firewall, uptime, battery), signed by this computer. Off
+    /// until you turn it on.
+    Fleet {
+        #[arg(value_parser = ["on", "off", "status", "report", "manage"], default_value = "status")]
+        action: String,
+        /// With `manage`: `off` or `status`; otherwise a link to let your account run actions here.
+        arg: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -617,6 +630,88 @@ fn account_cli(action: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn fleet_cli(action: &str, arg: Option<&str>, json: bool) -> Result<()> {
+    match action {
+        "manage" => return fleet_manage(arg, json),
+        "on" => {
+            fleet::set_enabled(true)?;
+            println!(
+                "This computer will tell your glassdesk.dev account its model, system, memory, disk space, FileVault and firewall state, uptime, battery and Glass version, every 15 minutes (only if it's on an account: glass account add). Nothing else leaves it. Turn it off, and delete what was sent, with: glass fleet off"
+            );
+            match fleet::send(false) {
+                Ok(_) => println!("First report sent."),
+                Err(e) => println!("Not sent yet: {e}"),
+            }
+        }
+        "off" => {
+            fleet::set_enabled(false)?;
+            let deleted = fleet::send(true).is_ok();
+            println!("{}", if deleted { "Stopped. What was sent has been deleted." } else { "Stopped. (Couldn't reach glassdesk.dev to delete what was sent; it goes when you run glass account remove.)" });
+        }
+        "report" => {
+            let inv = fleet::send(false)?;
+            if json {
+                println!("{}", serde_json::to_string(&inv)?);
+            } else {
+                println!("Sent: {}", serde_json::to_string_pretty(&inv)?);
+            }
+        }
+        _ => {
+            let on = fleet::enabled();
+            let last = fleet::last_sent();
+            if json {
+                println!("{}", serde_json::json!({ "enabled": on, "last_sent_secs_ago": last }));
+            } else if !on {
+                println!("Fleet reporting is off (glass fleet on).");
+            } else {
+                match last {
+                    Some(s) => println!("Fleet reporting is on; last sent {} min ago.", s / 60),
+                    None => println!("Fleet reporting is on; nothing sent yet (the computer must be on an account: glass account add)."),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `glass fleet manage [off|status]`: let your account run actions here, signed by a passkey.
+fn fleet_manage(arg: Option<&str>, json: bool) -> Result<()> {
+    match arg {
+        Some("off") => {
+            let n = actions::forget_managers()?;
+            println!("Stopped taking actions. {n} passkey{} forgotten.", if n == 1 { "" } else { "s" });
+        }
+        Some("status") => {
+            let recent = actions::recent(5);
+            if json {
+                println!("{}", serde_json::json!({ "passkeys": actions::managers_count(), "recent": recent }));
+            } else {
+                println!("{} passkey{} can run actions here.", actions::managers_count(), if actions::managers_count() == 1 { "" } else { "s" });
+                for r in recent {
+                    println!("  {} {} {} {}", r["t"], if r["ok"] == true { "ok " } else { "no " }, r["action"].as_str().unwrap_or(""), r["message"].as_str().unwrap_or(""));
+                }
+            }
+        }
+        None => {
+            anyhow::ensure!(remote::enabled(), "remote access is off, and actions arrive over it. Turn it on with: glass remote on");
+            // The account's page offers actions on computers that say they can take them.
+            fleet::set_enabled(true)?;
+            let url = actions::start_enrollment()?;
+            if json {
+                println!("{}", serde_json::json!({ "url": url, "expires_secs": 900 }));
+            } else {
+                println!(
+                    "This also turns on fleet reporting (glass fleet off stops it). Open this where you're signed in to glassdesk.dev/computers (works once, for 15 minutes) and confirm with your passkey. Your account can then ask this computer to refresh its details, update or restart Glass, restart the computer, or run scripts you put in ~/.config/glass/fleet/scripts, each confirmed with your passkey. Stop with: glass fleet manage off\n\n{}\n{}",
+                    setup::qr(&url),
+                    url
+                );
+            }
+        }
+        Some(other) => anyhow::bail!("glass fleet manage [off|status], not {other}"),
+    }
+    Ok(())
+}
+
 /// `glass token --set`: prompts on a terminal, otherwise reads one line from stdin.
 fn set_token(path: &std::path::Path) -> Result<()> {
     use std::io::IsTerminal;
@@ -892,6 +987,7 @@ async fn async_main(args: Args) -> Result<()> {
         }
         Some(Command::Remote { action }) => remote_cli(action),
         Some(Command::Account { action, json }) => account_cli(action, *json),
+        Some(Command::Fleet { action, arg, json }) => fleet_cli(action, arg.as_deref(), *json),
         #[cfg(target_os = "macos")]
         Some(Command::DisplayTest { size, seconds }) => {
             let (w, h) = size

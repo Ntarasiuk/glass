@@ -124,7 +124,7 @@ async function signIn(browser, key, opts) {
 test('a passkey makes an account and signs in; signing out, then in again, works', async () => {
   const { browser, key, account } = await newAccount();
   assert.match(browser.cookie, /^__Host-session=/);
-  assert.deepEqual((await browser.call('/api/account')).body, { account: { passkeys: 1 } });
+  assert.equal((await browser.call('/api/account')).body.account.passkeys, 1);
 
   await browser.call('/api/account/session', { method: 'DELETE' });
   assert.equal(browser.cookie, '');
@@ -132,7 +132,7 @@ test('a passkey makes an account and signs in; signing out, then in again, works
 
   const elsewhere = new Browser();
   assert.equal((await signIn(elsewhere, key, { userHandle: account })).status, 200);
-  assert.deepEqual((await elsewhere.call('/api/account')).body, { account: { passkeys: 1 } });
+  assert.equal((await elsewhere.call('/api/account')).body.account.passkeys, 1);
 });
 
 test('a challenge works once', async () => {
@@ -170,7 +170,7 @@ test('a signed-in account adds a passkey; a signed-out browser can\'t add one to
   const { body: options } = await browser.call('/api/account/challenge', { method: 'POST', body: { mode: 'create' } });
   assert.equal(options.excludeCredentials.length, 1);
   assert.equal((await browser.call('/api/account/passkey', { method: 'POST', body: await second.created(options) })).status, 200);
-  assert.deepEqual((await browser.call('/api/account')).body, { account: { passkeys: 2 } });
+  assert.equal((await browser.call('/api/account')).body.account.passkeys, 2);
 
   // Signed out between the challenge and the passkey: refused.
   const third = await Passkey.make();
@@ -218,6 +218,12 @@ async function hostKey() {
       return { status: res.status, body: await res.json() };
     },
     signRemove: (ts) => sign(`glass-unclaim-v1\n${ts}`),
+    /** A fleet report: `data` is sent as given (a string), signed as sent. */
+    async report(data, { ts = Math.floor(Date.now() / 1000), signedData = data } = {}) {
+      const sig = await sign(`glass-fleet-v1\n${ts}\n${signedData}`);
+      const res = await fetch(`${BASE}/api/fleet/report`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key, ts, data, sig }) });
+      return { status: res.status, body: await res.json() };
+    },
   };
 }
 
@@ -269,5 +275,134 @@ test('deleting an account deletes its list of computers', async () => {
   await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } });
   await browser.call('/api/account', { method: 'DELETE' });
   assert.deepEqual((await host.remove()).body, { removed: 0 });
+  assert.equal((await signIn(new Browser(), key)).body.unknown, true);
+});
+
+const REPORT = { os: 'macOS 15.1', model: 'MacBook Pro', chip: 'Apple M3 Max', ram_gb: 64, disk_total_gb: 994, disk_free_gb: 412, filevault: true, firewall: false, uptime_h: 52, battery: 83, version: '0.9.0' };
+
+test('a computer on an account reports about itself, signed, and only its account sees it', async () => {
+  const host = await hostKey();
+  // Not on an account: nothing is kept.
+  assert.equal((await host.report(JSON.stringify(REPORT))).status, 403);
+
+  const { browser } = await newAccount();
+  const { code } = await host.claim();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } });
+
+  // Not signed by that computer, or stale: refused.
+  assert.equal((await host.report(JSON.stringify(REPORT), { signedData: '{}' })).status, 401);
+  assert.equal((await host.report(JSON.stringify(REPORT), { ts: Math.floor(Date.now() / 1000) - 3600 })).status, 400);
+  assert.equal((await host.report('not json')).status, 400);
+
+  assert.equal((await host.report(JSON.stringify(REPORT))).status, 200);
+  const { computers } = (await browser.call('/api/account/computers')).body;
+  assert.equal(computers[0].report.model, 'MacBook Pro');
+  assert.equal(computers[0].report.filevault, true);
+  assert.equal(computers[0].report.firewall, false);
+  assert.equal(computers[0].report.battery, 83);
+  assert.ok(computers[0].report.at > Date.now() - 60_000);
+
+  // Another account sees nothing of it.
+  const { browser: other } = await newAccount();
+  assert.equal((await other.call('/api/account/computers')).body.computers.length, 0);
+
+  // At most one every few seconds.
+  assert.equal((await host.report(JSON.stringify(REPORT))).status, 429);
+});
+
+test('a report keeps only the fields it may, each the right kind and size', async () => {
+  const host = await hostKey();
+  const { browser } = await newAccount();
+  const { code } = await host.claim();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } });
+  const data = JSON.stringify({ ...REPORT, os: 'x'.repeat(500), model: 'Mac\u0007Book', secret: 'nope', ram_gb: 'lots', battery: -5, filevault: 'yes' });
+  assert.equal((await host.report(data)).status, 200);
+  const r = (await browser.call('/api/account/computers')).body.computers[0].report;
+  assert.equal(r.os.length, 80);
+  assert.equal(r.model, 'MacBook');
+  assert.equal(r.secret, undefined);
+  assert.equal(r.ram_gb, undefined);
+  assert.equal(r.battery, undefined);
+  assert.equal(r.filevault, undefined);
+  assert.equal((await host.report('x'.repeat(5000))).status, 400);
+});
+
+test('a report goes when the computer asks, leaves its account, or the account is deleted', async () => {
+  const host = await hostKey();
+  const { browser } = await newAccount();
+  const { code } = await host.claim();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } });
+  await host.report(JSON.stringify(REPORT));
+  // Empty data, signed, deletes it.
+  assert.deepEqual((await host.report('')).body, { deleted: true });
+  assert.equal((await browser.call('/api/account/computers')).body.computers[0].report, undefined);
+
+  // Taken off the account (by the account, then again by the computer): the report isn't kept.
+  await new Promise((r) => setTimeout(r, 100));
+  const host2 = await hostKey();
+  const { browser: b2 } = await newAccount();
+  const c2 = await host2.claim();
+  await b2.call('/api/account/computers', { method: 'POST', body: { claim: c2.code } });
+  await host2.report(JSON.stringify(REPORT));
+  const id = (await b2.call('/api/account/computers')).body.computers[0].id;
+  await b2.call(`/api/account/computers/${id}`, { method: 'DELETE' });
+  assert.equal((await host2.report(JSON.stringify(REPORT))).status, 403);
+});
+
+test('the signed-in page gets its passkeys\' keys, to vouch for one when it lets the account manage a computer', async () => {
+  const { browser } = await newAccount();
+  const { keys } = (await browser.call('/api/account')).body.account;
+  assert.equal(keys.length, 1);
+  assert.equal(keys[0].alg, -7);
+  assert.match(keys[0].key, /^[A-Za-z0-9_-]{120,}$/);
+  assert.equal((await new Browser().call('/api/account')).body.account, null);
+});
+
+test('an action or enrollment goes only to a computer on the signed-in account, in a sane size', async () => {
+  const host = await hostKey();
+  const { browser } = await newAccount();
+  const { code } = await host.claim();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } });
+  const id = (await browser.call('/api/account/computers')).body.computers[0].id;
+  const assertion = { id: 'a', clientDataJSON: 'b', authenticatorData: 'c', signature: 'd' };
+
+  // Signed out, another site, someone else's computer, bad shapes: refused before the computer hears of it.
+  assert.equal((await new Browser().call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: '{}', assertion } })).status, 401);
+  assert.equal((await browser.call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: '{}', assertion }, origin: 'https://evil.example' })).status, 403);
+  const { browser: other } = await newAccount();
+  assert.equal((await other.call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: '{}', assertion } })).status, 404);
+  assert.equal((await browser.call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: '{}' } })).status, 400);
+  assert.equal((await browser.call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: 'x'.repeat(2000), assertion } })).status, 400);
+  assert.equal((await browser.call(`/api/account/computers/${id}/manage`, { method: 'POST', body: { cred: 'a' } })).status, 400);
+
+  // A well-formed one for a computer that isn't connected: it says so.
+  const offline = await browser.call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: '{}', assertion } });
+  assert.equal(offline.status, 409);
+  assert.match(offline.body.error, /offline/);
+});
+
+test('an account keeps a policy: only its own fields, sized and typed, its own, gone with the account', async () => {
+  const { browser, key } = await newAccount();
+  assert.deepEqual((await browser.call('/api/account/policy')).body.policy, { filevault: false, firewall: false, glass_current: false, disk_free_gb: 0, fresh_hours: 0, os_min: '' });
+  assert.equal((await new Browser().call('/api/account/policy')).status, 401);
+  assert.equal((await new Browser().call('/api/account/policy', { method: 'PUT', body: {} })).status, 401);
+  assert.equal((await browser.call('/api/account/policy', { method: 'PUT', body: { filevault: true }, origin: 'https://evil.example' })).status, 403);
+
+  const saved = await browser.call('/api/account/policy', { method: 'PUT', body: { filevault: true, firewall: 'yes', glass_current: true, disk_free_gb: 50.4, fresh_hours: -3, os_min: '15.1', extra: 'nope' } });
+  assert.deepEqual(saved.body.policy, { filevault: true, firewall: false, glass_current: true, disk_free_gb: 50, fresh_hours: 0, os_min: '15.1' });
+  assert.deepEqual((await browser.call('/api/account/policy')).body.policy, saved.body.policy);
+  // A bad version is dropped, huge numbers are capped.
+  const odd = (await browser.call('/api/account/policy', { method: 'PUT', body: { os_min: '15; drop table', disk_free_gb: 1e12, fresh_hours: 1e9 } })).body.policy;
+  assert.equal(odd.os_min, '');
+  assert.equal(odd.disk_free_gb, 100000);
+  assert.equal(odd.fresh_hours, 8760);
+
+  // Another account has its own.
+  const { browser: other } = await newAccount();
+  assert.equal((await other.call('/api/account/policy')).body.policy.filevault, false);
+
+  // Gone with the account.
+  await browser.call('/api/account/policy', { method: 'PUT', body: { filevault: true } });
+  await browser.call('/api/account', { method: 'DELETE' });
   assert.equal((await signIn(new Browser(), key)).body.unknown, true);
 });

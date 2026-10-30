@@ -44,18 +44,15 @@ p { text-wrap: pretty; }
 
 .wrap { width: min(var(--max), 100% - 40px); margin-inline: auto; }
 
-/* Ambient light behind the glass (public/glassy): fixed, so glass refracts it as the page scrolls, and
-   static, so it costs nothing at rest. The grid gives the refraction lines to bend. */
+/* The page background (dither.js) is a dithered shader drawn once; this is what shows without it. It is
+   dimmed so text stays readable, and fades out toward the bottom. The glass bends it as the page scrolls. */
 body::before {
-  content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
-  background:
-    linear-gradient(rgb(255 255 255 / 0.075) 1px, transparent 1px) 0 0 / 56px 56px,
-    linear-gradient(90deg, rgb(255 255 255 / 0.075) 1px, transparent 1px) 0 0 / 56px 56px,
-    radial-gradient(34% 30% at 16% 8%, rgb(92 178 255 / 0.55), transparent 70%),
-    radial-gradient(30% 34% at 88% 26%, rgb(150 110 255 / 0.45), transparent 70%),
-    radial-gradient(30% 26% at 28% 74%, rgb(64 200 210 / 0.30), transparent 70%),
-    radial-gradient(34% 30% at 76% 82%, rgb(230 150 110 / 0.30), transparent 70%);
-  mask: radial-gradient(140% 110% at 50% 30%, #000 45%, transparent 100%);
+  content: ""; position: fixed; inset: 0; z-index: -2; pointer-events: none;
+  background: radial-gradient(60% 50% at 20% 10%, rgb(92 178 255 / 0.16), transparent 70%), radial-gradient(50% 50% at 85% 30%, rgb(150 110 255 / 0.12), transparent 70%);
+}
+.dither {
+  position: fixed; inset: 0; z-index: -1; width: 100%; height: 100%; pointer-events: none; image-rendering: pixelated;
+  opacity: 0.34; mask: linear-gradient(#000 35%, rgb(0 0 0 / 0.45));
 }
 
 
@@ -110,9 +107,10 @@ header.site nav a:hover, footer.site a:hover { color: var(--text); }
 .hero-solo .hero-copy { display: grid; justify-items: center; }
 .hero-solo .lede, .hero-solo .hint { margin-inline: auto; }
 .hero-solo .command { width: min(520px, 100%); text-align: left; }
-/* The logo, rendered as liquid glass; its black background blends into the page. */
+/* The logo, rendered as liquid glass; its black background blends into the page. The artwork fills about
+   55% of the frame, so the frame is sized to make the logo about 45% of the window's height. */
 .mark {
-  display: block; width: clamp(170px, 21vw, 240px); height: auto; aspect-ratio: 10 / 9; margin: -28px 0 2px; mix-blend-mode: screen;
+  --w: min(100vw, calc(80vh * 10 / 9)); display: block; width: min(var(--w), 100%); height: auto; aspect-ratio: 10 / 9; margin: calc(min(var(--w), 100%) * -0.16) 0 calc(min(var(--w), 100%) * -0.13); mix-blend-mode: screen;
   mask: linear-gradient(90deg, transparent, #000 9% 91%, transparent), linear-gradient(transparent, #000 9% 91%, transparent);
   mask-composite: intersect;
 }
@@ -219,6 +217,63 @@ header.site nav a:hover, footer.site a:hover { color: var(--text); }
 .toolbar i { display: grid; place-items: center; width: 3.6cqw; height: 3.6cqw; }
 .toolbar svg { width: 1.9cqw; height: 1.9cqw; }
 
+/* How people use it: one wide card, then two */
+.uses { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; padding-top: clamp(24px, 4vw, 56px); padding-bottom: clamp(48px, 6vw, 88px); }
+.uses > h2 { grid-column: 1 / -1; margin: 0 0 -4px; font-size: clamp(28px, 3.4vw, 40px); letter-spacing: -0.02em; line-height: 1.1; }
+.use { padding: 26px 28px 28px; border-radius: 22px; display: flex; flex-direction: column; min-width: 0; }
+.use.main { grid-column: 1 / -1; }
+.use .kind { margin: 0; font: 650 13px var(--display); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.use .badge { margin-left: 6px; padding: 2px 7px; border-radius: 99px; background: var(--accent); color: var(--bg); font-size: 11px; letter-spacing: 0.04em; vertical-align: 1px; }
+.use h3 { margin: 6px 0 0; font-size: 22px; letter-spacing: -0.015em; line-height: 1.2; }
+.use p { margin: 10px 0 0; color: var(--text-dim); font-size: 16px; max-width: 62ch; }
+
+.use .command { margin: 18px 0 0; max-width: none; }
+.use .command code { font-size: 14px; }
+.use .after { margin-top: auto; padding-top: 14px; font-size: 14.5px; color: var(--text-faint); }
+.use.main .after { margin-top: 24px; padding-top: 0; }
+.use .lanes + .after { margin-top: 28px; }
+
+.defs { position: absolute; }
+.dg { fill: rgb(255 255 255 / 0.05); stroke: var(--text-dim); stroke-width: 2; }
+.tsm, .tsw { color: var(--text); }
+.flow { fill: none; stroke: var(--accent); stroke-width: 2.6; stroke-linecap: round; stroke-dasharray: 3 9; }
+@media (prefers-reduced-motion: no-preference) { .flow { animation: flow 1.2s linear infinite; } }
+@keyframes flow { to { stroke-dashoffset: -24; } }
+
+.lanes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 60px; margin-top: 34px; }
+.lane { position: relative; display: flex; flex-direction: column; padding: 30px 22px 24px; border-radius: 22px; background: rgb(255 255 255 / 0.035); box-shadow: inset 0 0 0 1px var(--line); }
+.lane.mid { background: rgb(92 178 255 / 0.07); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.lane .n { position: absolute; top: -16px; left: 22px; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--bg); border: 2px solid var(--accent); color: var(--accent); font: 700 15px var(--display); }
+.lane .where { margin: 0; text-align: center; font: 650 12.5px var(--display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); }
+.lane .ico { width: 100%; max-width: 250px; height: 96px; margin: 18px auto 14px; }
+.lane h4 { margin: 0; text-align: center; font: 650 21px var(--display); letter-spacing: -0.015em; }
+.lane p:not(.where) { margin: 8px 0 0; text-align: center; font-size: 15.5px; color: var(--text-dim); max-width: none; }
+.lane .cmd { margin: auto auto 0; padding-top: 0; align-self: center; font-size: 13px; color: #5fd38d; white-space: nowrap; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.lane p + .cmd { margin-top: 18px; }
+.lane .cmd.addr { color: var(--accent); }
+.lane .arr { position: absolute; top: 50%; right: -58px; width: 56px; height: 18px; transform: translateY(-50%); }
+
+.vis { margin-top: 20px; }
+.vis.support { display: grid; grid-template-columns: 1fr 34px 1fr; gap: 10px; align-items: center; }
+.vis.support svg { width: 34px; color: var(--accent); }
+.vis .pane { padding: 14px 14px 16px; border-radius: 14px; background: rgb(255 255 255 / 0.04); box-shadow: inset 0 0 0 1px var(--line); display: grid; gap: 5px; min-width: 0; }
+.vis .pane em { font-style: normal; font: 650 11px var(--display); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
+.vis .pane b { font: 650 22px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.02em; color: var(--text); }
+.vis .pane b.ok { font: 650 20px var(--display); color: #5fd38d; letter-spacing: -0.01em; }
+.vis .pane span { font-size: 13px; line-height: 1.35; color: var(--text-dim); }
+
+.vis.fleet { display: grid; border-radius: 14px; background: rgb(255 255 255 / 0.04); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
+.vis.fleet div { display: grid; grid-template-columns: 10px minmax(0, 1.3fr) minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 11px 14px; font-size: 14px; }
+.vis.fleet div + div { border-top: 1px solid var(--line); }
+.vis.fleet b { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vis.fleet span { color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vis.fleet i { width: 9px; height: 9px; border-radius: 50%; background: var(--text-faint); }
+.vis.fleet i.ok { background: #5fd38d; box-shadow: 0 0 8px #5fd38d88; }
+.vis.fleet i.warn { background: #f2b84b; box-shadow: 0 0 8px #f2b84b88; }
+.vis.fleet em { font-style: normal; font-size: 12.5px; padding: 2px 9px; border-radius: 99px; background: rgb(255 255 255 / 0.07); color: var(--text-dim); white-space: nowrap; }
+.vis.fleet em.ok { color: #5fd38d; background: #5fd38d1c; }
+.vis.fleet em.warn { color: #f2b84b; background: #f2b84b1f; }
+
 /* Three reasons, then the way to everything else */
 .pillars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px 40px; padding-top: 0; }
 .pillars div { padding: 22px 24px 24px; border-radius: 22px; }
@@ -322,9 +377,17 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
 @media (max-width: 880px) {
   .hero, .agent, .feedback { grid-template-columns: minmax(0, 1fr); }
   .pillars { grid-template-columns: 1fr; gap: 20px; }
+  .uses { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .lanes { grid-template-columns: minmax(0, 1fr); gap: 54px; }
+  .lane .arr { top: auto; right: auto; bottom: -48px; left: 50%; transform: translateX(-50%) rotate(90deg); }
   .steps { grid-template-columns: 1fr; gap: 36px; }
 }
 @media (max-width: 560px) {
+  .dither { opacity: 0.26; }
+  .vis.fleet div { grid-template-columns: 10px minmax(0, 1fr) auto; }
+  .vis.fleet span { display: none; }
+  .vis.support { grid-template-columns: 1fr; }
+  .vis.support svg { transform: rotate(90deg); justify-self: center; }
   .features, .all-features .features { grid-template-columns: 1fr; }
   header.site nav { gap: 16px; font-size: 14px; }
   header.site { padding-inline: 14px 18px; }

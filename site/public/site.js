@@ -1,6 +1,7 @@
 // Shared by the site's pages: copy buttons, the feedback form and the glass.
 
 import { lens } from '/glassy/lens.js';
+import '/dither.js';
 
 for (const block of document.querySelectorAll('.command')) {
   const button = block.querySelector('.copy');

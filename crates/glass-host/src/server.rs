@@ -100,6 +100,7 @@ pub async fn run(
     };
     info!("WebTransport listening on udp/{wt_port}");
     crate::remote::watch(wt_port);
+    crate::fleet::watch();
     // What the computer is playing, for viewers' media controls (while anyone is connected).
     crate::now_playing::watch(shared.events.clone());
     // A mic left on when the host last stopped left BlackHole as the default input.

@@ -54,7 +54,7 @@ pub fn remove() -> Result<u64> {
     Ok(v["removed"].as_u64().unwrap_or_default())
 }
 
-fn post(path: &str, body: Value) -> Result<Value> {
+pub(crate) fn post(path: &str, body: Value) -> Result<Value> {
     let base = crate::remote::base();
     let mut reply = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(10)))

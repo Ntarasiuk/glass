@@ -317,6 +317,19 @@ enum FromIntroducer {
         #[serde(default, rename = "iceServers")]
         ice_servers: Vec<IceServer>,
     },
+    /// An action your account asked for, signed by a pinned passkey (see `actions`).
+    Command {
+        id: String,
+        cmd: String,
+        assertion: crate::actions::Assertion,
+    },
+    /// A passkey asking to be pinned for actions.
+    Enroll {
+        id: String,
+        cred: String,
+        key: String,
+        mac: String,
+    },
     #[serde(other)]
     Other,
 }
@@ -324,6 +337,12 @@ enum FromIntroducer {
 #[derive(Serialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
 enum ToIntroducer {
+    /// The answer to a command or an enrollment.
+    Result {
+        id: String,
+        ok: bool,
+        message: String,
+    },
     Auth {
         key: String,
         sig: String,
@@ -440,6 +459,32 @@ async fn signal(wt_port: u16) -> Result<()> {
                                 }
                             };
                             let _ = out_tx.send(reply);
+                        });
+                    }
+                    Ok(FromIntroducer::Command { id, cmd, assertion }) => {
+                        let out_tx = out_tx.clone();
+                        tokio::spawn(async move {
+                            let (ok, message, deferred) = tokio::task::spawn_blocking(move || crate::actions::command(&cmd, &assertion))
+                                .await
+                                .unwrap_or((false, "the action failed".into(), None));
+                            let _ = out_tx.send(ToIntroducer::Result { id, ok, message });
+                            if let Some(d) = deferred {
+                                // After the answer has gone: it would cut the connection first.
+                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                                let _ = tokio::task::spawn_blocking(move || crate::actions::finish(d)).await;
+                            }
+                        });
+                    }
+                    Ok(FromIntroducer::Enroll { id, cred, key, mac }) => {
+                        let out_tx = out_tx.clone();
+                        tokio::spawn(async move {
+                            let r = tokio::task::spawn_blocking(move || crate::actions::enroll(&cred, &key, &mac)).await;
+                            let (ok, message) = match r {
+                                Ok(Ok(m)) => (true, m),
+                                Ok(Err(e)) => (false, format!("{e:#}")),
+                                Err(_) => (false, "it failed".into()),
+                            };
+                            let _ = out_tx.send(ToIntroducer::Result { id, ok, message });
                         });
                     }
                     Ok(FromIntroducer::Other) => {}
