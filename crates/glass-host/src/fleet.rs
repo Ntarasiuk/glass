@@ -209,9 +209,17 @@ pub fn send(forget: bool) -> Result<Inventory> {
     let inv = collect();
     let data = if forget { String::new() } else { serde_json::to_string(&inv)? };
     let key = HostKey::load_or_create()?;
+    let post = |ts: u64| -> Result<()> {
+        let sig = key.sign(format!("glass-fleet-v1\n{ts}\n{data}").as_bytes())?;
+        crate::account::post("/api/fleet/report", json!({ "key": key.public(), "ts": ts, "data": data, "sig": sig })).map(drop)
+    };
+    // The website takes a report every few seconds at most: once more if it was too soon.
+    if let Err(e) = post(now()) {
+        anyhow::ensure!(format!("{e:#}").contains("few seconds"), "{e:#}");
+        std::thread::sleep(Duration::from_millis(5500));
+        post(now())?;
+    }
     let ts = now();
-    let sig = key.sign(format!("glass-fleet-v1\n{ts}\n{data}").as_bytes())?;
-    crate::account::post("/api/fleet/report", json!({ "key": key.public(), "ts": ts, "data": data, "sig": sig }))?;
     if !forget {
         if ensure_dir().is_ok() {
             let _ = write_private(&dir().join("last"), ts.to_string().as_bytes());
@@ -225,20 +233,20 @@ pub fn last_sent() -> Option<u64> {
     std::fs::read_to_string(dir().join("last")).ok()?.trim().parse::<u64>().ok().map(|t| now().saturating_sub(t))
 }
 
-/// Reports every 15 minutes while it's on. A computer that isn't on an account is told so
-/// (the report is refused) and simply tries again later.
+/// Reports every 15 minutes while it's on, and soon after it's turned on. A computer that
+/// isn't on an account is told so (the report is refused) and simply tries again later.
 pub fn watch() {
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(30)).await;
         loop {
-            if enabled() {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let due = last_sent().is_none_or(|ago| ago >= EVERY.as_secs());
+            if enabled() && due {
                 match tokio::task::spawn_blocking(|| send(false)).await {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => tracing::debug!("fleet report: {e:#}"),
                     Err(_) => {}
                 }
             }
-            tokio::time::sleep(EVERY).await;
         }
     });
 }

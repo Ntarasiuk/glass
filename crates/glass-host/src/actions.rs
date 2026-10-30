@@ -137,11 +137,7 @@ pub fn enroll(cred: &str, spki_b64: &str, mac_b64: &str) -> Result<String> {
     // Tell the account it can be managed now, so its page offers the actions at once.
     if crate::fleet::enabled() {
         std::thread::spawn(|| {
-            // The website takes a report every few seconds at most: once more if it was too soon.
-            if crate::fleet::send(false).is_err() {
-                std::thread::sleep(Duration::from_secs(6));
-                let _ = crate::fleet::send(false);
-            }
+            let _ = crate::fleet::send(false);
         });
     }
     Ok("This account can now manage this computer.".into())
@@ -264,14 +260,7 @@ fn check_and_run(cmd: &str, a: &Assertion) -> Result<(String, Option<Deferred>)>
 fn run(action: &str, arg: &str) -> Result<(String, Option<Deferred>)> {
     match action {
         "report" => {
-            // The website takes a report every few seconds at most: once more if it was too soon.
-            let inv = match crate::fleet::send(false) {
-                Err(e) if format!("{e:#}").contains("few seconds") => {
-                    std::thread::sleep(Duration::from_millis(5500));
-                    crate::fleet::send(false)?
-                }
-                other => other?,
-            };
+            let inv = crate::fleet::send(false)?;
             Ok((format!("Details sent: {} {}.", inv.model, inv.os).replace("  ", " "), None))
         }
         "update_glass" => {

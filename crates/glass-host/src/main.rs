@@ -638,6 +638,10 @@ fn fleet_cli(action: &str, arg: Option<&str>, json: bool) -> Result<()> {
             println!(
                 "This computer will tell your glassdesk.dev account its model, system, memory, disk space, FileVault and firewall state, uptime, battery and Glass version, every 15 minutes (only if it's on an account: glass account add). Nothing else leaves it. Turn it off, and delete what was sent, with: glass fleet off"
             );
+            match fleet::send(false) {
+                Ok(_) => println!("First report sent."),
+                Err(e) => println!("Not sent yet: {e}"),
+            }
         }
         "off" => {
             fleet::set_enabled(false)?;
