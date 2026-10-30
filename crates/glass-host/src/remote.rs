@@ -179,6 +179,12 @@ pub fn base() -> String {
     crate::update::base_url()
 }
 
+/// This computer's address from anywhere, with no credential in it: whoever opens it still
+/// has to sign in. (`link_url` is the one-time link that lets a device in.)
+pub fn open_url(key: &HostKey) -> String {
+    format!("{}/app/#r={}", base().trim_end_matches('/'), key.public())
+}
+
 /// A link that opens this host from anywhere.
 pub fn link_url(key: &HostKey, code: &str) -> String {
     format!(

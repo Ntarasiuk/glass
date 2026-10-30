@@ -22,6 +22,15 @@ gpui_kit::assets::icon_assets!(
     ]
 );
 
+/// Tailscale's mark: nine dots, the top row dim, the middle solid, the bottom dim, solid, dim.
+pub fn tailscale() -> Icon {
+    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g fill="#000">
+<circle cx="5" cy="5" r="2.6" fill-opacity=".38"/><circle cx="12" cy="5" r="2.6" fill-opacity=".38"/><circle cx="19" cy="5" r="2.6" fill-opacity=".38"/>
+<circle cx="5" cy="12" r="2.6"/><circle cx="12" cy="12" r="2.6"/><circle cx="19" cy="12" r="2.6"/>
+<circle cx="5" cy="19" r="2.6" fill-opacity=".38"/><circle cx="12" cy="19" r="2.6"/><circle cx="19" cy="19" r="2.6" fill-opacity=".38"/></g></svg>"##;
+    Icon::default().data(SVG)
+}
+
 /// The component icons, plus the ones above.
 pub struct Assets;
 
