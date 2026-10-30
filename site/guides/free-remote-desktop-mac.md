@@ -1,12 +1,12 @@
 ---
 path: /guides/free-remote-desktop-mac
-title: Best free and open-source remote desktops for Mac (2026)
+title: Best free remote desktop software for Mac (2026)
 label: Free remote desktops for Mac
-description: Free and open-source remote desktops for a Mac compared honestly: Glass, RustDesk, Chrome Remote Desktop, Moonlight, Screen Sharing, TeamViewer, Parsec.
+description: The best free remote desktop software for Mac, compared honestly: Glass, RustDesk, Chrome Remote Desktop, Moonlight, Screen Sharing, TeamViewer, Parsec.
 order: 2
 ---
 
-# The best free and open-source remote desktop apps for Mac
+# The best free remote desktop software for Mac, compared (2026)
 
 **Short answer:** for controlling your own Mac from an iPad or any browser, **Glass** (free, open source) is the lowest-friction: nothing to install on the device in your hands, about 20 ms. For Mac *and* Windows computers, **RustDesk** is the open-source all-rounder, and **Chrome Remote Desktop** is the simplest free option. Between two Macs, the built-in **Screen Sharing** is excellent. For games, **Moonlight with Sunshine**.
 
@@ -83,3 +83,15 @@ Yes: Glass (MIT), RustDesk (AGPL-3.0) and Sunshine with Moonlight (GPL-3.0) all 
 ### What's the best free way to control a Mac from an iPad?
 
 Glass runs in Safari on the iPad, so there's no app to buy, and it supports Apple Pencil pressure. Sidecar is free too, but only within 10 metres, and it gives you a second display rather than the Mac's own screen. See [how to control a Mac from an iPad](/guides/control-mac-from-ipad).
+
+### Can I get free remote access to my Mac from anywhere?
+
+Yes. Glass reaches a Mac from any network with a [Tailscale](https://tailscale.com) address or a one-time link, with no ports opened. RustDesk and Chrome Remote Desktop also work over the internet, and they need a Google or GitHub sign-in (RustDesk's public server, on the controlling side) or a Google account (Chrome Remote Desktop).
+
+### Is there a free remote desktop for Mac with no account?
+
+Glass needs no account on either side. Moonlight with Sunshine needs none either. Chrome Remote Desktop needs a Google account, RustDesk's public server needs a sign-in on the controlling side, and Parsec requires an account.
+
+### Does a Mac have a built-in remote desktop?
+
+Yes: Screen Sharing, built into macOS, is free and very good between two Macs. It has no Apple client for iPad, which is where a browser-based option like Glass fits.
