@@ -216,6 +216,44 @@
 
     </section>
 
+    <section class="uses wrap" aria-labelledby="uses-h">
+      <h2 id="uses-h">How people use Glass</h2>
+
+      <article class="use main lg-glass-surface">
+        <p class="kind">Most common</p>
+        <h3>Tailscale + Glass: your own computers, from your own devices</h3>
+        <p>Put Glass on the Mac or Linux box you want to reach and Tailscale on everything you own. Your iPad or phone opens it like a website, over your private tailnet: no ports opened, no account, nothing to install on the device in your hand.</p>
+        <ol class="steps">
+          <li><strong>Install Tailscale</strong><span>On the computer and on your iPad, phone or laptop, signed in to the same account. The free plan is enough.</span></li>
+          <li><strong>Run <code>curl -fsSL glassdesk.dev | sh</code></strong><span>Then <code>glass setup</code> on the computer. It checks Tailscale, starts Glass in the background and asks for the two macOS permissions.</span></li>
+          <li><strong>Open your computer's address</strong><span>Something like <code>https://mac-studio.tail4f2a.ts.net</code>, in any browser. Your devices are let in automatically; nobody else is.</span></li>
+        </ol>
+        <p class="after">No Tailscale on the device you're holding? <code>glass link --anywhere</code> makes a one-time link that connects directly, end-to-end encrypted. <a href="/docs#connecting">How connecting works</a></p>
+      </article>
+
+      <article class="use lg-glass-surface">
+        <p class="kind">Support</p>
+        <h3>Help someone who has nothing installed</h3>
+        <p>A parent, a friend, a customer. They paste one line; you type the nine-digit code they read out. They approve before you see anything, and Stop sharing removes every trace.</p>
+        <div class="command lg-glass-surface" data-lg-preset="control" data-copy="curl -fsSL glassdesk.dev/help | sh">
+          <code><span class="prompt" aria-hidden="true">$</span> curl -fsSL glassdesk.dev/help | sh</code>
+          <button type="button" class="copy">Copy</button>
+        </div>
+        <p class="after">They run that; you enter the code at <a href="/help">glassdesk.dev/help</a>. <a href="/docs#help-someone-quick-support">Details</a></p>
+      </article>
+
+      <article class="use lg-glass-surface">
+        <p class="kind">Fleet <span class="badge">New</span></p>
+        <h3>Look after a handful of computers</h3>
+        <p>Sign in with a passkey to see every computer on one page: online or not, disk, FileVault, firewall, Glass version. Check them against your rules, then update or restart them without opening a screen. Each action is signed by your passkey and checked by the computer itself.</p>
+        <div class="command lg-glass-surface" data-lg-preset="control" data-copy="glass account add && glass fleet on">
+          <code><span class="prompt" aria-hidden="true">$</span> glass account add &amp;&amp; glass fleet on</code>
+          <button type="button" class="copy">Copy</button>
+        </div>
+        <p class="after">Off until you turn it on, computer by computer. <a href="/docs#glass-fleet-new">Read how it works</a></p>
+      </article>
+    </section>
+
     <section class="pillars wrap" aria-label="Why Glass">
       <div class="lg-glass-surface"><h2>Feels local</h2><p>Built like a game stream, not a video call: about 20&nbsp;ms, up to 120&nbsp;fps, true colour.</p></div>
       <div class="lg-glass-surface"><h2>Just a browser</h2><p>iPad, phone or laptop. Install it as an app if you like, with notifications and a badge.</p></div>
