@@ -393,8 +393,8 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
 .doc tbody tr:hover > td { background: rgb(255 255 255 / 0.035); }
 .doc tbody tr:hover > th { background: #171a20; }
 .doc .us, .doc tr.us > * { background: rgb(92 178 255 / 0.11); }
-.doc thead th.us { color: var(--accent); background: rgb(92 178 255 / 0.16); box-shadow: inset 0 3px 0 var(--accent); }
-.doc tr.us > th { background: #13202e; color: #fff; box-shadow: inset 3px 0 0 var(--accent), 1px 0 0 var(--line); }
+.doc thead th.us { color: var(--accent); background: rgb(92 178 255 / 0.2); }
+.doc tr.us > th { background: #13202e; color: #fff; box-shadow: 1px 0 0 var(--line); }
 .doc tbody tr:hover > .us { background: rgb(92 178 255 / 0.15); }
 .pill { display: inline-block; padding: 1px 9px; border-radius: 99px; font: 650 13px var(--display); letter-spacing: 0.01em; }
 .pill.yes { color: #6fe09d; background: rgb(95 211 141 / 0.14); }
@@ -440,8 +440,27 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
 .doc.guide { max-width: none; padding-top: 28px; }
 .g-hero { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); gap: clamp(28px, 5vw, 72px); align-items: start; }
 .guide .g-hero h1 { margin: 14px 0 0; font-size: clamp(38px, 5.4vw, 68px); line-height: 1.02; max-width: 15ch; }
-.g-answer { padding: 24px 28px 26px; border-radius: 24px; background: rgb(13 14 18 / 0.78); backdrop-filter: blur(14px); box-shadow: inset 0 0 0 1px var(--line), inset 4px 0 0 var(--accent); }
-.g-kicker { display: block; margin-bottom: 8px; font: 650 12px var(--display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
+.g-answer {
+  position: relative; padding: 26px 28px 28px; border-radius: 26px; backdrop-filter: blur(16px);
+  background: linear-gradient(155deg, rgb(92 178 255 / 0.15), transparent 42%), rgb(13 14 18 / 0.8);
+  box-shadow: 0 24px 60px -30px rgb(92 178 255 / 0.35);
+}
+/* The rim of a lens: light catching one corner, a violet and a warm glint on the others. */
+.g-answer::before {
+  content: ""; position: absolute; inset: 0; padding: 1px; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(150deg, rgb(170 210 255 / 0.9), rgb(150 110 255 / 0.35) 38%, rgb(255 255 255 / 0.06) 68%, rgb(230 150 110 / 0.4));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;
+}
+.g-kicker {
+  display: inline-flex; align-items: center; gap: 7px; margin-bottom: 14px; padding: 4px 12px 4px 9px; border-radius: 99px;
+  font: 650 12px var(--display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent);
+  background: rgb(92 178 255 / 0.13); box-shadow: inset 0 0 0 1px rgb(92 178 255 / 0.32);
+}
+.g-kicker::before {
+  content: ""; width: 12px; height: 12px; background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='34 22 42 60'%3E%3Cpath d='M40 27v44.2l11.18-10.4 7.28 16.12 6.76-2.86-7.28-15.6h13.78z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='34 22 42 60'%3E%3Cpath d='M40 27v44.2l11.18-10.4 7.28 16.12 6.76-2.86-7.28-15.6h13.78z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
 .guide .g-answer p { margin: 0; font-size: clamp(16px, 1.35vw, 18px); line-height: 1.6; color: #e3e6ec; }
 .g-install { margin-top: 30px; max-width: 470px; }
 .g-hint { max-width: 470px; }
