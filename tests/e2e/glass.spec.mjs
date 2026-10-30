@@ -180,12 +180,12 @@ test.describe('connecting', () => {
 });
 
 test.describe('magic links', () => {
-  it('a link from the host lets one device in, once, until revoked', async ({ page, browser, host }) => {
+  it('a link from the host lets one device in (in more than one browser) until revoked', async ({ page, browser, host }) => {
     await open(page, host);
     await page.waitForTimeout(1500); // the host has written its status, which `glass link` reads
     const env = { ...process.env, GLASS_CONFIG_DIR: host.configDir };
     const made = JSON.parse(execFileSync(BINARY, ['link', '--json', '--for', '1h'], { env }).toString());
-    expect(made.summary).toBe('Works once, within 15 minutes. Gives that device 1 hour of access (full control).');
+    expect(made.summary).toBe('Works on one device, within 15 minutes. Gives that device 1 hour of access (full control).');
     const code = made.url.match(/#l=([0-9a-f]{32})$/)[1];
     const link = `${host.base}/#l=${code}`;
 
@@ -198,19 +198,29 @@ test.describe('magic links', () => {
     expect(guest.url()).not.toContain('#l=');
     await expect(guest.locator('#btn-machines')).toBeHidden();
 
-    // The pass survives a reload; the link itself is spent.
+    // The pass survives a reload.
     await guest.reload();
     await expectVideo(guest);
-    const other = await (await browser.newContext()).newPage();
+    // A different kind of device finds the link spent...
+    const windows = await browser.newContext({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36' });
+    const other = await windows.newPage();
     await other.goto(link);
     await expect(other.locator('.toast', { hasText: 'expired or was already used' })).toBeVisible();
     await expect(other.locator('#auth')).toBeVisible();
+    // ...but the same device (same network and system) can open it again in another browser.
+    const againContext = await browser.newContext();
+    const again = await againContext.newPage();
+    await again.goto(link);
+    await expectVideo(again);
+    await expect(again.locator('.toast', { hasText: "You're in" })).toBeVisible();
 
-    // Revoking cuts the guest off; on reconnect it's asked for a token.
-    expect(JSON.parse(execFileSync(BINARY, ['link', '--revoke', '--json'], { env }).toString())).toEqual({ revoked: 1 });
+    // Revoking cuts both browsers off; on reconnect the first is asked for a token.
+    expect(JSON.parse(execFileSync(BINARY, ['link', '--revoke', '--json'], { env }).toString())).toEqual({ revoked: 2 });
     await expect(guest.locator('#auth')).toBeVisible({ timeout: 20_000 });
     // The owner is unaffected.
     await expect.poll(async () => (await stats(page)).fps).toBeGreaterThan(0);
+    await againContext.close();
+    await windows.close();
     await guestContext.close();
   });
 

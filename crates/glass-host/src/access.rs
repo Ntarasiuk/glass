@@ -98,6 +98,43 @@ struct Link {
     grant_secs: u64,
     #[serde(default)]
     scope: Scope,
+    /// Set when the link is first opened. Until the link expires, the same device can open it
+    /// again in another browser (see [`redeem_link`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    used: Option<Used>,
+}
+
+/// A link's first use: who opened it, so only the same device can reopen it.
+#[derive(Serialize, Deserialize, Clone)]
+struct Used {
+    /// The network it was opened from (see [`network_key`]).
+    network: String,
+    /// The operating system ("iPhone", "Windows"…): the part of the device name after "on".
+    os: String,
+    /// When the first pass ends. Later browsers share it: reopening never extends access.
+    pass_expires: u64,
+    /// Browsers let in so far.
+    devices: u8,
+}
+
+/// Browsers one link can let in (the first, and others of the same device within its time).
+const LINK_DEVICES: u8 = 3;
+
+/// The network an address belongs to: the address itself, or for IPv6 its /64 (a device's
+/// privacy addresses change inside it).
+fn network_key(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+    }
+}
+
+/// "Chrome on iPhone" → "iPhone".
+fn os_of(device: &str) -> String {
+    device.rsplit_once(" on ").map_or(device, |(_, os)| os).trim().to_lowercase()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -196,6 +233,7 @@ pub fn create_link_for(path: &Path, ttl: Duration, grant: Duration, scope: Scope
             expires,
             grant_secs: grant.as_secs(),
             scope,
+            used: None,
         });
     })?;
     Ok(NewLink {
@@ -254,34 +292,65 @@ pub fn revoke_account(path: &Path, account: &str) -> Result<usize> {
     Ok(n)
 }
 
-/// Uses up a link, if it's valid, and returns a new guest pass in its place.
-pub fn redeem_link(path: &Path, code: &str, device: &str) -> Result<Option<Granted>> {
+/// Opens a link, if it's valid, and returns a new guest pass.
+///
+/// The first browser gets a pass for the link's grant time. Until the link expires, the same
+/// device (the same network and operating system) can open it again in another browser, up to
+/// [`LINK_DEVICES`] in all, and gets a pass that ends when the first one does. Anyone else,
+/// and a link that needs a passkey (which belongs to one device), finds it used.
+pub fn redeem_link(path: &Path, code: &str, device: &str, ip: std::net::IpAddr) -> Result<Option<Granted>> {
     let hash = fingerprint(code);
     let pass = random_code()?;
     let mut granted = None;
     update(path, |store| {
-        if let Some(i) = store
+        let Some(i) = store
             .links
             .iter()
             .position(|l| crate::control::token_matches(&l.hash, &hash))
-        {
-            let link = store.links.remove(i);
-            let expires = now() + link.grant_secs;
-            store.passes.push(Pass {
-                hash: fingerprint(&pass),
-                expires,
-                scope: link.scope,
-                created: now(),
-                device: device.to_string(),
-                passkey: None,
-                account: None,
-            });
-            granted = Some(Granted {
-                pass: pass.clone(),
-                expires,
-                scope: link.scope,
-            });
-        }
+        else {
+            return;
+        };
+        let now = now();
+        let link = &mut store.links[i];
+        let expires = match &mut link.used {
+            None => {
+                let expires = now + link.grant_secs;
+                link.used = Some(Used {
+                    network: network_key(ip),
+                    os: os_of(device),
+                    pass_expires: expires,
+                    devices: 1,
+                });
+                expires
+            }
+            Some(used) => {
+                let again = !link.scope.passkey
+                    && used.devices < LINK_DEVICES
+                    && used.pass_expires > now
+                    && used.network == network_key(ip)
+                    && used.os == os_of(device);
+                if !again {
+                    return;
+                }
+                used.devices += 1;
+                used.pass_expires
+            }
+        };
+        let scope = link.scope;
+        store.passes.push(Pass {
+            hash: fingerprint(&pass),
+            expires,
+            scope,
+            created: now,
+            device: device.to_string(),
+            passkey: None,
+            account: None,
+        });
+        granted = Some(Granted {
+            pass: pass.clone(),
+            expires,
+            scope,
+        });
     })?;
     Ok(granted)
 }
@@ -494,11 +563,11 @@ mod tests {
     fn a_link_works_once_and_becomes_a_pass() {
         let path = temp();
         let link = create_link(&path, Duration::from_secs(86400), Scope::default()).unwrap();
-        let granted = redeem_link(&path, &link.code, "Safari on iPad")
+        let granted = redeem_link(&path, &link.code, "Safari on iPad", ip())
             .unwrap()
             .expect("valid link");
         assert!(
-            redeem_link(&path, &link.code, "x").unwrap().is_none(),
+            redeem_link(&path, &link.code, "x", ip()).unwrap().is_none(),
             "single use"
         );
         assert_eq!(pass_expiry(&path, &granted.pass), Some(granted.expires));
@@ -532,8 +601,8 @@ mod tests {
         };
         let a = create_link(&path, Duration::from_secs(3600), scope).unwrap();
         let b = create_link(&path, Duration::from_secs(3600), Scope::default()).unwrap();
-        let ga = redeem_link(&path, &a.code, "Chrome on Windows").unwrap().unwrap();
-        let gb = redeem_link(&path, &b.code, "Safari on iPad").unwrap().unwrap();
+        let ga = redeem_link(&path, &a.code, "Chrome on Windows", ip()).unwrap().unwrap();
+        let gb = redeem_link(&path, &b.code, "Safari on iPad", ip()).unwrap().unwrap();
         assert_eq!(ga.scope, scope);
         assert_eq!(check_pass(&path, &ga.pass).unwrap().scope, scope);
         let listed = list(&path);
@@ -569,7 +638,7 @@ mod tests {
     fn passkeys_bind_once_and_counters_only_go_up() {
         let path = temp().with_file_name("passkey.json");
         let link = create_link(&path, Duration::from_secs(3600), Scope::default()).unwrap();
-        let g = redeem_link(&path, &link.code, "x").unwrap().unwrap();
+        let g = redeem_link(&path, &link.code, "x", ip()).unwrap().unwrap();
         let key = Passkey {
             id: "abc".into(),
             public_key: "def".into(),
@@ -597,5 +666,65 @@ mod tests {
         assert_eq!(describe(Duration::from_secs(7200)), "2 hours");
         assert_eq!(describe(Duration::from_secs(900)), "15 minutes");
         assert_eq!(describe(Duration::from_secs(86399)), "24 hours");
+    }
+
+    fn ip() -> std::net::IpAddr {
+        "203.0.113.7".parse().unwrap()
+    }
+
+    #[test]
+    fn the_same_device_can_open_a_link_in_another_browser() {
+        let path = temp();
+        let link = create_link(&path, Duration::from_secs(3600), Scope::default()).unwrap();
+        let first = redeem_link(&path, &link.code, "Safari on iPhone", ip()).unwrap().unwrap();
+        // Another browser on the same phone and network, while the link is still good.
+        let second = redeem_link(&path, &link.code, "Chrome on iPhone", ip()).unwrap().unwrap();
+        assert_ne!(first.pass, second.pass);
+        // It ends when the first pass does: reopening never extends access.
+        assert_eq!(first.expires, second.expires);
+        assert!(check_pass(&path, &first.pass).is_some() && check_pass(&path, &second.pass).is_some());
+        assert_eq!(list(&path).len(), 2);
+    }
+
+    #[test]
+    fn another_network_or_device_finds_the_link_used() {
+        let path = temp();
+        let link = create_link(&path, Duration::from_secs(3600), Scope::default()).unwrap();
+        redeem_link(&path, &link.code, "Safari on iPhone", ip()).unwrap().unwrap();
+        let elsewhere: std::net::IpAddr = "198.51.100.9".parse().unwrap();
+        assert!(redeem_link(&path, &link.code, "Chrome on iPhone", elsewhere).unwrap().is_none());
+        assert!(redeem_link(&path, &link.code, "Chrome on Windows", ip()).unwrap().is_none());
+        assert_eq!(list(&path).len(), 1);
+    }
+
+    #[test]
+    fn a_link_lets_in_a_few_browsers_at_most() {
+        let path = temp();
+        let link = create_link(&path, Duration::from_secs(3600), Scope::default()).unwrap();
+        for _ in 0..LINK_DEVICES {
+            assert!(redeem_link(&path, &link.code, "Safari on iPhone", ip()).unwrap().is_some());
+        }
+        assert!(redeem_link(&path, &link.code, "Safari on iPhone", ip()).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_passkey_link_belongs_to_one_device() {
+        let path = temp();
+        let scope = Scope { passkey: true, ..Default::default() };
+        let link = create_link(&path, Duration::from_secs(3600), scope).unwrap();
+        redeem_link(&path, &link.code, "Safari on iPhone", ip()).unwrap().unwrap();
+        assert!(redeem_link(&path, &link.code, "Chrome on iPhone", ip()).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_ipv6_device_keeps_its_link_across_privacy_addresses() {
+        let path = temp();
+        let link = create_link(&path, Duration::from_secs(3600), Scope::default()).unwrap();
+        let a: std::net::IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
+        let b: std::net::IpAddr = "2001:db8:1:2:bbbb::2".parse().unwrap();
+        let other: std::net::IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        redeem_link(&path, &link.code, "Safari on iPhone", a).unwrap().unwrap();
+        assert!(redeem_link(&path, &link.code, "Chrome on iPhone", other).unwrap().is_none());
+        assert!(redeem_link(&path, &link.code, "Chrome on iPhone", b).unwrap().is_some());
     }
 }

@@ -108,7 +108,7 @@ pub fn link(grant: Duration, anywhere: bool, scope: access::Scope) -> Result<(St
         .context("Glass isn't running. Turn it on first.")?;
     let (url, link) = crate::make_link(&base, grant, anywhere, scope)?;
     let summary = format!(
-        "Works once, within {}. Gives that device {} ({}).",
+        "Works on one device, within {}. Gives that device {} ({}).",
         access::describe(access::LINK_TTL),
         access::describe(link.grant),
         link.scope.describe()

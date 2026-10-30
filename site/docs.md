@@ -33,7 +33,7 @@ Features:
 - **A real app on every device.** Install it from the browser (Add to Home Screen on iPhone and iPad): its own icon with a badge, a shortcut to each of your machines, sharing photos and files to the Mac from any app, and it opens even when the computer is asleep to say so.
 - **Self-updating client.** Open tabs reload when the Mac is updated.
 - **Secure by default.** Devices on your own Tailscale tailnet are let in automatically; anything else needs an access token.
-- **From anywhere.** `glass link --anywhere` makes a one-time link that connects any browser directly to the computer over WebRTC, end-to-end encrypted, with no ports opened. Off until you use it.
+- **From anywhere.** `glass link --anywhere` makes a one-time link that connects any browser directly to the computer over WebRTC, end-to-end encrypted, with no ports opened. Off until you use it. A link lets in one device: if it opens in the wrong browser (an in-app browser, say), open it again in the right one on the same device within 15 minutes. Up to three browsers can use it, from the same network and the same kind of device, and the access still ends when the first one's does. A passkey link stays with the first device.
 - **One-time links.** Let another device in without sharing the token: each link works once and gives that device its own pass, revocable with `glass link --revoke`.
 - **Links with limits.** View-only, no files, no clipboard, a time limit, ask the person at the computer first, or require a passkey (Face ID, Touch ID or a security key) every time.
 - **Helping someone.** Chat, drawing on the screen (shown on the computer too), a privacy screen that blanks the computer and blocks its own keyboard and mouse, and a connection history.

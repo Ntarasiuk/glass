@@ -313,7 +313,7 @@ async fn link(peer: Peer, headers: HeaderMap, Json(r): Json<LinkReq>) -> Respons
             "qr": qr_svg(&url),
             "scope": link.scope,
             "summary": format!(
-                "Works once, within {}. Gives that device {} of access ({}).",
+                "Works on one device, within {}. Gives that device {} of access ({}).",
                 crate::access::describe(crate::access::LINK_TTL),
                 crate::access::describe(link.grant),
                 link.scope.describe()

@@ -541,7 +541,7 @@ impl GlassApp {
                         I::Link,
                         theme.primary,
                         "A link for your iPad",
-                        "Works once, then that device keeps access for a week.",
+                        "Works on one device, then it keeps access for a week.",
                         Button::new("setup-link").small().primary().label("Make link").loading(setup.busy).on_click(cx.listener(|this, _, window, cx| {
                             this.setup_task(
                                 window,
