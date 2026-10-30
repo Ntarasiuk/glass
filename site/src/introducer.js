@@ -8,18 +8,23 @@ import { DurableObject } from 'cloudflare:workers';
 
 const MAX_CLIENTS = 32;
 const MAX_OFFERS_PER_SOCKET = 5;
+// How long a command waits for its computer (a script may take a minute).
+const RELAY_WAIT_MS = 70_000;
 
 export class Introducer extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     // The host's heartbeat, answered without waking this object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+    // Commands waiting for the host's answer (id → resolve); lives only while a request is open.
+    this.pending = new Map();
   }
 
   async fetch(request) {
     const url = new URL(request.url);
     // For glassdesk.dev/computers. Not secret: a browser that connects is told the same.
     if (url.searchParams.get('role') === 'status') return Response.json({ online: Boolean(this.host()) });
+    if (url.searchParams.get('role') === 'relay' && request.method === 'POST') return this.relay(request);
     if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected a WebSocket', { status: 426 });
     const role = url.searchParams.get('role');
     const hostId = url.searchParams.get('id');
@@ -38,6 +43,31 @@ export class Introducer extends DurableObject {
       server.send(JSON.stringify({ t: 'hello', online: Boolean(this.host()), iceServers }));
     }
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /**
+   * Hands a signed command or an enrollment (from /api/account) to the host and returns its
+   * answer. This object only carries them: the host checks the passkey's signature itself.
+   */
+  async relay(request) {
+    const host = this.host();
+    if (!host) return Response.json({ ok: false, message: 'This computer is offline, or remote access is turned off on it.' }, { status: 409 });
+    const { kind, ...payload } = await request.json();
+    if (kind !== 'command' && kind !== 'enroll') return Response.json({ ok: false, message: 'bad request' }, { status: 400 });
+    const id = randomId(12);
+    const answer = new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        resolve({ ok: false, message: "The computer didn't answer in time." });
+      }, RELAY_WAIT_MS);
+      this.pending.set(id, (r) => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        resolve(r);
+      });
+    });
+    host.send(JSON.stringify({ t: kind, id, ...payload }));
+    return Response.json(await answer);
   }
 
   /**
@@ -75,6 +105,10 @@ export class Introducer extends DurableObject {
       for (const other of this.ctx.getWebSockets('host')) if (other !== ws) other.close(4000, 'replaced');
       ws.serializeAttachment({ ...meta, authed: true, authedAt: Date.now() });
       ws.send(JSON.stringify({ t: 'ready' }));
+      return;
+    }
+    if (msg.t === 'result' && typeof msg.id === 'string') {
+      this.pending.get(msg.id)?.({ ok: msg.ok === true, message: String(msg.message ?? '').slice(0, 2500) });
       return;
     }
     if ((msg.t === 'answer' || msg.t === 'error') && typeof msg.session === 'string') {

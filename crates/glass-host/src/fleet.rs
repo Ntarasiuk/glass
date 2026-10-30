@@ -56,6 +56,8 @@ pub struct Inventory {
     pub battery: Option<u8>,
     /// Glass's own version.
     pub version: String,
+    /// A passkey is pinned, so this account can run actions here (`glass fleet manage`).
+    pub managed: bool,
 }
 
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
@@ -139,9 +141,10 @@ pub fn collect() -> Inventory {
             uptime_h: 52,
             battery: Some(83),
             version: env!("CARGO_PKG_VERSION").into(),
+            managed: crate::actions::managed(),
         };
     }
-    let mut inv = Inventory { version: env!("CARGO_PKG_VERSION").into(), ..Default::default() };
+    let mut inv = Inventory { version: env!("CARGO_PKG_VERSION").into(), managed: crate::actions::managed(), ..Default::default() };
     let (total, free) = run("df", &["-k", "/"]).map(|s| parse_df(&s)).unwrap_or((0, 0));
     inv.disk_total_gb = total;
     inv.disk_free_gb = free;
@@ -247,6 +250,6 @@ mod tests {
         let json = serde_json::to_value(Inventory::default()).unwrap();
         let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
         keys.sort();
-        assert_eq!(keys, ["battery", "chip", "disk_free_gb", "disk_total_gb", "filevault", "firewall", "model", "os", "ram_gb", "uptime_h", "version"]);
+        assert_eq!(keys, ["battery", "chip", "disk_free_gb", "disk_total_gb", "filevault", "firewall", "managed", "model", "os", "ram_gb", "uptime_h", "version"]);
     }
 }

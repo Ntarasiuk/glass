@@ -36,6 +36,11 @@
     .list .who .name { flex: none; }
     .list .meta { color: var(--text-faint); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
     .list .meta .warn { color: #ffb86b; }
+    .list li { flex-wrap: wrap; }
+    .list .acts { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding-top: 4px; }
+    .list .acts button, .list .manage { padding: 6px 12px; border-radius: 10px; border: 1px solid rgb(255 255 255 / 0.18); background: rgb(255 255 255 / 0.06); color: inherit; font: inherit; font-size: 14px; cursor: pointer; }
+    .list .acts button:disabled { opacity: 0.5; cursor: default; }
+    .list .acts .act-status { flex-basis: 100%; font-size: 13px; color: var(--text-faint); white-space: pre-wrap; overflow-wrap: anywhere; }
     #find { width: 100%; box-sizing: border-box; margin: 4px 0 12px; padding: 12px 14px; border-radius: 12px; border: 1px solid rgb(255 255 255 / 0.12); background: rgb(0 0 0 / 0.3); color: inherit; font: inherit; }
     .list a.open { flex: none; padding: 7px 14px; border-radius: 10px; background: var(--accent); color: #04121f; font-weight: 650; font-size: 14px; text-decoration: none; }
     .list button.forget { flex: none; padding: 0 4px; border: 0; background: none; color: var(--text-faint); font-size: 18px; line-height: 1; cursor: pointer; }
@@ -115,7 +120,7 @@
     const remotes = () => { try { return JSON.parse(localStorage.getItem(REMOTES_KEY) ?? '[]'); } catch { return []; } };
     const saveRemotes = (list) => { try { localStorage.setItem(REMOTES_KEY, JSON.stringify(list)); } catch {} };
 
-    function row({ name, on, href, onForget, meta = [] }) {
+    function row({ name, on, href, onForget, meta = [], acts }) {
       const li = document.createElement('li');
       if (on) li.className = 'on';
       const dot = document.createElement('span');
@@ -142,6 +147,25 @@
       info.className = 'detail';
       info.textContent = on ? 'online' : 'offline';
       li.append(dot, who, info);
+      if (acts) {
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'manage';
+        open.textContent = 'Actions';
+        open.setAttribute('aria-expanded', 'false');
+        let panel;
+        const show = (on) => {
+          acts.remember(on);
+          if (!on) { panel?.remove(); panel = null; open.setAttribute('aria-expanded', 'false'); return; }
+          panel = acts.build();
+          li.append(panel);
+          open.setAttribute('aria-expanded', 'true');
+        };
+        open.addEventListener('click', () => show(!panel));
+        li.append(open);
+        // The list is drawn again on every refresh: an open panel stays open.
+        if (acts.wasOpen) show(true);
+      }
       if (!href) return li;
       const a = document.createElement('a');
       a.className = 'open';
@@ -312,6 +336,102 @@
       return out;
     }
 
+    const ACTIONS = [
+      ['report', 'Refresh details'],
+      ['update_glass', 'Update Glass', 'Update Glass on {name}? It restarts when it\'s done.'],
+      ['restart_glass', 'Restart Glass', 'Restart Glass on {name}? Anyone viewing reconnects in a few seconds.'],
+      ['restart_computer', 'Restart computer', 'Restart {name}? Open apps are asked to quit.'],
+    ];
+
+    /** Signs a command with a passkey (you verify it with your fingerprint, face or PIN). */
+    async function runAction(c, action, arg = '') {
+      const cmd = JSON.stringify({ v: 1, host: c.id, action, arg, nonce: enc(crypto.getRandomValues(new Uint8Array(16))), exp: Math.floor(Date.now() / 1000) + 120 });
+      const challenge = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(cmd)));
+      const got = await navigator.credentials.get({ publicKey: { challenge, rpId: location.hostname, userVerification: 'required', timeout: 60_000 } });
+      const r = got.response;
+      return api(`/api/account/computers/${c.id}/action`, {
+        method: 'POST',
+        body: { cmd, assertion: { id: got.id, clientDataJSON: enc(r.clientDataJSON), authenticatorData: enc(r.authenticatorData), signature: enc(r.signature) } },
+      });
+    }
+
+    const openActs = new Set(); // computers whose Actions panel is open
+    const actStatus = new Map(); // what the last action on each said
+
+    function actionsPanel(c) {
+      const box = document.createElement('div');
+      box.className = 'acts';
+      const status = document.createElement('span');
+      status.className = 'act-status';
+      status.setAttribute('role', 'status');
+      status.textContent = actStatus.get(c.id) ?? '';
+      status.dataset.actStatus = c.id;
+      // The list is drawn again on refresh, so say it wherever this computer's panel is now.
+      const say = (text) => {
+        actStatus.set(c.id, text);
+        for (const el of document.querySelectorAll('.act-status')) if (el.dataset.actStatus === c.id) el.textContent = text;
+      };
+      const go = async (action, arg, question) => {
+        if (question && !confirm(question.replace('{name}', c.name))) return;
+        for (const b of box.querySelectorAll('button')) b.disabled = true;
+        say('Waiting for your passkey…');
+        try {
+          const out = await runAction(c, action, arg);
+          say(out.message);
+          if (action === 'report') setTimeout(showMine, 500);
+        } catch (e) {
+          say(e.name === 'NotAllowedError' ? 'Cancelled.' : e.message);
+        }
+        for (const b of box.querySelectorAll('button')) b.disabled = false;
+      };
+      for (const [action, label, question] of ACTIONS) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        b.addEventListener('click', () => go(action, '', question));
+        box.append(b);
+      }
+      const script = document.createElement('button');
+      script.type = 'button';
+      script.textContent = 'Run a script…';
+      script.addEventListener('click', () => {
+        const name = prompt(`The name of a script in ~/.config/glass/fleet/scripts on ${c.name}:`);
+        if (name) go('run_script', name.trim(), `Run ${name.trim()} on {name}?`);
+      });
+      box.append(script, status);
+      return box;
+    }
+
+    // A link from `glass fleet manage` (#manage=<computer>.<code>): lets this account run
+    // actions on that computer, vouched for with the code, which never leaves this browser.
+    function takeManageFromLink() {
+      const v = new URLSearchParams(location.hash.slice(1)).get('manage');
+      if (!v) return false;
+      try { sessionStorage.setItem('glass.manage', v); } catch {}
+      history.replaceState(null, '', location.pathname);
+      return true;
+    }
+    const pendingManage = () => { try { return sessionStorage.getItem('glass.manage'); } catch { return null; } };
+    const dropManage = () => { try { sessionStorage.removeItem('glass.manage'); } catch {} };
+
+    async function enrollManager(hostId, pin) {
+      const { account: me } = await api('/api/account');
+      const got = await navigator.credentials.get({ publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rpId: location.hostname,
+        userVerification: 'required',
+        allowCredentials: me.keys.map((k) => ({ type: 'public-key', id: dec(k.id) })),
+        timeout: 60_000,
+      } });
+      const k = me.keys.find((x) => x.id === got.id);
+      if (!k) throw new Error('That passkey isn\'t on this account.');
+      if (k.alg !== -7) throw new Error('That kind of passkey can\'t manage computers. Use a passkey from a phone, a Mac or a security key (most are ES256).');
+      const hmac = await crypto.subtle.importKey('raw', dec(pin), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+      const mac = enc(await crypto.subtle.sign('HMAC', hmac, new TextEncoder().encode(`glass-manage-v1\n${hostId}\n${k.id}\n${k.key}`)));
+      const out = await api(`/api/account/computers/${hostId}/manage`, { method: 'POST', body: { cred: k.id, key: k.key, mac } });
+      if (!out.ok) throw new Error(out.message);
+    }
+
     let mineList = [];
     function drawMine() {
       const q = $('find').value.trim().toLowerCase();
@@ -320,6 +440,7 @@
         name: c.name,
         on: c.online,
         meta: facts(c.report),
+        acts: c.report?.managed ? { build: () => actionsPanel(c), wasOpen: openActs.has(c.id), remember: (on) => (on ? openActs.add(c.id) : openActs.delete(c.id)) } : null,
         href: `/app/#r=${encodeURIComponent(c.key)}`,
         onForget: async () => {
           if (!confirm(`Take ${c.name} off your account? To add it back, run glass account add on it.`)) return;
@@ -353,13 +474,33 @@
       return true;
     }
     takeClaimFromLink();
-    addEventListener('hashchange', () => { if (takeClaimFromLink()) showClaim(); });
+    takeManageFromLink();
+    addEventListener('hashchange', () => { if (takeClaimFromLink() || takeManageFromLink()) showClaim(); });
     const pendingClaim = () => { try { return sessionStorage.getItem('glass.claim'); } catch { return null; } };
     const dropClaim = () => { try { sessionStorage.removeItem('glass.claim'); } catch {} };
 
+    async function showManage(v) {
+      const [hostId, pin] = v.split('.');
+      const { computers = [] } = account ? await api('/api/account/computers').catch(() => ({})) : {};
+      const c = computers.find((x) => x.id === hostId);
+      $('claim-title').textContent = c ? `Let your account manage ${c.name}?` : 'Manage a computer';
+      if (!account || !c) {
+        $('claim-note').textContent = account ? 'That computer isn\'t on your account. Add it first with `glass account add`, then run `glass fleet manage` again.' : 'Sign in below first, then come back to this link.';
+        $('claim-actions').replaceChildren(claimButton(account ? 'OK' : 'Not now', async () => dropManage(), 'quiet'));
+        return;
+      }
+      $('claim-note').textContent = `Anyone signed in to this account will be able to ask ${c.name} to refresh its details, update or restart Glass, restart the computer and run its approved scripts. Each one needs your passkey: your fingerprint, face or PIN. Only do this for a computer you're setting up yourself, now.`;
+      $('claim-actions').replaceChildren(
+        claimButton('Allow', async () => { await enrollManager(hostId, pin); dropManage(); }, 'primary'),
+        claimButton('Not now', async () => dropManage(), 'quiet'),
+      );
+    }
+
     async function showClaim() {
       const code = pendingClaim();
-      $('claim').classList.toggle('hidden', !code);
+      const manage = code ? null : pendingManage();
+      $('claim').classList.toggle('hidden', !code && !manage);
+      if (manage) return showManage(manage);
       if (!code) return;
       let name;
       try {

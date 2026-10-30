@@ -182,6 +182,8 @@ Devices that aren't on your tailnet, or belong to another tailnet user, are aske
 
 **Your computers (glassdesk.dev/computers).** Sign in there with a passkey (no email, no password; it syncs through iCloud Keychain, Google Password Manager or your password manager) to see which of your computers are online and open any of them from any device. To add a computer, run `glass account add` on it (remote access must be on) and open the one-time link, or scan its QR code, where you're signed in. Your computer signs that claim with its key, so nobody can add a computer they don't control. The account only lists computers: opening one still takes that computer's own sign-in, so someone who got into your account would see names and who's online, never a screen. `glass account remove` takes a computer off every account; deleting the account on the page deletes its list. glassdesk.dev keeps the passkey's public key, each computer's name and public key, and a hash of each sign-in cookie. **Fleet details (opt-in):** `glass fleet on` makes a computer on your account report its model, chip, system version, memory, disk space, FileVault and firewall state, uptime, battery and Glass version every 15 minutes, signed with its key, so /computers can show them and flag what needs attention (FileVault or firewall off, a full disk, a report gone stale). Nothing else is sent, and only computers on an account are stored. `glass fleet off` stops reporting and deletes what was sent; so does `glass account remove`.
 
+**Actions (opt-in).** `glass fleet manage` prints a link (and turns reporting on). Open it where you're signed in and confirm with your passkey, and your account's page then offers that computer **Actions**: refresh its details, update Glass, restart Glass, restart the computer, or run a script you put in `~/.config/glass/fleet/scripts` (a plain file you own that nobody else can write, run for at most a minute). Each action needs your passkey again (fingerprint, face or PIN). glassdesk.dev only relays: the computer checks the passkey's signature itself against the passkey it pinned, a command expires in minutes and runs once, the list of actions is fixed, and each one is logged (`glass fleet manage status`). `glass fleet manage off` forgets the passkeys. The one moment of trust in the website is the pinning, which happens on the page it serves; after that it can't run anything on its own. Only ES256 passkeys (nearly all phones, Macs and security keys) can manage computers.
+
 ## Help someone (quick support)
 
 For helping a parent or a friend who doesn't have Glass, and shouldn't have to install anything:
@@ -360,6 +362,7 @@ glass remote on|off      Remote access from outside your tailnet (status without
 glass account add        One-time link (and QR code) that puts this computer on your glassdesk.dev/computers account
 glass account remove     Take this computer off every account
 glass fleet [on|off|status|report]  Tell your account this computer's state; off deletes what was sent
+glass fleet manage [off|status]  Let your account run actions here, each signed by your passkey (off forgets them)
 glass token         Show the access token for devices outside your tailnet
 glass token --reset Replace it with a new random token
 glass token --set   Choose your own token (prompted; or piped: echo … | glass token --set)

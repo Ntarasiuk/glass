@@ -135,6 +135,7 @@ glass remote off         # turn off access from outside your tailnet
 glass account add        # one-time link that puts this computer on your glassdesk.dev/computers account
 glass account remove     # take this computer off every account
 glass fleet on           # tell your account this computer's state (model, OS, disk, FileVault…); off deletes it
+glass fleet manage       # let your account run actions here (restart, update, scripts), each signed by your passkey
 glass viewers / kick     # who's connected now; end a session
 glass requests / allow / deny   # answer connection requests (glass config ask-guests on)
 glass chat "be right there"     # message everyone viewing

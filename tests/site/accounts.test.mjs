@@ -124,7 +124,7 @@ async function signIn(browser, key, opts) {
 test('a passkey makes an account and signs in; signing out, then in again, works', async () => {
   const { browser, key, account } = await newAccount();
   assert.match(browser.cookie, /^__Host-session=/);
-  assert.deepEqual((await browser.call('/api/account')).body, { account: { passkeys: 1 } });
+  assert.equal((await browser.call('/api/account')).body.account.passkeys, 1);
 
   await browser.call('/api/account/session', { method: 'DELETE' });
   assert.equal(browser.cookie, '');
@@ -132,7 +132,7 @@ test('a passkey makes an account and signs in; signing out, then in again, works
 
   const elsewhere = new Browser();
   assert.equal((await signIn(elsewhere, key, { userHandle: account })).status, 200);
-  assert.deepEqual((await elsewhere.call('/api/account')).body, { account: { passkeys: 1 } });
+  assert.equal((await elsewhere.call('/api/account')).body.account.passkeys, 1);
 });
 
 test('a challenge works once', async () => {
@@ -170,7 +170,7 @@ test('a signed-in account adds a passkey; a signed-out browser can\'t add one to
   const { body: options } = await browser.call('/api/account/challenge', { method: 'POST', body: { mode: 'create' } });
   assert.equal(options.excludeCredentials.length, 1);
   assert.equal((await browser.call('/api/account/passkey', { method: 'POST', body: await second.created(options) })).status, 200);
-  assert.deepEqual((await browser.call('/api/account')).body, { account: { passkeys: 2 } });
+  assert.equal((await browser.call('/api/account')).body.account.passkeys, 2);
 
   // Signed out between the challenge and the passkey: refused.
   const third = await Passkey.make();
@@ -306,7 +306,7 @@ test('a computer on an account reports about itself, signed, and only its accoun
   const { browser: other } = await newAccount();
   assert.equal((await other.call('/api/account/computers')).body.computers.length, 0);
 
-  // At most one every half minute.
+  // At most one every few seconds.
   assert.equal((await host.report(JSON.stringify(REPORT))).status, 429);
 });
 
@@ -347,4 +347,36 @@ test('a report goes when the computer asks, leaves its account, or the account i
   const id = (await b2.call('/api/account/computers')).body.computers[0].id;
   await b2.call(`/api/account/computers/${id}`, { method: 'DELETE' });
   assert.equal((await host2.report(JSON.stringify(REPORT))).status, 403);
+});
+
+test('the signed-in page gets its passkeys\' keys, to vouch for one when it lets the account manage a computer', async () => {
+  const { browser } = await newAccount();
+  const { keys } = (await browser.call('/api/account')).body.account;
+  assert.equal(keys.length, 1);
+  assert.equal(keys[0].alg, -7);
+  assert.match(keys[0].key, /^[A-Za-z0-9_-]{120,}$/);
+  assert.equal((await new Browser().call('/api/account')).body.account, null);
+});
+
+test('an action or enrollment goes only to a computer on the signed-in account, in a sane size', async () => {
+  const host = await hostKey();
+  const { browser } = await newAccount();
+  const { code } = await host.claim();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } });
+  const id = (await browser.call('/api/account/computers')).body.computers[0].id;
+  const assertion = { id: 'a', clientDataJSON: 'b', authenticatorData: 'c', signature: 'd' };
+
+  // Signed out, another site, someone else's computer, bad shapes: refused before the computer hears of it.
+  assert.equal((await new Browser().call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: '{}', assertion } })).status, 401);
+  assert.equal((await browser.call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: '{}', assertion }, origin: 'https://evil.example' })).status, 403);
+  const { browser: other } = await newAccount();
+  assert.equal((await other.call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: '{}', assertion } })).status, 404);
+  assert.equal((await browser.call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: '{}' } })).status, 400);
+  assert.equal((await browser.call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: 'x'.repeat(2000), assertion } })).status, 400);
+  assert.equal((await browser.call(`/api/account/computers/${id}/manage`, { method: 'POST', body: { cred: 'a' } })).status, 400);
+
+  // A well-formed one for a computer that isn't connected: it says so.
+  const offline = await browser.call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: '{}', assertion } });
+  assert.equal(offline.status, 409);
+  assert.match(offline.body.error, /offline/);
 });
