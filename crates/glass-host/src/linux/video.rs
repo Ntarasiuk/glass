@@ -381,7 +381,7 @@ fn encode_loop(
     bitrate: u32,
     scale: f64,
 ) {
-    let mut encoder: Option<Encoder> = None;
+    let mut encoder: Option<VideoEncoder> = None;
     let mut applied_bitrate = bitrate;
     let mut last: Option<(Frame, u64)> = None;
     loop {
@@ -429,7 +429,7 @@ fn encode_loop(
         let size = (frame.width, frame.height);
         let mut force = wants_key;
         if encoder.as_ref().is_none_or(|e| e.source_size() != size) {
-            match Encoder::new(
+            match VideoEncoder::new(
                 frame.width,
                 frame.height,
                 fps,
@@ -485,7 +485,77 @@ fn encode_loop(
                 }));
             }
             Ok(None) => {}
-            Err(e) => warn!("encode: {e:#}"),
+            Err(e) => {
+                warn!("encode: {e:#}");
+                if encoder.as_ref().is_some_and(VideoEncoder::is_hardware) {
+                    // Drop it; the next frame gets OpenH264 (and a keyframe).
+                    warn!("hardware encoding failed; using OpenH264 from now on");
+                    HARDWARE_FAILED.store(true, Ordering::Relaxed);
+                    encoder = None;
+                }
+            }
+        }
+    }
+}
+
+/// Set once the VA-API encoder has failed: the host stays on OpenH264 after that.
+static HARDWARE_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// OpenH264, or with `GLASS_ENCODER=vaapi` the GPU through VA-API. Opt-in for now: with
+/// frames captured into system memory, copying them to a discrete GPU costs about what
+/// software encoding does at 1080p (the GPU path uses less CPU, and only it can encode a
+/// 4K screen at full size). Capturing DMA-BUFs would remove the copy.
+enum VideoEncoder {
+    Soft(Encoder),
+    #[cfg(feature = "vaapi")]
+    Va(super::va_encode::VaEncoder),
+}
+
+impl VideoEncoder {
+    fn new(width: usize, height: usize, fps: u32, bitrate: u32, scale: f64) -> Result<Self> {
+        #[cfg(feature = "vaapi")]
+        if std::env::var("GLASS_ENCODER").is_ok_and(|e| e.eq_ignore_ascii_case("vaapi"))
+            && !HARDWARE_FAILED.load(Ordering::Relaxed)
+        {
+            match super::va_encode::VaEncoder::new(width, height, fps, bitrate, scale) {
+                Ok(e) => {
+                    info!("encoder: {} (VA-API)", e.name);
+                    return Ok(Self::Va(e));
+                }
+                Err(e) => {
+                    warn!("VA-API encoder unavailable, using OpenH264: {e:#}");
+                    HARDWARE_FAILED.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        Ok(Self::Soft(Encoder::new(width, height, fps, bitrate, scale)?))
+    }
+
+    fn is_hardware(&self) -> bool {
+        !matches!(self, Self::Soft(_))
+    }
+
+    fn source_size(&self) -> (usize, usize) {
+        match self {
+            Self::Soft(e) => e.source_size(),
+            #[cfg(feature = "vaapi")]
+            Self::Va(e) => e.source_size(),
+        }
+    }
+
+    fn set_bitrate(&mut self, bps: u32) {
+        match self {
+            Self::Soft(e) => e.set_bitrate(bps),
+            #[cfg(feature = "vaapi")]
+            Self::Va(e) => e.set_bitrate(bps),
+        }
+    }
+
+    fn encode(&mut self, frame: &Frame, force: bool) -> Result<Option<(Vec<u8>, bool)>> {
+        match self {
+            Self::Soft(e) => e.encode(frame, force),
+            #[cfg(feature = "vaapi")]
+            Self::Va(e) => e.encode(frame, force),
         }
     }
 }
@@ -750,11 +820,13 @@ mod tests {
         let data = Vec::with_capacity(4096);
         let ptr = data.as_ptr();
         mailbox.recycle(data);
-        assert_eq!(mailbox.buffer().as_ptr(), ptr, "the encoder's spare");
+        let buffer = mailbox.buffer();
+        assert_eq!(buffer.as_ptr(), ptr, "the encoder's spare");
         let mut waiting = frame(3);
         waiting.data.reserve(4096);
         let ptr = waiting.data.as_ptr();
         mailbox.put(waiting, 0);
-        assert_eq!(mailbox.buffer().as_ptr(), ptr, "the frame it replaces");
+        let buffer = mailbox.buffer();
+        assert_eq!(buffer.as_ptr(), ptr, "the frame it replaces");
     }
 }

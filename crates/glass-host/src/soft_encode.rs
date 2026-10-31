@@ -168,7 +168,7 @@ impl Encoder {
 
 /// BT.601 limited range, 2x2-averaged chroma; `div` box-filters the source down.
 /// Bands of rows convert in parallel: at 4K this was most of the time per frame.
-fn to_i420(
+pub(crate) fn to_i420(
     f: &Frame,
     div: usize,
     (w, h): (usize, usize),

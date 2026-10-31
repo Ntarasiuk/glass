@@ -59,3 +59,13 @@ objc2-video-toolbox = "0.3.2"
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "file_chooser"] }
 evdev = "0.13"
 pipewire = "0.10"
+# Hardware H.264 through VA-API (Intel, AMD), with OpenH264 as the fallback.
+gstreamer = { version = "0.25", optional = true }
+gstreamer-app = { version = "0.25", optional = true }
+gstreamer-video = { version = "0.25", optional = true }
+
+[features]
+# Linux: GLASS_ENCODER=vaapi encodes on the GPU through GStreamer's VA-API plugin (falling
+# back to OpenH264). Off by default: it links the GStreamer libraries, so the host would
+# need them to start.
+vaapi = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
