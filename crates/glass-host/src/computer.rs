@@ -234,7 +234,7 @@ const AGENT_HOLD: Duration = Duration::from_secs(20);
 
 /// Waits while paused or while a person is using the computer (just looking doesn't wait
 /// for them); refuses when stopped.
-async fn may_act(look: bool) -> Result<(), Refused> {
+pub(crate) async fn may_act(look: bool) -> Result<(), Refused> {
     let start = Instant::now();
     let hold = if matches!(crate::grants::current(), crate::grants::Actor::Agent(_)) { AGENT_HOLD } else { PAUSE_WAIT };
     let mut said = false;
@@ -285,16 +285,31 @@ async fn display(id: Option<u32>) -> Result<DisplayInfo, Refused> {
     }
 }
 
-/// `x`, `y` in the pixels of the last screenshot of `d` (or of a default-sized one), as 0..1.
-fn normalize(d: &DisplayInfo, x: f64, y: f64) -> (f32, f32) {
-    let (w, h) = with(|s| s.sizes.get(&(asker(), d.id)).copied()).unwrap_or_else(|| {
+/// The size of this agent's last screenshot of `d` (or of a default-sized one).
+fn shot_size(d: &DisplayInfo) -> (u32, u32) {
+    with(|s| s.sizes.get(&(asker(), d.id)).copied()).unwrap_or_else(|| {
         let (w, h) = crate::thumbs::fit(d.width as usize, d.height as usize, DEFAULT_MAX);
         (w as u32, h as u32)
-    });
+    })
+}
+
+/// `x`, `y` in the pixels of the last screenshot of `d` (or of a default-sized one), as 0..1.
+fn normalize(d: &DisplayInfo, x: f64, y: f64) -> (f32, f32) {
+    let (w, h) = shot_size(d);
     ((x / w.max(1) as f64).clamp(0.0, 1.0) as f32, (y / h.max(1) as f64).clamp(0.0, 1.0) as f32)
 }
 
-fn announce(kind: &str, detail: String, at: Option<(u32, f32, f32)>) {
+/// A global point (in points) as the display it's on, where it is in the pixels of this
+/// agent's latest screenshot of that display, and where as 0..1.
+pub(crate) async fn locate(x: f64, y: f64) -> Option<(u32, f64, f64, f32, f32)> {
+    let all = displays().await.ok()?;
+    let d = all.iter().find(|d| x >= d.x && y >= d.y && x < d.x + d.points_width && y < d.y + d.points_height)?;
+    let (w, h) = shot_size(d);
+    let (nx, ny) = ((x - d.x) / d.points_width.max(1.0), (y - d.y) / d.points_height.max(1.0));
+    Some((d.id, nx * w as f64, ny * h as f64, nx as f32, ny as f32))
+}
+
+pub(crate) fn announce(kind: &str, detail: String, at: Option<(u32, f32, f32)>) {
     let agent = match crate::grants::current() {
         crate::grants::Actor::Agent(g) => Some(g.client_name),
         crate::grants::Actor::Owner => None,
@@ -557,7 +572,7 @@ fn waiting<R>(f: impl FnOnce(&mut HashMap<u64, Waiting>) -> R) -> R {
 }
 
 /// Who's asking: an agent's grant, or the owner's own tools.
-fn asker() -> String {
+pub(crate) fn asker() -> String {
     match crate::grants::current() {
         crate::grants::Actor::Agent(g) => g.id,
         crate::grants::Actor::Owner => "owner".into(),
@@ -804,6 +819,9 @@ pub enum Action {
     Type { text: String },
     Key { keys: String },
     WaitForChange { display: Option<u32>, timeout_ms: Option<u64> },
+    Snapshot { app: Option<String>, #[serde(default)] all_windows: bool, max_lines: Option<usize> },
+    Press { #[serde(rename = "ref")] target: String },
+    SetValue { #[serde(rename = "ref")] target: String, text: String },
     RequestHelp { text: String, wait_ms: Option<u64> },
     Confirm { text: String, wait_ms: Option<u64> },
     CheckAnswer { id: u64, wait_ms: Option<u64> },
@@ -815,6 +833,9 @@ impl Action {
         match self {
             Action::Screenshot { .. } => ("screenshot", true),
             Action::WaitForChange { .. } => ("wait_for_change", true),
+            Action::Snapshot { .. } => ("snapshot", true),
+            Action::Press { .. } => ("press", false),
+            Action::SetValue { .. } => ("set_value", false),
             Action::Click { .. } => ("click", false),
             Action::Move { .. } => ("move", false),
             Action::Drag { .. } => ("drag", false),
@@ -839,6 +860,9 @@ impl Action {
             Action::Move { x, y, .. } | Action::Scroll { x, y, .. } => format!("at {x:.0}, {y:.0}"),
             Action::Drag { from_x, from_y, to_x, to_y, .. } => format!("{from_x:.0}, {from_y:.0} → {to_x:.0}, {to_y:.0}"),
             Action::Type { text } => format!("{} characters", text.chars().count()),
+            Action::Snapshot { app, .. } => app.clone().unwrap_or_default(),
+            Action::Press { target } => target.clone(),
+            Action::SetValue { target, text } => format!("{target}: {} characters", text.chars().count()),
             Action::Key { keys } => keys.clone(),
             Action::RequestHelp { text, .. } | Action::Confirm { text, .. } => text.chars().take(200).collect(),
             Action::CheckAnswer { id, .. } => format!("question {id}"),
@@ -864,6 +888,9 @@ pub async fn act(action: Action) -> Result<Value, Refused> {
         Action::WaitForChange { display, timeout_ms } => {
             wait_for_change(display, Duration::from_millis(timeout_ms.unwrap_or(10_000).min(60_000))).await
         }
+        Action::Snapshot { app, all_windows, max_lines } => crate::elements::snapshot(app, all_windows, max_lines).await,
+        Action::Press { target } => crate::elements::press(&target).await,
+        Action::SetValue { target, text } => crate::elements::set_value(&target, &text).await,
         Action::RequestHelp { text, wait_ms } => ask("help", &text, wait_ms.map(Duration::from_millis)).await,
         Action::Confirm { text, wait_ms } => ask("confirm", &text, wait_ms.map(Duration::from_millis)).await,
         Action::CheckAnswer { id, wait_ms } => {

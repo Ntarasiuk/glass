@@ -18,6 +18,9 @@ The person who owns it can watch you live and pause or stop you at any time.\n\
 computers running Glass, and every tool takes `machine` to work on one of them.\n\
 - Start with `screenshot`. Coordinates for click, move, drag and scroll are in the pixels of the \
 latest screenshot of that display.\n\
+- On a Mac, `snapshot` reads an app's window as text, with a ref on each element you can act on; \
+`press` and `set_value` act on a ref without moving the pointer. Prefer them for ordinary app \
+windows, and screenshot and click for what a snapshot doesn't show (canvases, games, video).\n\
 - After acting, check the result: pass `screenshot_after: true`, or call `wait_for_change` then `screenshot`.\n\
 - Prefer keyboard shortcuts (`press_keys`) when they're reliable.\n\
 - Before anything hard to undo (sending, buying, deleting, posting, changing settings or \
@@ -213,6 +216,14 @@ pub(crate) fn tools() -> Value {
           "inputSchema": schema(json!({ "text": { "type": "string" }, "screenshot_after": after }), &["text"]) },
         { "name": "press_keys", "description": "Presses a key or shortcut, e.g. \"return\", \"cmd+s\", \"cmd+shift+4\", \"ctrl+c\", \"tab\", \"escape\", \"left\", \"f5\". On Linux, use ctrl where macOS uses cmd.",
           "inputSchema": schema(json!({ "keys": { "type": "string" }, "screenshot_after": after }), &["keys"]) },
+        { "name": "snapshot", "description": "Reads an app's window as text: each element's role, name and value, with a ref (like @k3f9:e12) on each one press or set_value can act on. Cheaper and more exact than a screenshot for ordinary app windows; canvases, games, video and some custom-drawn apps don't show up, so use screenshot for those. The app in front unless you name one. macOS only.",
+          "inputSchema": schema(json!({ "app": { "type": "string", "description": "The app's name or bundle id, e.g. \"Mail\" or \"com.apple.mail\"; the app in front if left out." },
+            "all_windows": { "type": "boolean", "description": "Every window of the app, not just its focused one." },
+            "max_lines": { "type": "integer", "minimum": 20, "maximum": 2000, "description": "Default 400." } }), &[]) },
+        { "name": "press", "description": "Presses an element from a snapshot (a button, link, checkbox, tab, menu item, row…) through Accessibility, without moving the pointer, even in a window behind others. A ref is good only while its window stays the same: if it changed, nothing is pressed and it says so; take a new snapshot.",
+          "inputSchema": schema(json!({ "ref": { "type": "string", "description": "From snapshot, e.g. @k3f9:e12." }, "screenshot_after": after }), &["ref"]) },
+        { "name": "set_value", "description": "Replaces the text in a field from a snapshot, without typing, and says what the field shows after. Some web pages don't notice text set this way: if the page doesn't react, click the field and use type_text.",
+          "inputSchema": schema(json!({ "ref": { "type": "string", "description": "From snapshot, e.g. @k3f9:e12." }, "text": { "type": "string" }, "screenshot_after": after }), &["ref", "text"]) },
         { "name": "wait_for_change", "description": "Waits until the display changes and settles (a page loads, a dialog opens), or the timeout passes.",
           "inputSchema": schema(json!({ "display": display, "timeout_ms": { "type": "integer", "description": "Default 10000, at most 60000." } }), &[]) },
         { "name": "request_help", "description": "Asks the person to do something you can't (sign in, a 2FA code, a CAPTCHA, a decision) and waits until they say it's done. Their note comes back. If they haven't answered within wait_seconds, it says the question is pending: collect the answer later with check_answer.",
@@ -263,6 +274,8 @@ pub(crate) enum Show {
     Done,
     Shot,
     Wait,
+    /// Its own words (`text`).
+    Said,
     Help,
     Confirm,
     /// A pending question's answer: help or confirm, as it was asked.
@@ -290,19 +303,23 @@ pub(crate) fn plan(name: &str, args: &Value) -> Result<Step, String> {
             "dx": args.get("dx").cloned().unwrap_or(json!(0)), "dy": args.get("dy").cloned().unwrap_or(json!(0)) }), Show::Done),
         "type_text" => (json!({ "action": "type", "text": args["text"] }), Show::Done),
         "press_keys" => (json!({ "action": "key", "keys": args["keys"] }), Show::Done),
+        "snapshot" => (json!({ "action": "snapshot", "app": args.get("app"),
+            "all_windows": args["all_windows"].as_bool().unwrap_or(false), "max_lines": args.get("max_lines") }), Show::Said),
+        "press" => (json!({ "action": "press", "ref": args["ref"] }), Show::Said),
+        "set_value" => (json!({ "action": "set_value", "ref": args["ref"], "text": args["text"] }), Show::Said),
         "wait_for_change" => (json!({ "action": "wait_for_change", "display": display, "timeout_ms": args.get("timeout_ms") }), Show::Wait),
         "request_help" => (json!({ "action": "request_help", "text": args["message"], "wait_ms": wait_ms(args) }), Show::Help),
         "confirm" => (json!({ "action": "confirm", "text": args["action"], "wait_ms": wait_ms(args) }), Show::Confirm),
         "check_answer" => (json!({ "action": "check_answer", "id": args["id"], "wait_ms": wait_ms(args) }), Show::Answer),
         other => return Err(format!("unknown tool {other}")),
     };
-    let after = after && matches!(show, Show::Done);
+    let after = after && (matches!(show, Show::Done) || matches!(name, "press" | "set_value"));
     Ok(Step::Act { action, show, after, display })
 }
 
 /// Tools that only look (no input); the rest need `computer:use`.
 pub(crate) fn looks_only(name: &str) -> bool {
-    matches!(name, "list_displays" | "screenshot" | "wait_for_change")
+    matches!(name, "list_displays" | "screenshot" | "wait_for_change" | "snapshot")
 }
 
 /// An action's result as MCP content.
@@ -322,6 +339,7 @@ pub(crate) fn show(how: Show, v: &Value) -> Vec<Value> {
     };
     match how {
         Show::Done => vec![text("Done.")],
+        Show::Said => vec![text(v["text"].as_str().unwrap_or("Done."))],
         Show::Shot => image_content(v),
         Show::Wait => vec![text(if v["changed"].as_bool().unwrap_or(false) {
             format!("The screen changed and settled after {} ms.", v["waited_ms"])

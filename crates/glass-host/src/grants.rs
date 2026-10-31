@@ -725,12 +725,13 @@ pub fn current() -> Actor {
     ACTOR.try_with(Actor::clone).unwrap_or(Actor::Owner)
 }
 
-/// Where input is about to go: a point (global, in points) for the pointer, or wherever the
-/// keyboard is.
+/// Where input is about to go: a point (global, in points) for the pointer, wherever the
+/// keyboard is, or an app's element pressed through Accessibility (by process id).
 #[derive(Debug, Clone, Copy)]
 pub enum Target {
     Point(f64, f64),
     Keys,
+    App(i32),
 }
 
 /// Before input reaches the computer: an agent under a grant drives only allowed apps (as
@@ -776,6 +777,7 @@ pub fn target_app(target: Target) -> Option<String> {
         match target {
             Target::Point(x, y) => crate::platform::front::app_at(x, y),
             Target::Keys => crate::platform::front::key_app(),
+            Target::App(pid) => crate::platform::front::bundle_of(pid),
         }
     }
     #[cfg(not(target_os = "macos"))]
