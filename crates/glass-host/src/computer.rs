@@ -482,8 +482,9 @@ pub async fn type_text(text: &str) -> Result<Value, Refused> {
         }
         inject(events)?;
     }
-    // An agent's typing isn't shown to viewers or logged: it may be a secret.
-    let shown = if matches!(crate::grants::current(), crate::grants::Actor::Agent(_)) {
+    // An agent's typing isn't shown to viewers or logged, nor anyone's into a password
+    // field: it may be a secret.
+    let shown = if matches!(crate::grants::current(), crate::grants::Actor::Agent(_)) || crate::grants::secure_input() {
         format!("{} characters", text.chars().count())
     } else {
         let shown: String = text.chars().take(60).collect();
@@ -501,8 +502,14 @@ pub async fn key(keys: &str) -> Result<Value, Refused> {
     let mut events: Vec<InputEvent> = codes.iter().map(|&keycode| InputEvent::KeyDown { keycode }).collect();
     events.extend(codes.iter().rev().map(|&keycode| InputEvent::KeyUp { keycode }));
     inject(events)?;
-    announce("key", keys.to_string(), None);
+    announce("key", shown_keys(keys), None);
     Ok(json!({ "ok": true }))
+}
+
+/// Keys as viewers and the log see them: not which ones, while a password field has the
+/// keyboard (a password typed key by key would be spelled out).
+fn shown_keys(keys: &str) -> String {
+    if crate::grants::secure_input() { "a key, into a password field".into() } else { keys.to_string() }
 }
 
 /// Waits for the display to change and then settle (or for `timeout`).
@@ -839,7 +846,7 @@ impl Action {
             Action::Move { x, y, .. } | Action::Scroll { x, y, .. } => format!("at {x:.0}, {y:.0}"),
             Action::Drag { from_x, from_y, to_x, to_y, .. } => format!("{from_x:.0}, {from_y:.0} → {to_x:.0}, {to_y:.0}"),
             Action::Type { text } => format!("{} characters", text.chars().count()),
-            Action::Key { keys } => keys.clone(),
+            Action::Key { keys } => shown_keys(keys),
             Action::RequestHelp { text, .. } | Action::Confirm { text, .. } => text.chars().take(200).collect(),
             Action::CheckAnswer { id, .. } => format!("question {id}"),
         }
