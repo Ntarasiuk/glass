@@ -42,6 +42,12 @@ pub struct Encoder {
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
+    threads: usize,
+}
+
+/// Cores for colour conversion.
+fn threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8)
 }
 
 impl Encoder {
@@ -53,6 +59,7 @@ impl Encoder {
             1
         };
         let out = ((width / div) & !1, (height / div) & !1);
+        let threads = threads();
         let config = EncoderConfig::new()
             .usage_type(UsageType::ScreenContentRealTime)
             .rate_control_mode(RateControlMode::Bitrate)
@@ -72,6 +79,7 @@ impl Encoder {
             y: vec![0; w * h],
             u: vec![0; (w / 2) * (h / 2)],
             v: vec![0; (w / 2) * (h / 2)],
+            threads,
         })
     }
 
@@ -123,6 +131,7 @@ impl Encoder {
 }
 
 /// BT.601 limited range, 2x2-averaged chroma; `div` box-filters the source down.
+/// Bands of rows convert in parallel: at 4K this was most of the time per frame.
 fn to_i420(
     f: &Frame,
     div: usize,
@@ -131,39 +140,78 @@ fn to_i420(
     u: &mut [u8],
     v: &mut [u8],
 ) {
+    let (cw, ch) = (w / 2, h / 2);
+    if cw == 0 || ch == 0 {
+        return;
+    }
+    // Chroma rows per band (each is two luma rows).
+    let rows = ch.div_ceil(threads().min(ch));
+    let mut bands = y[..w * h]
+        .chunks_mut(rows * 2 * w)
+        .zip(u[..cw * ch].chunks_mut(rows * cw))
+        .zip(v[..cw * ch].chunks_mut(rows * cw))
+        .enumerate();
+    // The last band runs here, the others on their own threads.
+    let Some((last, ((ly, lu), lv))) = bands.next_back() else {
+        return;
+    };
+    std::thread::scope(|s| {
+        for (i, ((yb, ub), vb)) in bands {
+            s.spawn(move || convert_band(f, div, w, i * rows, yb, ub, vb));
+        }
+        convert_band(f, div, w, last * rows, ly, lu, lv);
+    });
+}
+
+/// Converts chroma rows from `cy0` on; `y`, `u` and `v` hold just this band.
+fn convert_band(f: &Frame, div: usize, w: usize, cy0: usize, y: &mut [u8], u: &mut [u8], v: &mut [u8]) {
+    match div {
+        1 => convert_band_div::<1>(f, w, cy0, y, u, v),
+        2 => convert_band_div::<2>(f, w, cy0, y, u, v),
+        _ => unreachable!("frames are encoded at full or half size"),
+    }
+}
+
+fn convert_band_div<const D: usize>(f: &Frame, w: usize, cy0: usize, y: &mut [u8], u: &mut [u8], v: &mut [u8]) {
     let (ri, gi, bi) = match f.format {
         PixelFormat::Bgrx => (2, 1, 0),
         PixelFormat::Rgbx => (0, 1, 2),
     };
-    // Average a div×div block of source pixels.
-    let sample = |sx: usize, sy: usize| -> (i32, i32, i32) {
-        let (mut r, mut g, mut b) = (0i32, 0i32, 0i32);
-        for dy in 0..div {
-            let row = &f.data[(sy * div + dy) * f.stride..];
-            for dx in 0..div {
-                let p = &row[(sx * div + dx) * 4..];
-                r += p[ri] as i32;
-                g += p[gi] as i32;
-                b += p[bi] as i32;
+    let cw = w / 2;
+    let n = (D * D) as i32;
+    // Per chroma column: the r, g, b sums of its four luma pixels.
+    let mut acc = vec![[0i32; 3]; cw];
+    for (i, (urow, vrow)) in u.chunks_exact_mut(cw).zip(v.chunks_exact_mut(cw)).enumerate() {
+        for dy in 0..2 {
+            let py = (cy0 + i) * 2 + dy;
+            let src: [&[u8]; D] = std::array::from_fn(|k| {
+                let start = (py * D + k) * f.stride;
+                &f.data[start..start + w * D * 4]
+            });
+            let yrow = &mut y[(i * 2 + dy) * w..][..w];
+            for (px, out) in yrow.iter_mut().enumerate() {
+                // Average a D×D block of source pixels.
+                let (mut r, mut g, mut b) = (0i32, 0i32, 0i32);
+                for row in &src {
+                    for p in row[px * D * 4..(px + 1) * D * 4].chunks_exact(4) {
+                        r += p[ri] as i32;
+                        g += p[gi] as i32;
+                        b += p[bi] as i32;
+                    }
+                }
+                let (r, g, b) = (r / n, g / n, b / n);
+                *out = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
+                let a = &mut acc[px / 2];
+                a[0] += r;
+                a[1] += g;
+                a[2] += b;
             }
         }
-        let n = (div * div) as i32;
-        (r / n, g / n, b / n)
-    };
-    for cy in 0..h / 2 {
-        for cx in 0..w / 2 {
-            let (mut rs, mut gs, mut bs) = (0, 0, 0);
-            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                let (px, py) = (cx * 2 + dx, cy * 2 + dy);
-                let (r, g, b) = sample(px, py);
-                y[py * w + px] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
-                rs += r;
-                gs += g;
-                bs += b;
-            }
-            let (r, g, b) = (rs / 4, gs / 4, bs / 4);
-            u[cy * (w / 2) + cx] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
-            v[cy * (w / 2) + cx] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
+        for ((a, cu), cv) in acc.iter_mut().zip(urow.iter_mut()).zip(vrow.iter_mut()) {
+            let (r, g, b) = (a[0] / 4, a[1] / 4, a[2] / 4);
+            *cu = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
+            *cv = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
+            *a = [0; 3];
         }
     }
 }
@@ -171,6 +219,52 @@ fn to_i420(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The original single-threaded conversion, which the parallel one must match exactly.
+    fn reference_i420(
+        f: &Frame,
+        div: usize,
+        (w, h): (usize, usize),
+        y: &mut [u8],
+        u: &mut [u8],
+        v: &mut [u8],
+    ) {
+        let (ri, gi, bi) = match f.format {
+            PixelFormat::Bgrx => (2, 1, 0),
+            PixelFormat::Rgbx => (0, 1, 2),
+        };
+        // Average a div×div block of source pixels.
+        let sample = |sx: usize, sy: usize| -> (i32, i32, i32) {
+            let (mut r, mut g, mut b) = (0i32, 0i32, 0i32);
+            for dy in 0..div {
+                let row = &f.data[(sy * div + dy) * f.stride..];
+                for dx in 0..div {
+                    let p = &row[(sx * div + dx) * 4..];
+                    r += p[ri] as i32;
+                    g += p[gi] as i32;
+                    b += p[bi] as i32;
+                }
+            }
+            let n = (div * div) as i32;
+            (r / n, g / n, b / n)
+        };
+        for cy in 0..h / 2 {
+            for cx in 0..w / 2 {
+                let (mut rs, mut gs, mut bs) = (0, 0, 0);
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let (px, py) = (cx * 2 + dx, cy * 2 + dy);
+                    let (r, g, b) = sample(px, py);
+                    y[py * w + px] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
+                    rs += r;
+                    gs += g;
+                    bs += b;
+                }
+                let (r, g, b) = (rs / 4, gs / 4, bs / 4);
+                u[cy * (w / 2) + cx] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
+                v[cy * (w / 2) + cx] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
+            }
+        }
+    }
 
     #[test]
     fn white_and_black_to_i420() {
@@ -245,5 +339,72 @@ mod tests {
         to_i420(&rgbx, 1, (2, 2), &mut y2, &mut u2, &mut v2);
         assert_eq!((y1, u1, v1.clone()), (y2, u2, v2));
         assert!(v1[0] > 200, "red has high V");
+    }
+
+    /// A frame with detail everywhere, padded rows and an odd size.
+    fn busy_frame(width: usize, height: usize, format: PixelFormat) -> Frame {
+        let stride = width * 4 + 12;
+        let data = (0..stride * height)
+            .map(|i| ((i * 7919) ^ (i / stride * 31)) as u8)
+            .collect();
+        Frame { width, height, stride, format, data }
+    }
+
+    #[test]
+    fn parallel_conversion_matches_the_reference() {
+        for (width, height) in [(2, 2), (6, 4), (643, 361), (1923, 1083)] {
+            for format in [PixelFormat::Bgrx, PixelFormat::Rgbx] {
+                for div in [1, 2] {
+                    let frame = busy_frame(width, height, format);
+                    let (w, h) = ((width / div) & !1, (height / div) & !1);
+                    let planes = || (vec![0u8; w * h], vec![0u8; w * h / 4], vec![0u8; w * h / 4]);
+                    let ((mut y1, mut u1, mut v1), (mut y2, mut u2, mut v2)) = (planes(), planes());
+                    to_i420(&frame, div, (w, h), &mut y1, &mut u1, &mut v1);
+                    reference_i420(&frame, div, (w, h), &mut y2, &mut u2, &mut v2);
+                    assert!(y1 == y2 && u1 == u2 && v1 == v2, "{width}x{height} {format:?} div {div}");
+                }
+            }
+        }
+    }
+
+    /// Time per 4K frame, split into colour conversion and encoding:
+    /// `cargo test --release -p glass-host soft_encode_4k_speed -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn soft_encode_4k_speed() {
+        let (width, height) = (3840, 2160);
+        // Flat areas, gradients and fine detail, like a desktop.
+        let mut frame = busy_frame(width, height, PixelFormat::Bgrx);
+        for (i, p) in frame.data.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (i % (frame.stride / 4), i / (frame.stride / 4));
+            p[0] = (x ^ y) as u8;
+            p[1] = (x * 3 / 7) as u8;
+            p[2] = ((x / 40) * 37 + (y / 20) * 11) as u8;
+        }
+        let mut enc = Encoder::new(width, height, 60, 30_000_000, 1.0).unwrap();
+        let (w, h) = enc.out;
+        let (mut convert, mut encode) = (0.0, 0.0);
+        let frames = 60;
+        for i in 0..frames {
+            // A block moves each frame, as when dragging a window.
+            for row in 300..700 {
+                let start = row * frame.stride + i * 160;
+                frame.data[start..start + 2400].iter_mut().for_each(|b| *b = b.wrapping_add(90));
+            }
+            let t = std::time::Instant::now();
+            to_i420(&frame, enc.div, enc.out, &mut enc.y, &mut enc.u, &mut enc.v);
+            convert += t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            let yuv = YUVSlices::new((&enc.y, &enc.u, &enc.v), (w, h), (w, w / 2, w / 2));
+            enc.h264.encode(&yuv).unwrap();
+            encode += t.elapsed().as_secs_f64();
+        }
+        let ms = |s: f64| s / frames as f64 * 1e3;
+        println!(
+            "4K → {w}x{h}, {} threads: convert {:.1} ms, encode {:.1} ms per frame",
+            enc.threads,
+            ms(convert),
+            ms(encode)
+        );
     }
 }
