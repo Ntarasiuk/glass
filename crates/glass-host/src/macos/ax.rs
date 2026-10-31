@@ -39,6 +39,7 @@ unsafe extern "C" {
     fn AXUIElementSetAttributeValue(element: *const c_void, attribute: *const c_void, value: *const c_void) -> AXError;
     fn AXUIElementIsAttributeSettable(element: *const c_void, attribute: *const c_void, settable: *mut u8) -> AXError;
     fn AXUIElementSetMessagingTimeout(element: *const c_void, seconds: f32) -> AXError;
+    fn AXUIElementGetPid(element: *const c_void, pid: *mut i32) -> AXError;
     fn AXValueGetTypeID() -> usize;
     fn AXValueGetType(value: *const c_void) -> u32;
     fn AXValueGetValue(value: *const c_void, kind: u32, out: *mut c_void) -> u8;
@@ -49,6 +50,7 @@ unsafe extern "C" {
     fn CFRetain(cf: *const c_void) -> *const c_void;
     fn CFRelease(cf: *const c_void);
     fn CFGetTypeID(cf: *const c_void) -> usize;
+    fn CFEqual(a: *const c_void, b: *const c_void) -> bool;
     fn CFStringGetTypeID() -> usize;
     fn CFBooleanGetTypeID() -> usize;
     fn CFNumberGetTypeID() -> usize;
@@ -215,6 +217,22 @@ impl Element {
 
     fn role(&self) -> Option<String> {
         self.attr("AXRole").ok().and_then(|r| r.string())
+    }
+
+    /// A window its app still lists among its windows.
+    fn listed(&self) -> bool {
+        let mut pid = 0;
+        // SAFETY: valid element; a new reference to the app's element, released on drop.
+        if unsafe { AXUIElementGetPid(self.0.ptr(), &mut pid) } != AX_OK {
+            return true;
+        }
+        let Some(app) = Cf::owned(unsafe { AXUIElementCreateApplication(pid) }).map(Element::from) else { return true };
+        match app.attr("AXWindows") {
+            // SAFETY: both valid CF objects.
+            Ok(list) => list.items().iter().any(|w| unsafe { CFEqual(w.ptr(), self.0.ptr()) }),
+            // Can't tell: don't call it gone.
+            Err(_) => true,
+        }
     }
 
     fn children(&self) -> Vec<Element> {
@@ -387,13 +405,25 @@ pub fn walk(app: &Found, all_windows: bool, budget: Budget) -> Result<Walk, Stri
     let root = Element::from(Cf::owned(unsafe { AXUIElementCreateApplication(app.pid) }).ok_or("can't read that app")?);
     // Chromium and Electron apps build their tree only when asked for it.
     root.set("AXManualAccessibility", (CFBoolean::new(true) as *const CFBoolean).cast());
+    let name = if app.name.is_empty() { "That app" } else { &app.name };
+    // Busy, or just launched: it can take a while to answer.
+    let busy = || format!("{name} isn't answering Accessibility right now (busy, or just starting). Try again in a moment, or use screenshot.");
     let windows: Vec<Element> = if all_windows {
-        root.attr("AXWindows").map(|w| w.items().into_iter().map(Element::from).collect()).map_err(why)?
+        match root.attr("AXWindows") {
+            Ok(w) => w.items().into_iter().map(Element::from).collect(),
+            Err(AX_CANNOT_COMPLETE) => return Err(busy()),
+            Err(e) => return Err(why(e)),
+        }
     } else {
         match root.attr("AXFocusedWindow").or_else(|_| root.attr("AXMainWindow")) {
             Ok(w) => vec![Element::from(w)],
             Err(AX_API_DISABLED) => return Err(why(AX_API_DISABLED)),
-            Err(_) => root.attr("AXWindows").map(|w| w.items().into_iter().take(1).map(Element::from).collect()).unwrap_or_default(),
+            Err(AX_CANNOT_COMPLETE) => return Err(busy()),
+            Err(_) => match root.attr("AXWindows") {
+                Ok(w) => w.items().into_iter().take(1).map(Element::from).collect(),
+                Err(AX_CANNOT_COMPLETE) => return Err(busy()),
+                Err(_) => Vec::new(),
+            },
         }
     };
     // While the screen is locked (and for windows on another Space), the app answers with
@@ -413,7 +443,6 @@ pub fn walk(app: &Found, all_windows: bool, budget: Budget) -> Result<Walk, Stri
         }
     }
     if roots.is_empty() {
-        let name = if app.name.is_empty() { "That app" } else { &app.name };
         return Err(format!("{name} has no window Accessibility can see: none open, on another Space, or the screen is locked. Use screenshot."));
     }
     // Last, so the window comes first when there's more than fits.
@@ -437,6 +466,16 @@ fn why(err: AXError) -> String {
 /// What a kept element is now; `None` once it's gone.
 pub fn look(el: &Element) -> Option<Now> {
     let role = el.attr("AXRole").ok()?.string()?;
+    // A closed window's elements go on answering for themselves, and so, while its app
+    // holds on to it, does the window: it's gone once its app no longer lists it.
+    if let Ok(window) = el.attr("AXWindow") {
+        let window = Element::from(window);
+        match window.role().as_deref() {
+            None => return None,
+            Some("AXWindow") if !window.listed() => return None,
+            _ => {}
+        }
+    }
     let subrole = el.attr("AXSubrole").ok().and_then(|s| s.string());
     let text = |a: &str| el.attr(a).ok().and_then(|v| v.string()).filter(|s| !s.trim().is_empty());
     let text_like = matches!(role.as_str(), "AXStaticText" | "AXHeading");
