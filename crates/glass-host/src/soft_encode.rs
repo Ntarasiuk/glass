@@ -43,9 +43,11 @@ pub struct Encoder {
     u: Vec<u8>,
     v: Vec<u8>,
     threads: usize,
+    /// One slice per thread is set once OpenH264 has initialised (on the first frame).
+    sliced: bool,
 }
 
-/// Cores for colour conversion.
+/// Cores for colour conversion and OpenH264's slices.
 fn threads() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8)
 }
@@ -67,7 +69,7 @@ impl Encoder {
             .max_frame_rate(FrameRate::from_hz(fps as f32))
             .intra_frame_period(IntraFramePeriod::from_num_frames(MAX_GOP_FRAMES))
             .skip_frames(false)
-            .num_threads(4);
+            .num_threads(threads.min(4) as u16);
         let h264 = H264::with_api_config(OpenH264API::from_source(), config)
             .map_err(|e| anyhow!("openh264: {e}"))?;
         let (w, h) = out;
@@ -80,6 +82,7 @@ impl Encoder {
             u: vec![0; (w / 2) * (h / 2)],
             v: vec![0; (w / 2) * (h / 2)],
             threads,
+            sliced: false,
         })
     }
 
@@ -126,7 +129,40 @@ impl Encoder {
         let bits = self.h264.encode(&yuv).map_err(|e| anyhow!("encode: {e}"))?;
         let keyframe = matches!(bits.frame_type(), FrameType::IDR | FrameType::I);
         let data = bits.to_vec();
+        if !self.sliced {
+            self.sliced = true;
+            self.split_slices();
+        }
         Ok((!data.is_empty()).then_some((data, keyframe)))
+    }
+
+    /// OpenH264 encodes slices in parallel, but the crate always asks for one slice, so
+    /// `num_threads` alone does nothing. Re-applies the parameters with one slice per
+    /// thread (the crate initialises lazily, so this runs after the first frame).
+    fn split_slices(&mut self) {
+        if self.threads < 2 {
+            return;
+        }
+        // SAFETY: Get/SetOption(ENCODER_OPTION_SVC_ENCODE_PARAM_EXT) read and write an
+        // SEncParamExt, which lives for the duration of the calls.
+        unsafe {
+            let api = self.h264.raw_api();
+            let mut params: openh264_sys2::SEncParamExt = std::mem::zeroed();
+            let option = openh264_sys2::ENCODER_OPTION_SVC_ENCODE_PARAM_EXT;
+            if api.get_option(option, (&raw mut params).cast()) != 0 {
+                return;
+            }
+            let slices = &mut params.sSpatialLayers[0].sSliceArgument;
+            slices.uiSliceMode = openh264_sys2::SM_FIXEDSLCNUM_SLICE;
+            // OpenH264 runs at most 4 slice threads; it drops to one when it starts with
+            // a single slice.
+            let slice_threads = self.threads.min(4);
+            slices.uiSliceNum = slice_threads as u32;
+            params.iMultipleThreadIdc = slice_threads as u16;
+            if api.set_option(option, (&raw mut params).cast()) != 0 {
+                tracing::warn!("openh264: couldn't split into {slice_threads} slices");
+            }
+        }
     }
 }
 
@@ -367,6 +403,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sliced_frames_decode() {
+        let mut enc = Encoder::new(1280, 720, 30, 4_000_000, 1.0).unwrap();
+        let mut dec = openh264::decoder::Decoder::new().unwrap();
+        for i in 0..4u8 {
+            let mut frame = busy_frame(1280, 720, PixelFormat::Bgrx);
+            frame.data.iter_mut().step_by(97).for_each(|b| *b = b.wrapping_add(i * 40));
+            let (data, _) = enc.encode(&frame, i == 0).unwrap().expect("output");
+            assert!(dec.decode(&data).unwrap().is_some(), "frame {i} decodes");
+        }
+    }
+
     /// Time per 4K frame, split into colour conversion and encoding:
     /// `cargo test --release -p glass-host soft_encode_4k_speed -- --ignored --nocapture`
     #[test]
@@ -397,6 +445,10 @@ mod tests {
             let t = std::time::Instant::now();
             let yuv = YUVSlices::new((&enc.y, &enc.u, &enc.v), (w, h), (w, w / 2, w / 2));
             enc.h264.encode(&yuv).unwrap();
+            if !enc.sliced {
+                enc.sliced = true;
+                enc.split_slices();
+            }
             encode += t.elapsed().as_secs_f64();
         }
         let ms = |s: f64| s / frames as f64 * 1e3;
