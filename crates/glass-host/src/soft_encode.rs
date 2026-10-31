@@ -49,7 +49,9 @@ pub struct Encoder {
 
 /// Cores for colour conversion and OpenH264's slices.
 fn threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8)
+    // available_parallelism() can read cgroup files, so ask once.
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8))
 }
 
 impl Encoder {
