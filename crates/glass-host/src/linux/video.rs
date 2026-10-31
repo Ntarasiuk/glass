@@ -2,8 +2,8 @@
 //! each on its own thread, and maps them to stream numbers according to the layout.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -61,6 +61,70 @@ const PICTURE_MAX: [u32; 2] = [1600, 1600];
 
 /// Lossless refreshes wanted (sharp text): keep a BGRA copy of each new picture.
 static FULL_COLOUR: AtomicBool = AtomicBool::new(false);
+
+/// Hands captured frames to a monitor's encoder. Holds only the newest: a frame that
+/// arrives while the encoder is busy replaces the one waiting, so the encoder never
+/// starts on a picture that went stale in a queue. Pixel buffers are reused, so a 4K
+/// frame (33 MB) is copied into memory that's already mapped, not freshly allocated.
+#[derive(Default)]
+struct Mailbox {
+    state: Mutex<MailboxState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct MailboxState {
+    frame: Option<(Frame, u64)>,
+    spare: Option<Vec<u8>>,
+    closed: bool,
+}
+
+impl Mailbox {
+    /// A buffer to copy the next frame into: the waiting frame's (it's about to be
+    /// replaced), else one the encoder gave back.
+    fn buffer(&self) -> Vec<u8> {
+        let mut state = self.state.lock().unwrap();
+        state
+            .frame
+            .take()
+            .map(|(f, _)| f.data)
+            .or_else(|| state.spare.take())
+            .unwrap_or_default()
+    }
+
+    fn put(&self, frame: Frame, captured_us: u64) {
+        self.state.lock().unwrap().frame = Some((frame, captured_us));
+        self.ready.notify_one();
+    }
+
+    fn recv_timeout(&self, timeout: Duration) -> Result<(Frame, u64), RecvTimeoutError> {
+        let state = self.state.lock().unwrap();
+        let (mut state, _) = self
+            .ready
+            .wait_timeout_while(state, timeout, |s| s.frame.is_none() && !s.closed)
+            .unwrap();
+        match state.frame.take() {
+            Some(f) => Ok(f),
+            None if state.closed => Err(RecvTimeoutError::Disconnected),
+            None => Err(RecvTimeoutError::Timeout),
+        }
+    }
+
+    /// Gives a frame's buffer back for the next capture.
+    fn recycle(&self, data: Vec<u8>) {
+        self.state.lock().unwrap().spare = Some(data);
+    }
+}
+
+/// The capture side of a mailbox; dropping it tells the encoder capture has stopped.
+struct FrameSender(Arc<Mailbox>);
+
+impl Drop for FrameSender {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().closed = true;
+        self.0.ready.notify_all();
+    }
+}
 
 /// Monitor rects for input mapping, by display id.
 static RECTS: Mutex<Vec<Rect>> = Mutex::new(Vec::new());
@@ -278,9 +342,8 @@ impl Video {
                 keyframe: AtomicBool::new(true),
                 bitrate: std::sync::atomic::AtomicU32::new(self.config.bitrate as u32),
             });
-            // One-slot queue: if encoding falls behind, newer frames replace nothing and
-            // are simply dropped until the encoder is free.
-            let (tx, rx) = sync_channel::<(Frame, u64)>(1);
+            let rx = Arc::new(Mailbox::default());
+            let tx = FrameSender(rx.clone());
             let (fps, bitrate, scale) = (
                 self.config.fps as u32,
                 self.config.bitrate as u32,
@@ -312,13 +375,13 @@ impl Video {
 
 fn encode_loop(
     monitor: Arc<Monitor>,
-    rx: Receiver<(Frame, u64)>,
+    rx: Arc<Mailbox>,
     frames: broadcast::Sender<Arc<EncodedFrame>>,
     fps: u32,
     bitrate: u32,
     scale: f64,
 ) {
-    let mut encoder: Option<Encoder> = None;
+    let mut encoder: Option<VideoEncoder> = None;
     let mut applied_bitrate = bitrate;
     let mut last: Option<(Frame, u64)> = None;
     loop {
@@ -328,8 +391,10 @@ fn encode_loop(
             Err(RecvTimeoutError::Disconnected) => return,
         };
         let has_fresh = fresh.is_some();
-        if let Some(f) = fresh {
-            last = Some(f);
+        if let Some(f) = fresh
+            && let Some((old, _)) = last.replace(f)
+        {
+            rx.recycle(old.data);
         }
         // Previews cover every monitor, shown or not.
         if has_fresh
@@ -364,7 +429,7 @@ fn encode_loop(
         let size = (frame.width, frame.height);
         let mut force = wants_key;
         if encoder.as_ref().is_none_or(|e| e.source_size() != size) {
-            match Encoder::new(
+            match VideoEncoder::new(
                 frame.width,
                 frame.height,
                 fps,
@@ -420,7 +485,83 @@ fn encode_loop(
                 }));
             }
             Ok(None) => {}
-            Err(e) => warn!("encode: {e:#}"),
+            Err(e) => {
+                warn!("encode: {e:#}");
+                if encoder.as_ref().is_some_and(VideoEncoder::is_hardware) {
+                    // Drop it; the next frame gets OpenH264 (and a keyframe).
+                    warn!("hardware encoding failed; using OpenH264 from now on");
+                    HARDWARE_FAILED.store(true, Ordering::Relaxed);
+                    encoder = None;
+                }
+            }
+        }
+    }
+}
+
+/// Set once the VA-API encoder has failed: the host stays on OpenH264 after that.
+static HARDWARE_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// OpenH264, or with `GLASS_ENCODER=vaapi` the GPU through VA-API. Opt-in for now: with
+/// frames captured into system memory, copying them to a discrete GPU costs about what
+/// software encoding does (the GPU path uses less CPU). Capturing DMA-BUFs would remove
+/// the copy.
+enum VideoEncoder {
+    Soft(Encoder),
+    #[cfg(feature = "vaapi")]
+    Va(super::va_encode::VaEncoder),
+}
+
+impl VideoEncoder {
+    fn new(width: usize, height: usize, fps: u32, bitrate: u32, scale: f64) -> Result<Self> {
+        let wants_vaapi = std::env::var("GLASS_ENCODER").is_ok_and(|e| e.eq_ignore_ascii_case("vaapi"));
+        #[cfg(not(feature = "vaapi"))]
+        if wants_vaapi && !HARDWARE_FAILED.swap(true, Ordering::Relaxed) {
+            warn!("GLASS_ENCODER=vaapi, but this build has no VA-API (--features vaapi); using OpenH264");
+        }
+        #[cfg(feature = "vaapi")]
+        if wants_vaapi
+            && !HARDWARE_FAILED.load(Ordering::Relaxed)
+            && super::va_encode::fits(width, height, scale)
+        {
+            match super::va_encode::VaEncoder::new(width, height, fps, bitrate, scale) {
+                Ok(e) => {
+                    info!("encoder: {} (VA-API)", e.name);
+                    return Ok(Self::Va(e));
+                }
+                Err(e) => {
+                    warn!("VA-API encoder unavailable, using OpenH264: {e:#}");
+                    HARDWARE_FAILED.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        Ok(Self::Soft(Encoder::new(width, height, fps, bitrate, scale)?))
+    }
+
+    fn is_hardware(&self) -> bool {
+        !matches!(self, Self::Soft(_))
+    }
+
+    fn source_size(&self) -> (usize, usize) {
+        match self {
+            Self::Soft(e) => e.source_size(),
+            #[cfg(feature = "vaapi")]
+            Self::Va(e) => e.source_size(),
+        }
+    }
+
+    fn set_bitrate(&mut self, bps: u32) {
+        match self {
+            Self::Soft(e) => e.set_bitrate(bps),
+            #[cfg(feature = "vaapi")]
+            Self::Va(e) => e.set_bitrate(bps),
+        }
+    }
+
+    fn encode(&mut self, frame: &Frame, force: bool) -> Result<Option<(Vec<u8>, bool)>> {
+        match self {
+            Self::Soft(e) => e.encode(frame, force),
+            #[cfg(feature = "vaapi")]
+            Self::Va(e) => e.encode(frame, force),
         }
     }
 }
@@ -428,14 +569,14 @@ fn encode_loop(
 struct StreamState {
     format: spa::param::video::VideoInfoRaw,
     pixel: Option<PixelFormat>,
-    tx: SyncSender<(Frame, u64)>,
+    tx: FrameSender,
     first: bool,
     id: usize,
 }
 
 fn run_pipewire(
     fd: std::os::fd::OwnedFd,
-    captures: Vec<(u32, Arc<Monitor>, SyncSender<(Frame, u64)>)>,
+    captures: Vec<(u32, Arc<Monitor>, FrameSender)>,
 ) -> Result<()> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
@@ -511,15 +652,19 @@ fn run_pipewire(
                     st.first = false;
                     info!("screen {}: first frame", st.id);
                 }
+                let captured_us = now_us();
+                let mut pixels = st.tx.0.buffer();
+                pixels.clear();
+                pixels.extend_from_slice(&bytes[offset..needed]);
                 let frame = Frame {
                     width,
                     height,
                     stride,
                     format: pixel,
-                    data: bytes[offset..needed].to_vec(),
+                    data: pixels,
                 };
-                // Encoder busy: drop this frame rather than queue latency.
-                let _ = st.tx.try_send((frame, now_us()));
+                // Replaces a frame the encoder hasn't started on: it always gets the newest.
+                st.tx.0.put(frame, captured_us);
             })
             .register()?;
 
@@ -645,5 +790,49 @@ impl VideoSource for Video {
                 m.bitrate.store(bps, Ordering::Relaxed);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(fill: u8) -> Frame {
+        Frame {
+            width: 2,
+            height: 1,
+            stride: 8,
+            format: PixelFormat::Bgrx,
+            data: vec![fill; 8],
+        }
+    }
+
+    #[test]
+    fn mailbox_keeps_only_the_newest_frame() {
+        let mailbox = Arc::new(Mailbox::default());
+        let tx = FrameSender(mailbox.clone());
+        tx.0.put(frame(1), 1);
+        tx.0.put(frame(2), 2);
+        let (f, at) = mailbox.recv_timeout(Duration::ZERO).unwrap();
+        assert_eq!((f.data[0], at), (2, 2));
+        assert!(matches!(mailbox.recv_timeout(Duration::from_millis(5)), Err(RecvTimeoutError::Timeout)));
+        drop(tx);
+        assert!(matches!(mailbox.recv_timeout(Duration::from_secs(5)), Err(RecvTimeoutError::Disconnected)));
+    }
+
+    #[test]
+    fn mailbox_reuses_buffers() {
+        let mailbox = Mailbox::default();
+        let data = Vec::with_capacity(4096);
+        let ptr = data.as_ptr();
+        mailbox.recycle(data);
+        let buffer = mailbox.buffer();
+        assert_eq!(buffer.as_ptr(), ptr, "the encoder's spare");
+        let mut waiting = frame(3);
+        waiting.data.reserve(4096);
+        let ptr = waiting.data.as_ptr();
+        mailbox.put(waiting, 0);
+        let buffer = mailbox.buffer();
+        assert_eq!(buffer.as_ptr(), ptr, "the frame it replaces");
     }
 }

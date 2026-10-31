@@ -109,6 +109,7 @@ And the viewer is just a web page. No app to install, no account to create.
 
 - macOS 13 Ventura or newer, Apple Silicon or Intel.
 - Linux x86_64 on Wayland with PipeWire (beta). Built on Hyprland/Omarchy; works on GNOME and KDE. Arch, Fedora 40+, Ubuntu 24.04+.
+  Video is encoded in software (OpenH264), so the ~20 ms above is the Mac figure. A build with `--features vaapi` (needs the GStreamer libraries) can encode on an Intel or AMD GPU instead: set `GLASS_ENCODER=vaapi` for the service.
 
 ```sh
 curl -fsSL glassdesk.dev | sh   # installs to ~/.glass, verifies the checksum, opens the Glass app to set up

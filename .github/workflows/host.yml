@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev pkg-config nasm
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev pkg-config nasm libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -27,6 +27,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace --profile ci
       - run: cargo build --profile ci -p glass-host
+      # The optional VA-API encoder (GLASS_ENCODER=vaapi) builds and its unit tests pass
+      # (the GPU test is ignored: runners have no VA device).
+      - if: runner.os == 'Linux'
+        run: cargo test --profile ci -p glass-host --features vaapi
       # Glass Microphone (native/glass-mic): builds, and loads as an audio plug-in.
       - if: runner.os == 'macOS'
         run: |
