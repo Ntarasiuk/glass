@@ -163,7 +163,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("recordings-dir", "folder for recordings"),
     ("privacy", "on/off: blank this screen and block local input while viewed"),
     ("hevc", "on/off: use HEVC when every viewer supports it"),
-    ("lid-awake", "on/off: stay awake with the lid closed while on power (Mac laptops; asks for your password once)"),
+    ("lid-awake", "on/off: stay awake with the lid closed while on power (laptops; on a Mac, asks for your password once)"),
     ("agents", "on/off: AI agents on other devices may ask to use this computer (glass agents)"),
     ("forward-ports", "comma-separated ports owner devices may open, e.g. 3000,8888"),
     ("name", "name shown in the viewer"),

@@ -1,9 +1,15 @@
-//! Staying awake with the lid closed (macOS), so a MacBook closed on a desk can still be
-//! unlocked and used from a viewer. Closing the lid puts a Mac to sleep unless a real
-//! display is attached (a virtual one doesn't count), and only `pmset disablesleep`, as
-//! root, stops that. Turning `lid-awake` on installs a sudoers rule that allows exactly
-//! that toggle, once, with the admin password. The host then keeps sleep off only while
-//! the Mac is on power and turns it back on on battery, so a Mac closed in a bag sleeps.
+//! Staying awake with the lid closed, so a laptop closed on a desk can still be unlocked
+//! and used from a viewer, only while it's on power (closed in a bag on battery, it sleeps).
+//!
+//! macOS: closing the lid sleeps a Mac unless a real display is attached (a virtual one
+//! doesn't count), and only `pmset disablesleep`, as root, stops that. Turning `lid-awake`
+//! on installs a sudoers rule that allows exactly that toggle, once, with the admin
+//! password; the host turns sleep off on power and back on on battery.
+//!
+//! Linux: logind suspends on the lid whatever the host's sleep inhibitor says
+//! (LidSwitchIgnoreInhibited), so on power the host also holds a `handle-lid-switch`
+//! inhibitor. Desktops that handle the lid themselves (GNOME, KDE) may still suspend
+//! unless their own lid setting says otherwise.
 
 #[cfg(target_os = "macos")]
 use std::process::Command;
@@ -54,8 +60,18 @@ pub fn allow() -> anyhow::Result<()> {
         anyhow::ensure!(allowed(), "the rule was installed, but sudo still asks for a password");
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
-    anyhow::bail!("lid-awake is for Mac laptops")
+    #[cfg(target_os = "linux")]
+    {
+        // polkit decides who may hold it; a session's own user usually may.
+        let ok = std::process::Command::new("systemd-inhibit")
+            .args(["--what=handle-lid-switch", "--who=Glass", "--why=Checking lid-awake", "true"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        anyhow::ensure!(ok, "this system doesn't let Glass hold the lid switch (polkit: org.freedesktop.login1.inhibit-handle-lid-switch)");
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    anyhow::bail!("lid-awake isn't available here")
 }
 
 /// Sudo lets this user toggle sleep without a password.
@@ -84,6 +100,22 @@ fn parse_sleep_disabled(pmset_g: &str) -> bool {
     })
 }
 
+/// On power, from each supply in /sys/class/power_supply as (type, online): a mains or USB
+/// supply is plugged in, or there are none at all (a desktop).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_on_power(supplies: &[(String, String)]) -> bool {
+    let mut mains = supplies.iter().filter(|(kind, _)| matches!(kind.as_str(), "Mains" | "USB")).peekable();
+    mains.peek().is_none() || mains.any(|(_, online)| online == "1")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_supplies() -> Vec<(String, String)> {
+    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).unwrap_or_default().trim().to_string();
+    std::fs::read_dir("/sys/class/power_supply")
+        .map(|d| d.flatten().map(|e| (read(e.path().join("type")), read(e.path().join("online")))).collect())
+        .unwrap_or_default()
+}
+
 /// The Mac is on power, from `pmset -g batt` (a Mac without a battery always is).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_on_power(pmset_batt: &str) -> bool {
@@ -101,9 +133,45 @@ fn marker() -> std::path::PathBuf {
     crate::config_dir().join("lid-awake-applied")
 }
 
-/// Keeps sleep off while `lid-awake` is on and the Mac is on power, and on again
-/// otherwise. Checks every few seconds, for as long as the host runs.
+/// Keeps a closed lid from sleeping while `lid-awake` is on and the laptop is on power, and
+/// lets it again otherwise. Checks every few seconds, for as long as the host runs.
 pub fn watch() {
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(|| {
+        // The inhibitor lasts as long as this child; `tail --pid` ends it with the host.
+        let mut held: Option<std::process::Child> = None;
+        let mut warned = false;
+        loop {
+            let want = crate::settings::load().lid_awake && linux_on_power(&linux_supplies());
+            if let Some(child) = &mut held
+                && !matches!(child.try_wait(), Ok(None))
+            {
+                held = None;
+                if !warned {
+                    warned = true;
+                    tracing::warn!("lid-awake: couldn't hold the lid switch (polkit?)");
+                }
+            }
+            if want && held.is_none() && !warned {
+                held = std::process::Command::new("systemd-inhibit")
+                    .args(["--what=handle-lid-switch", "--who=Glass", "--why=Stay awake with the lid closed (glass config lid-awake)", "--mode=block"])
+                    .args(["tail", &format!("--pid={}", std::process::id()), "-f", "/dev/null"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .inspect(|_| tracing::info!("lid-awake: on power, so a closed lid won't suspend"))
+                    .ok();
+            } else if !want && let Some(mut child) = held.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::info!("lid-awake: the lid may suspend again");
+            }
+            if !want {
+                warned = false;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+    });
     #[cfg(target_os = "macos")]
     std::thread::spawn(|| {
         let mut warned = false;
@@ -155,5 +223,14 @@ mod tests {
         assert!(!parse_sleep_disabled(" sleep 1\n"));
         assert!(parse_on_power("Now drawing from 'AC Power'\n -InternalBattery-0 80%"));
         assert!(!parse_on_power("Now drawing from 'Battery Power'\n -InternalBattery-0 80%"));
+    }
+
+    #[test]
+    fn linux_power_is_a_plugged_in_supply_or_none_at_all() {
+        let s = |kind: &str, online: &str| (kind.to_string(), online.to_string());
+        assert!(linux_on_power(&[s("Battery", ""), s("Mains", "1")]));
+        assert!(!linux_on_power(&[s("Battery", ""), s("Mains", "0"), s("USB", "0")]));
+        assert!(linux_on_power(&[s("USB", "1"), s("Mains", "0")]));
+        assert!(linux_on_power(&[]));
     }
 }

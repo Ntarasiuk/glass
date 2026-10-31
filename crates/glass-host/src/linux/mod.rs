@@ -10,6 +10,7 @@ pub mod keymap;
 pub mod permissions;
 pub mod portal;
 pub mod privacy;
+pub mod session;
 pub mod setup;
 #[cfg(feature = "vaapi")]
 pub mod va_encode;
