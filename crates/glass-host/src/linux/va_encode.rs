@@ -25,11 +25,30 @@ const MAX_SIDE: usize = 4096;
 const OUTPUT_TIMEOUT: Duration = Duration::from_millis(500);
 /// Low-power (fixed-function) encoders first: they're the fastest where present.
 const ENCODERS: [&str; 2] = ["vah264lpenc", "vah264enc"];
-/// A new bitrate makes the VA encoders reconfigure, which starts with a keyframe. Cuts
-/// (congestion) apply at once; increases at most this often, and only once they're
-/// worth it (BITRATE_STEP above the current rate).
-const BITRATE_EVERY: Duration = Duration::from_secs(2);
+/// A new bitrate makes the VA encoders reconfigure, which starts with a keyframe, so not
+/// every target is applied (see `should_apply`): changes of at least BITRATE_STEP, at
+/// once for cuts and at most every BITRATE_EVERY for raises; anything smaller once the
+/// target has gone BITRATE_SETTLE without a change.
 const BITRATE_STEP: f64 = 1.1;
+const BITRATE_EVERY: Duration = Duration::from_secs(2);
+const BITRATE_SETTLE: Duration = Duration::from_secs(10);
+
+/// Whether to reconfigure from `applied` to `wanted` bps, `since` the last change.
+fn should_apply(applied: u32, wanted: u32, since: Duration) -> bool {
+    let (a, w) = (applied as f64, wanted as f64);
+    if wanted == applied {
+        false
+    } else if w * BITRATE_STEP <= a {
+        // A real cut (congestion: AIMD cuts 30%, GCC about 15%): don't wait.
+        true
+    } else if w >= a * BITRATE_STEP {
+        since >= BITRATE_EVERY
+    } else {
+        // Small steps from probing or a slowly moving estimate aren't worth a keyframe
+        // each; whatever is left is applied once things settle.
+        since >= BITRATE_SETTLE
+    }
+}
 
 pub struct VaEncoder {
     pipeline: gst::Pipeline,
@@ -155,17 +174,14 @@ impl VaEncoder {
         self.source
     }
 
-    /// Changes the target bitrate from the next frame: at once when it's lower, else
-    /// once BITRATE_EVERY has passed and it's BITRATE_STEP higher (each change costs a
-    /// keyframe, so small increases from probing aren't worth one).
+    /// Sets the target bitrate; `should_apply` decides when the encoder follows it.
     pub fn set_bitrate(&mut self, bps: u32) {
         self.bitrate.1 = bps;
     }
 
     fn apply_bitrate(&mut self) {
         let (applied, wanted, at) = self.bitrate;
-        let raise = wanted as f64 >= applied as f64 * BITRATE_STEP && at.elapsed() >= BITRATE_EVERY;
-        if wanted < applied || raise {
+        if should_apply(applied, wanted, at.elapsed()) {
             self.encoder.set_property("bitrate", (wanted / 1000).max(100));
             self.bitrate = (wanted, wanted, Instant::now());
         }
@@ -272,6 +288,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bitrate_changes_worth_a_keyframe() {
+        let (now, soon, later, settled) = (Duration::ZERO, Duration::from_millis(500), BITRATE_EVERY, BITRATE_SETTLE);
+        assert!(!should_apply(10_000_000, 10_000_000, settled));
+        // Real cuts at once; small ones (500 ms reports, slow estimates) wait to settle.
+        assert!(should_apply(10_000_000, 7_000_000, now));
+        assert!(should_apply(10_000_000, 9_000_000, now));
+        assert!(!should_apply(10_000_000, 9_700_000, soon));
+        assert!(!should_apply(10_000_000, 9_700_000, later));
+        assert!(should_apply(10_000_000, 9_700_000, settled));
+        // Raises wait BITRATE_EVERY; small ones until settled (e.g. the last step to max).
+        assert!(!should_apply(10_000_000, 14_000_000, soon));
+        assert!(should_apply(10_000_000, 14_000_000, later));
+        assert!(!should_apply(29_700_000, 30_000_000, later));
+        assert!(should_apply(29_700_000, 30_000_000, settled));
+    }
+
+    #[test]
     fn halves_when_asked_or_big() {
         assert_eq!(output_size((3840, 2160), 1.0), (1920, 1080));
         assert_eq!(output_size((2560, 1440), 1.0), (2560, 1440));
@@ -303,10 +336,11 @@ mod tests {
             eprintln!("no VA-API H.264 encoder here; skipping");
             return;
         }
-        encode_4k(1.0);
-        encode_4k(0.5);
-        // Widths that aren't a multiple of 4 have padded NV12 rows.
-        for (width, height) in [(1366, 768), (1922, 1082), (1050, 1680)] {
+        encode_run(3840, 2160);
+        encode_run(2560, 1440);
+        // Widths that aren't a multiple of 4 have padded NV12 rows: the decoded planes must
+        // match what went in (a wrong stride shears the picture).
+        for (width, height) in [(1366, 768), (1922, 1082), (1050, 1680), (1365, 767)] {
             let frame = desktop(width, height, width * 4);
             let mut enc = VaEncoder::new(width, height, 60, 8_000_000, 1.0).unwrap();
             let (data, keyframe) = enc.encode(&frame, true).unwrap().expect("output");
@@ -315,14 +349,29 @@ mod tests {
             let picture = dec.decode(&data).unwrap().expect("decodes");
             use openh264::formats::YUVSource;
             assert_eq!(picture.dimensions(), enc.out, "{width}x{height}");
+            let (w, h) = enc.out;
+            let (ys, us, vs) = picture.strides();
+            let error = |plane: &[u8], stride: usize, ours: &[u8], pw: usize, ph: usize| {
+                let total: u64 = (0..ph)
+                    .flat_map(|y| (0..pw).map(move |x| (y, x)))
+                    .map(|(y, x)| plane[y * stride + x].abs_diff(ours[y * pw + x]) as u64)
+                    .sum();
+                total as f64 / (pw * ph) as f64
+            };
+            for (name, e) in [
+                ("Y", error(picture.y(), ys, &enc.y, w, h)),
+                ("U", error(picture.u(), us, &enc.u, w / 2, h / 2)),
+                ("V", error(picture.v(), vs, &enc.v, w / 2, h / 2)),
+            ] {
+                assert!(e < 3.0, "{width}x{height} {name}: mean error {e:.1}");
+            }
         }
     }
 
-    fn encode_4k(scale: f64) {
-        let (width, height) = (3840, 2160);
+    fn encode_run(width: usize, height: usize) {
         // Padded rows, as compositors often send.
         let mut frame = desktop(width, height, width * 4 + 256);
-        let mut enc = VaEncoder::new(width, height, 60, 30_000_000, scale).unwrap();
+        let mut enc = VaEncoder::new(width, height, 60, 30_000_000, 1.0).unwrap();
         let mut dec = openh264::decoder::Decoder::new().unwrap();
         let (frames, mut total, mut worst) = (120, 0.0f64, 0.0f64);
         for i in 0..frames {
@@ -340,14 +389,13 @@ mod tests {
                 total += took;
                 worst = worst.max(took);
             }
-            // A bitrate change costs a keyframe when it's applied: cuts at once, a raise
-            // only BITRATE_EVERY after the last change.
+            // A bitrate change costs a keyframe when it's applied (should_apply decides).
             assert_eq!(keyframe, force || reconfigured, "frame {i}: keyframes only when asked");
-            if matches!(i, 31 | 33) {
-                assert!(reconfigured, "frame {i}: a cut applies at once");
-            }
-            if matches!(i, 35 | 37) {
-                assert!(!reconfigured, "frame {i}: a raise waits");
+            match i {
+                31 => assert!(reconfigured, "a real cut applies at once"),
+                33 => assert!(!reconfigured, "a small cut waits"),
+                35 => assert!(reconfigured, "a raise applies after BITRATE_EVERY"),
+                _ => {}
             }
             if keyframe {
                 assert!(data.windows(5).any(|w| w[..4] == [0, 0, 0, 1] && w[4] & 0x1f == 7), "SPS");
@@ -359,18 +407,16 @@ mod tests {
             }
             match i {
                 30 => enc.set_bitrate(10_000_000),
-                32 => enc.set_bitrate(5_000_000),
-                34 => enc.set_bitrate(8_000_000),
-                // Not worth a keyframe: under BITRATE_STEP above the current rate.
-                36 => {
+                32 => enc.set_bitrate(9_700_000),
+                34 => {
                     enc.bitrate.2 -= BITRATE_EVERY;
-                    enc.set_bitrate(5_200_000);
+                    enc.set_bitrate(15_000_000);
                 }
                 _ => {}
             }
         }
         println!(
-            "{}: 4K frame in, {}x{} H.264 out: {:.1} ms average, {:.1} ms worst",
+            "{}: {width}x{height} frame in, {}x{} H.264 out: {:.1} ms average, {:.1} ms worst",
             enc.name,
             enc.out.0,
             enc.out.1,
