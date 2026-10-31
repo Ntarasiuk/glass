@@ -14,7 +14,7 @@ use openh264::formats::YUVSlices;
 
 /// Above this many pixels, frames are halved before encoding to keep software encode
 /// within the frame budget (4K → 1080p, 5K → 1440p).
-const MAX_PIXELS: usize = 2560 * 1600;
+pub(crate) const MAX_PIXELS: usize = 2560 * 1600;
 /// Matches the macOS encoder: a periodic IDR before frame_num wraps.
 const MAX_GOP_FRAMES: u32 = 900;
 

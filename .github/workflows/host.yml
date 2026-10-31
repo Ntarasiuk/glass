@@ -27,9 +27,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace --profile ci
       - run: cargo build --profile ci -p glass-host
-      # The optional VA-API encoder (GLASS_ENCODER=vaapi) still builds.
+      # The optional VA-API encoder (GLASS_ENCODER=vaapi) builds and its unit tests pass
+      # (the GPU test is ignored: runners have no VA device).
       - if: runner.os == 'Linux'
-        run: cargo build --profile ci -p glass-host --features vaapi
+        run: cargo test --profile ci -p glass-host --features vaapi
       # Glass Microphone (native/glass-mic): builds, and loads as an audio plug-in.
       - if: runner.os == 'macOS'
         run: |

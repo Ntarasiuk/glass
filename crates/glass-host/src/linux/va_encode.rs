@@ -1,12 +1,13 @@
 //! Hardware H.264 through GStreamer's VA-API plugin (Intel, AMD). The CPU converts the
 //! captured RGB to NV12 (the parallel converter OpenH264 uses, about 3 ms at 4K) and the
 //! GPU encodes it: handing the GPU 33 MB of RGB per 4K frame to convert itself (vapostproc)
-//! was far slower, as frames are in system memory. Each frame goes in and comes out before
-//! the next one (no B-frames, no lookahead), so nothing is buffered. Output is Annex B
-//! with SPS/PPS before every IDR, like the OpenH264 path. Used when the plugin and a VA
-//! device are there; otherwise the host falls back to OpenH264.
+//! was far slower, as frames are in system memory. Screens above 2560x1600 are halved, as
+//! for OpenH264: encoding 4K whole took longer than software at half size. Each frame goes
+//! in and comes out before the next one (no B-frames, no lookahead), so nothing is
+//! buffered. Output is Annex B with SPS/PPS before every IDR, like the OpenH264 path. Used
+//! when the plugin and a VA device are there; otherwise the host falls back to OpenH264.
 
-use std::sync::Once;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
@@ -14,7 +15,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::{AppSink, AppSrc};
 
-use crate::soft_encode::{Frame, to_i420};
+use crate::soft_encode::{Frame, MAX_PIXELS, to_i420};
 
 /// Matches the macOS and OpenH264 encoders: a periodic IDR.
 const MAX_GOP_FRAMES: u32 = 900;
@@ -24,9 +25,11 @@ const MAX_SIDE: usize = 4096;
 const OUTPUT_TIMEOUT: Duration = Duration::from_millis(500);
 /// Low-power (fixed-function) encoders first: they're the fastest where present.
 const ENCODERS: [&str; 2] = ["vah264lpenc", "vah264enc"];
-/// A new bitrate makes the VA encoders reconfigure, which starts with a keyframe, so
-/// changes are applied at most this often (the latest target wins).
+/// A new bitrate makes the VA encoders reconfigure, which starts with a keyframe. Cuts
+/// (congestion) apply at once; increases at most this often, and only once they're
+/// worth it (BITRATE_STEP above the current rate).
 const BITRATE_EVERY: Duration = Duration::from_secs(2);
+const BITRATE_STEP: f64 = 1.1;
 
 pub struct VaEncoder {
     pipeline: gst::Pipeline,
@@ -40,6 +43,8 @@ pub struct VaEncoder {
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
+    /// GStreamer's NV12 layout for the output size (rows padded to 4 bytes).
+    layout: gstreamer_video::VideoInfo,
     next_pts: Option<gst::ClockTime>,
     frame_duration: gst::ClockTime,
     /// Bitrate (bps) the encoder runs at, the latest target, and when it last changed.
@@ -58,15 +63,28 @@ pub fn available() -> Option<&'static str> {
 }
 
 fn init() -> Result<()> {
-    static ONCE: Once = Once::new();
-    let mut result = Ok(());
-    ONCE.call_once(|| result = gst::init().map_err(|e| anyhow!("gstreamer: {e}")));
-    result
+    static INIT: OnceLock<Result<(), String>> = OnceLock::new();
+    INIT.get_or_init(|| gst::init().map_err(|e| e.to_string()))
+        .clone()
+        .map_err(|e| anyhow!("gstreamer: {e}"))
 }
 
-/// Whether to halve the picture: asked to (`scale` of 0.5 or less), or too big to encode.
+/// Whether to halve the picture: asked to (`scale` of 0.5 or less), or bigger than
+/// OpenH264's limit (which also keeps it within what the encoders take).
 fn divisor((w, h): (usize, usize), scale: f64) -> usize {
-    if scale <= 0.5 || w > MAX_SIDE || h > MAX_SIDE { 2 } else { 1 }
+    if scale <= 0.5 || w * h > MAX_PIXELS || w > MAX_SIDE || h > MAX_SIDE { 2 } else { 1 }
+}
+
+fn output_size((w, h): (usize, usize), scale: f64) -> (usize, usize) {
+    let div = divisor((w, h), scale);
+    ((w / div) & !1, (h / div) & !1)
+}
+
+/// Whether a screen this size can be encoded (otherwise it's OpenH264's, without
+/// giving up on VA-API for the other screens).
+pub fn fits(width: usize, height: usize, scale: f64) -> bool {
+    let (w, h) = output_size((width, height), scale);
+    (64..=MAX_SIDE).contains(&w) && (64..=MAX_SIDE).contains(&h)
 }
 
 impl VaEncoder {
@@ -78,10 +96,15 @@ impl VaEncoder {
         scale: f64,
     ) -> Result<Self> {
         let name = available().context("no VA-API H.264 encoder (GStreamer va plugin)")?;
+        anyhow::ensure!(fits(width, height, scale), "{width}x{height} can't be encoded");
         let div = divisor((width, height), scale);
-        let (ow, oh) = ((width / div) & !1, (height / div) & !1);
-        anyhow::ensure!(ow <= MAX_SIDE && oh <= MAX_SIDE && ow >= 64 && oh >= 64, "{ow}x{oh}");
-        // BT.601 limited range: what to_i420 produces, written into the stream's VUI.
+        let (ow, oh) = output_size((width, height), scale);
+        let layout =
+            gstreamer_video::VideoInfo::builder(gstreamer_video::VideoFormat::Nv12, ow as u32, oh as u32)
+                .build()?;
+        // to_i420's output is BT.601 limited range; like the OpenH264 path, the stream
+        // carries no colour description, which decoders read as BT.601 for SD and
+        // usually BT.709 for HD.
         let description = format!(
             "appsrc name=src is-live=true format=time block=false \
                 caps=video/x-raw,format=NV12,width={ow},height={oh},framerate={fps}/1,colorimetry=bt601 \
@@ -115,6 +138,7 @@ impl VaEncoder {
             y: vec![0; ow * oh],
             u: vec![0; ow * oh / 4],
             v: vec![0; ow * oh / 4],
+            layout,
             next_pts: None,
             frame_duration: gst::ClockTime::from_nseconds(1_000_000_000 / fps.max(1) as u64),
             bitrate: (bitrate, bitrate, Instant::now()),
@@ -131,15 +155,17 @@ impl VaEncoder {
         self.source
     }
 
-    /// Changes the target bitrate, from the next frame or once BITRATE_EVERY has passed
-    /// since the last change (each change costs a keyframe).
+    /// Changes the target bitrate from the next frame: at once when it's lower, else
+    /// once BITRATE_EVERY has passed and it's BITRATE_STEP higher (each change costs a
+    /// keyframe, so small increases from probing aren't worth one).
     pub fn set_bitrate(&mut self, bps: u32) {
         self.bitrate.1 = bps;
     }
 
     fn apply_bitrate(&mut self) {
         let (applied, wanted, at) = self.bitrate;
-        if wanted != applied && at.elapsed() >= BITRATE_EVERY {
+        let raise = wanted as f64 >= applied as f64 * BITRATE_STEP && at.elapsed() >= BITRATE_EVERY;
+        if wanted < applied || raise {
             self.encoder.set_property("bitrate", (wanted / 1000).max(100));
             self.bitrate = (wanted, wanted, Instant::now());
         }
@@ -154,7 +180,7 @@ impl VaEncoder {
         self.apply_bitrate();
         to_i420(frame, self.div, self.out, &mut self.y, &mut self.u, &mut self.v);
         let (w, h) = self.out;
-        let mut buffer = gst::Buffer::with_size(w * h * 3 / 2)?;
+        let mut buffer = gst::Buffer::with_size(self.layout.size())?;
         {
             let buffer = buffer.get_mut().unwrap();
             // Strictly increasing timestamps, also when the same picture is sent again.
@@ -162,13 +188,27 @@ impl VaEncoder {
             self.next_pts = Some(pts + self.frame_duration);
             buffer.set_pts(pts);
             buffer.set_duration(self.frame_duration);
-            // NV12: the Y plane, then U and V interleaved.
+            // NV12: the Y plane, then U and V interleaved, in GStreamer's row layout.
+            let (offsets, strides) = (self.layout.offset(), self.layout.stride());
             let mut map = buffer.map_writable()?;
-            let (luma, chroma) = map.split_at_mut(w * h);
-            luma.copy_from_slice(&self.y);
-            for ((uv, u), v) in chroma.chunks_exact_mut(2).zip(&self.u).zip(&self.v) {
-                uv[0] = *u;
-                uv[1] = *v;
+            let (luma, chroma) = map.split_at_mut(offsets[1]);
+            for (dst, src) in luma[offsets[0]..]
+                .chunks_mut(strides[0] as usize)
+                .zip(self.y.chunks_exact(w))
+            {
+                dst[..w].copy_from_slice(src);
+            }
+            let cw = w / 2;
+            for ((dst, u), v) in chroma
+                .chunks_mut(strides[1] as usize)
+                .zip(self.u.chunks_exact(cw))
+                .zip(self.v.chunks_exact(cw))
+                .take(h / 2)
+            {
+                for ((uv, u), v) in dst[..w].chunks_exact_mut(2).zip(u).zip(v) {
+                    uv[0] = *u;
+                    uv[1] = *v;
+                }
             }
         }
         if force_keyframe {
@@ -185,10 +225,25 @@ impl VaEncoder {
         )) else {
             return Err(self.error("VA-API encoder gave no output"));
         };
+        self.check_bus()?;
         let out = sample.buffer().context("sample without a buffer")?;
         let keyframe = !out.flags().contains(gst::BufferFlags::DELTA_UNIT);
         let data = out.map_readable()?.to_vec();
         Ok((!data.is_empty()).then_some((data, keyframe)))
+    }
+
+    /// Empties the bus (nothing else reads it, so tags and other messages would pile up)
+    /// and returns the first error on it.
+    fn check_bus(&self) -> Result<()> {
+        let Some(bus) = self.pipeline.bus() else {
+            return Ok(());
+        };
+        while let Some(message) = bus.pop() {
+            if let gst::MessageView::Error(e) = message.view() {
+                return Err(anyhow!("VA-API pipeline: {} ({:?})", e.error(), e.debug()));
+            }
+        }
+        Ok(())
     }
 
     /// An error with whatever the pipeline posted on its bus.
@@ -217,11 +272,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn halves_when_asked_or_too_big() {
-        assert_eq!(divisor((3840, 2160), 1.0), 1);
-        assert_eq!(divisor((3840, 2160), 0.5), 2);
-        assert_eq!(divisor((5120, 2880), 1.0), 2);
-        assert_eq!(divisor((1366, 768), 1.0), 1);
+    fn halves_when_asked_or_big() {
+        assert_eq!(output_size((3840, 2160), 1.0), (1920, 1080));
+        assert_eq!(output_size((2560, 1440), 1.0), (2560, 1440));
+        assert_eq!(output_size((2560, 1440), 0.5), (1280, 720));
+        assert_eq!(output_size((1366, 768), 1.0), (1366, 768));
+        assert_eq!(output_size((1365, 767), 1.0), (1364, 766));
+        assert!(fits(1366, 768, 1.0) && fits(7680, 4320, 1.0));
+        assert!(!fits(100, 100, 0.5) && !fits(16384, 4096, 1.0));
     }
 
     fn desktop(width: usize, height: usize, stride: usize) -> Frame {
@@ -247,6 +305,17 @@ mod tests {
         }
         encode_4k(1.0);
         encode_4k(0.5);
+        // Widths that aren't a multiple of 4 have padded NV12 rows.
+        for (width, height) in [(1366, 768), (1922, 1082), (1050, 1680)] {
+            let frame = desktop(width, height, width * 4);
+            let mut enc = VaEncoder::new(width, height, 60, 8_000_000, 1.0).unwrap();
+            let (data, keyframe) = enc.encode(&frame, true).unwrap().expect("output");
+            assert!(keyframe);
+            let mut dec = openh264::decoder::Decoder::new().unwrap();
+            let picture = dec.decode(&data).unwrap().expect("decodes");
+            use openh264::formats::YUVSource;
+            assert_eq!(picture.dimensions(), enc.out, "{width}x{height}");
+        }
     }
 
     fn encode_4k(scale: f64) {
@@ -271,22 +340,33 @@ mod tests {
                 total += took;
                 worst = worst.max(took);
             }
-            // A bitrate change costs a keyframe when it's applied.
+            // A bitrate change costs a keyframe when it's applied: cuts at once, a raise
+            // only BITRATE_EVERY after the last change.
             assert_eq!(keyframe, force || reconfigured, "frame {i}: keyframes only when asked");
-            assert_eq!(reconfigured, i == 31 || (i > 32 && keyframe && !force), "frame {i}");
+            if matches!(i, 31 | 33) {
+                assert!(reconfigured, "frame {i}: a cut applies at once");
+            }
+            if matches!(i, 35 | 37) {
+                assert!(!reconfigured, "frame {i}: a raise waits");
+            }
             if keyframe {
                 assert!(data.windows(5).any(|w| w[..4] == [0, 0, 0, 1] && w[4] & 0x1f == 7), "SPS");
             }
+            // OpenH264's decoder trips over the VA encoder's later IDRs (ffmpeg decodes
+            // them cleanly), so only the start is decoded here.
             if i < 3 {
                 assert!(dec.decode(&data).unwrap().is_some(), "frame {i} decodes");
             }
-            if i == 30 {
-                enc.bitrate.2 -= BITRATE_EVERY;
-                enc.set_bitrate(10_000_000);
-            }
-            if i == 32 {
-                // Too soon after the last change: waits until BITRATE_EVERY has passed.
-                enc.set_bitrate(5_000_000);
+            match i {
+                30 => enc.set_bitrate(10_000_000),
+                32 => enc.set_bitrate(5_000_000),
+                34 => enc.set_bitrate(8_000_000),
+                // Not worth a keyframe: under BITRATE_STEP above the current rate.
+                36 => {
+                    enc.bitrate.2 -= BITRATE_EVERY;
+                    enc.set_bitrate(5_200_000);
+                }
+                _ => {}
             }
         }
         println!(
