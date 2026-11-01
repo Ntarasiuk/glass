@@ -155,13 +155,12 @@ impl GlassApp {
             self.field("relay", "Your own relay", "A self-hosted server for reaching from anywhere.", cx),
             self.field("forward-ports", "Forwarded ports", "Local web apps your devices may open through Glass.", cx),
         ];
-        // Windows has no lid-closed sleep to hold off yet.
-        if !cfg!(windows) {
-            connections.insert(
-                3,
-                self.toggle("lid-awake", "Stay awake with the lid closed", "While on power, so you can still unlock it from a viewer. Asks for your password once.", s.lid_awake, cx),
-            );
-        }
+        let lid_detail = if cfg!(windows) {
+            "While plugged in, closing the lid does nothing, so you can keep using it from a viewer."
+        } else {
+            "While on power, so you can still unlock it from a viewer. Asks for your password once."
+        };
+        connections.insert(3, self.toggle("lid-awake", "Stay awake with the lid closed", lid_detail, s.lid_awake, cx));
 
         // The same switches as on AI agents, here too so they're easy to find and turn off.
         let agent = &snap.agent;

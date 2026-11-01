@@ -34,11 +34,11 @@ Windows is in a stack of PRs (#75 onwards); a ✅ there means it ran in a Window
 | Relative mouse (games) | ✅ | ✅ | 🧪 | |
 | Type any text (agents) | ✅ | ❌ | 🧪 Unicode key events | |
 | Pen pressure and tilt | ✅ | ❌ | 🧪 synthetic pen | |
-| Game controllers | ❌ | ✅ uinput | ❌ | Windows needs ViGEmBus |
+| Game controllers | ❌ | ✅ uinput | 🧪 ViGEmBus | Windows: a virtual Xbox 360 controller when ViGEmBus is installed |
 | Unlock from the lock screen | ✅ | ? | ❌ | Windows needs a SYSTEM service |
 | Control elevated windows, UAC prompts | — | — | ❌ | Same: SYSTEM service |
 | Wake on LAN, restart Glass/computer | ✅ | ✅ | 🧪 | |
-| Stay awake with the lid closed | ✅ | ✅ | ❌ | |
+| Stay awake with the lid closed | ✅ | ✅ | 🧪 power plan lid action | Windows: "Do nothing" on power while it's on, put back after |
 
 ## Sound, clipboard, files
 
@@ -53,7 +53,7 @@ Windows is in a stack of PRs (#75 onwards); a ✅ there means it ran in a Window
 | File transfer, folders | ✅ | ✅ | 🧪 | |
 | File browser | ✅ | ✅ | 🧪 | |
 | Move to Trash | ✅ | ✅ gio | 🧪 Recycle Bin | |
-| File previews | ✅ Quick Look | ❌ | ❌ | |
+| File previews | ✅ Quick Look | ❌ | 🧪 shell thumbnails | |
 | Pick files on the host | ✅ | ✅ portal | 🧪 Open dialog | |
 
 ## People and agents
