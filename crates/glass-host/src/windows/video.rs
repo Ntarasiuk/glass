@@ -850,8 +850,9 @@ fn encode_loop(
             rx.recycle(old.data);
         }
         unsent |= has_fresh;
-        // Previews cover every monitor, shown or not (as a whole).
-        if has_fresh
+        // Previews cover every monitor, shown or not (as a whole). The first one comes from
+        // the last frame: a still screen sends no new ones, and screenshots would never work.
+        if (has_fresh || monitor.thumb.lock().unwrap().is_none())
             && target == 0
             && THUMBS_UNTIL.lock().unwrap().is_some_and(|t| t > Instant::now())
             && monitor.thumb.lock().unwrap().as_ref().is_none_or(|(at, _)| at.elapsed() >= THUMB_EVERY)
