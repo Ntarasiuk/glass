@@ -20,7 +20,7 @@ Features:
 - **Full control.** Mouse, trackpad, keyboard, and touch (tap to click, drag, long-press to right-click, two-finger scroll), plus an on-screen keyboard button.
 - **Fleet (new).** See every computer on your account in one list (model, system, disk, FileVault, firewall, battery), restart or update them from the page with a passkey confirmation, and mark the ones that break your rules. Off until you turn it on, computer by computer: [Glass Fleet](#glass-fleet-new).
 - **Trackpad mode on phones.** The screen works like a laptop trackpad: drag to move the pointer, tap to click, two-finger tap to right-click; zoomed in, the view follows the pointer. The toolbar folds into menus on small screens.
-- **Unlocks a locked Mac.** Type the password at the lock screen from the remote device.
+- **Unlocks a locked Mac.** Type the password at the lock screen from the remote device, even on a MacBook with its lid closed (`glass config lid-awake on`, while it's plugged in).
 - **Apple Pencil.** Pressure and tilt reach the Mac as tablet input, so drawing apps (Photoshop, Affinity, Krita) respond as they do to a drawing tablet.
 - **Multiple displays.** Show one display, switch between them, or show all of them side by side in their macOS arrangement.
 - **A second display.** Your iPad, a laptop or any browser becomes one more display that extends the Mac's desktop (Displays › Use as a second display), Retina where the screen is.
@@ -367,6 +367,15 @@ Game controllers connected to the viewing device work on Linux hosts as a virtua
 
 Local shortcuts (not sent to the Mac): Ctrl+Shift+F toggles fullscreen, Ctrl+Shift+H toggles the stats overlay.
 
+### A locked screen, or a closed lid
+
+Type your password at the lock screen from the viewer, as you would at the computer. Keys pressed into a password field (the lock screen, a password prompt) aren't shown to other viewers or written to Glass's log: they see "a key, into a password field". Agents with a grant can't type into one at all; they ask you with `request_help`.
+
+A laptop sleeps when its lid closes, and a sleeping computer can't be unlocked from anywhere. Turn on **Stay awake with the lid closed** (Glass app › Settings, or `glass config lid-awake on`) to keep it awake with the lid closed while it's plugged in. On battery it sleeps as usual, so it still sleeps closed in a bag. Keep a closed laptop that stays awake somewhere it can cool down.
+
+- **macOS:** turning it on asks for your admin password once, to install `/etc/sudoers.d/glass-lid`. That rule lets Glass run exactly `pmset -a disablesleep 1` and `pmset -a disablesleep 0` and nothing else. Glass only turns back on a sleep it turned off itself. A virtual display (as Glass makes for **Use as a second display**) doesn't keep a closed Mac awake; a real external display does. If your company manages the Mac, its management software may remove the rule; turn the setting on again to reinstall it.
+- **Linux:** no password. While plugged in, Glass holds systemd-logind's `handle-lid-switch` inhibitor, if polkit allows it (it usually does for your own session). GNOME and KDE decide about the lid themselves, so set their own lid action too; Hyprland, Sway and others leave it to logind.
+
 ### Keyboard and ⌘ shortcuts on iPad
 
 iPadOS reserves a few shortcuts before any app or web page sees them: ⌘Tab, ⌘Space, ⌘H, ⌘⇧3/4/5, and Globe-key combinations. Glass offers three ways around this:
@@ -522,6 +531,8 @@ Dependencies: PipeWire, wl-clipboard and your desktop's screen-sharing portal (`
 
 Keys arrive as typed on Linux hosts: ⌘ on an Apple keyboard is Super. Paste from the viewer's clipboard sends Ctrl+V.
 
+While the session is locked (logind's lock hint, or a locker such as hyprlock or swaylock running), keys aren't shown to viewers or logged. **Stay awake with the lid closed** works on Linux laptops too; see [A locked screen, or a closed lid](#a-locked-screen-or-a-closed-lid).
+
 ## Viewing from Linux or Windows (Omarchy included)
 
 Open the Glass URL in Chromium, Chrome, or Firefox with Tailscale running. When the host is a Mac, **PC keyboard** mode (on by default for Linux and Windows browsers; toggle it in the ⌘ menu) translates PC conventions:
@@ -537,7 +548,8 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 - All traffic is encrypted (TLS 1.3 via QUIC/HTTPS).
 - With Tailscale, traffic stays on your private tailnet and goes directly between devices when possible.
 - Access control: a device is let in if Tailscale reports it belongs to the same user as the Mac, or if it presents the access token. Glass sends nothing to a session (video, audio, clipboard, input) until it is authenticated. Links, single sign-on, LDAP, access rules, posture checks and passkeys can narrow that further; see above.
-- Glass runs as your user (a LaunchAgent on macOS, a systemd user service on Linux), never as root.
+- Glass runs as your user (a LaunchAgent on macOS, a systemd user service on Linux), never as root. The one exception you can opt into: **Stay awake with the lid closed** on a Mac installs a sudoers rule that lets it turn sleep off and on (`pmset -a disablesleep 0|1`), nothing else.
+- Keys pressed into a password field, or anywhere while a Linux session is locked, aren't shown to viewers or logged.
 - The file browser is for the computer's owner only (not links or guests), sees only the home folder (no `..`, no symlinks out), and moves to the Trash rather than deleting.
 - Fleet (opt-in) sends a computer's details to your glassdesk.dev account and lets that account ask for a fixed set of actions, each signed by your passkey and checked by the computer itself. See [Glass Fleet](#glass-fleet-new) for what's sent and what can and can't happen.
 - Notifications are the one thing that leaves your network: the computer sends them through your browser's push service (Apple, Google, Mozilla or Microsoft), encrypted end to end (RFC 8291), so the push service can't read them. Only devices you turn them on for get them; guests only ever get messages.
@@ -563,6 +575,8 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 - **The mic needs setting up:** run `glass mic` to check and `glass mic install` to set it up (Glass Microphone on a Mac, `pactl` on Linux). Another loopback driver works too on a Mac: set `GLASS_MIC_DEVICE` to part of its name in the service's environment.
 - **The Mac's input is still Glass Microphone (or BlackHole):** Glass puts your previous input back when the mic turns off, and at its next start if it stopped while a mic was on. Or pick it in System Settings › Sound › Input.
 - **Displays missing:** sleeping displays aren't capturable; Glass keeps displays awake while running and wakes them on start.
+- **The lock screen says the password is incorrect when it isn't:** update Glass (`glass update`). Older versions' typing didn't count as someone at the computer, so while the display slept macOS rejected the password without checking it.
+- **A MacBook goes to sleep when its lid closes:** turn on **Stay awake with the lid closed** (`glass config lid-awake on`) and keep it plugged in. `pmset -g | grep SleepDisabled` shows `1` while it's in effect.
 
 ## FAQ
 
@@ -582,7 +596,7 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 
 **Does it stream audio?** Yes, the host's system audio, toggled per device.
 
-**Can I control a locked Mac?** Yes; type your password at the lock screen. FileVault still requires one local login after a reboot.
+**Can I control a locked Mac?** Yes; type your password at the lock screen. With **Stay awake with the lid closed** on, that works on a closed MacBook too, while it's plugged in. FileVault still requires one local login after a reboot.
 
 ## Feedback
 
