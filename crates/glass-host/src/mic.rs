@@ -82,7 +82,7 @@ pub fn uninstall(ask: Ask) -> anyhow::Result<String> {
 }
 
 /// Runs a shell command as root: sudo in the terminal, or the system's password dialog.
-fn as_admin(script: &str, ask: Ask, why: &str) -> anyhow::Result<()> {
+pub(crate) fn as_admin(script: &str, ask: Ask, why: &str) -> anyhow::Result<()> {
     let ok = match ask {
         Ask::Terminal => std::process::Command::new("sudo").args(["sh", "-c", script]).status()?.success(),
         #[cfg(target_os = "macos")]

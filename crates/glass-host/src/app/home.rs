@@ -2,6 +2,7 @@
 //! and the switches people reach for most.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -9,7 +10,7 @@ use gpui_kit::*;
 
 use super::data::Tailnet;
 use super::ui::{self, I};
-use super::{GlassApp, Page, act, actions};
+use super::{GlassApp, Page, Via, act, actions};
 use crate::permissions;
 
 impl GlassApp {
@@ -20,7 +21,14 @@ impl GlassApp {
         let loaded = store.loaded;
         let theme = cx.theme().clone();
         let (screen, input) = snap.permissions();
-        let url = snap.url();
+        // The address shown, copied and put in the QR code: on your tailnet, or from anywhere
+        // (only while remote access is on).
+        let me = cx.entity();
+        let via = if self.via == Via::Anywhere && snap.anywhere_url.is_some() { Via::Anywhere } else { Via::Tailnet };
+        let url = match via {
+            Via::Anywhere => snap.anywhere_url.clone(),
+            Via::Tailnet => snap.url(),
+        };
 
         let (title, line, tint) = if !loaded {
             ("Checking…", String::new(), theme.muted_foreground)
@@ -42,7 +50,15 @@ impl GlassApp {
                 theme.primary,
             )
         } else {
-            ("Ready for connections", "Open the address on any device signed in to your Tailscale.".to_string(), theme.success)
+            (
+                "Ready for connections",
+                match via {
+                    Via::Tailnet => "Open the address on any device signed in to your Tailscale.",
+                    Via::Anywhere => "Open the address in any browser, then sign in.",
+                }
+                .to_string(),
+                theme.success,
+            )
         };
 
         // The hero: status, address and a QR code to scan.
@@ -76,6 +92,7 @@ impl GlassApp {
                             h_flex()
                                 .mt_1()
                                 .gap_2()
+                                .child(address_switch(via, snap.remote, me.clone()))
                                 .child(
                                     ui::mono(url)
                                         .px_2p5()
@@ -114,7 +131,10 @@ impl GlassApp {
                         .items_center()
                         .gap_2()
                         .child(ui::qr(&url, 132.))
-                        .child(div().text_xs().text_color(theme.muted_foreground).child("Scan with your iPad")),
+                        .child(div().text_xs().text_color(theme.muted_foreground).child(match via {
+                            Via::Tailnet => "Scan with your iPad",
+                            Via::Anywhere => "Scan, then sign in",
+                        })),
                 )
             });
 
@@ -318,4 +338,46 @@ pub fn hostname() -> &'static str {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "This computer".into())
     })
+}
+
+/// The button beside the address: its icon says which address this is, and its menu switches
+/// between your Tailscale network and from anywhere (turning remote access on if it's off).
+fn address_switch(via: Via, remote_on: bool, me: Entity<GlassApp>) -> impl IntoElement {
+    let icon = match via {
+        Via::Tailnet => ui::tailscale(),
+        Via::Anywhere => I::Globe.into(),
+    };
+    Button::new("address-via")
+        .icon(icon)
+        .ghost()
+        .small()
+        .dropdown_caret(true)
+        .tooltip("Choose the address")
+        .dropdown_menu(move |menu, _, _| {
+            let tailnet = me.clone();
+            let anywhere = me.clone();
+            menu.min_w(px(230.))
+                .item(PopupMenuItem::new("Your Tailscale network").icon(ui::tailscale()).checked(via == Via::Tailnet).on_click(
+                    move |_, _, cx| {
+                        tailnet.update(cx, |this, cx| {
+                            this.via = Via::Tailnet;
+                            cx.notify();
+                        })
+                    },
+                ))
+                .item(
+                    PopupMenuItem::new(if remote_on { "From anywhere" } else { "From anywhere (off: turn it on)" })
+                        .icon(I::Globe)
+                        .checked(via == Via::Anywhere)
+                        .on_click(move |_, window, cx| {
+                            if !remote_on {
+                                act(window, cx, move || actions::set_remote(true));
+                            }
+                            anywhere.update(cx, |this, cx| {
+                                this.via = Via::Anywhere;
+                                cx.notify();
+                            })
+                        }),
+                )
+        })
 }

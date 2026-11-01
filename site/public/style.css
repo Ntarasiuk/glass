@@ -371,8 +371,35 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
 .doc code { background: rgb(255 255 255 / 0.06); padding: 2px 6px; border-radius: 6px; }
 .doc pre { padding: 16px; overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-raised); }
 .doc pre code { background: none; padding: 0; }
-.doc table { border-collapse: collapse; width: 100%; font-size: 15px; }
-.doc th, .doc td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+/* Comparison tables: a framed card that scrolls sideways, the row label stays put, Glass's row or column is lit. */
+.table-wrap {
+  margin: 24px 0 32px; overflow-x: auto; border-radius: 18px; background: rgb(13 14 18 / 0.93); backdrop-filter: blur(14px);
+  box-shadow: inset 0 0 0 1px var(--line); -webkit-overflow-scrolling: touch;
+}
+.table-wrap.wide { width: min(1120px, calc(100vw - 40px)); }
+.table-wrap.wide th, .table-wrap.wide td { padding: 13px 12px; }
+.table-wrap.wide tbody td { min-width: 0; }
+.table-wrap.wide tbody th { min-width: 132px; }
+.table-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.doc table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 15px; line-height: 1.45; }
+.doc th, .doc td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.doc tbody tr:last-child > * { border-bottom: 0; }
+.doc thead th {
+  font: 650 12px var(--display); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint);
+  background: rgb(255 255 255 / 0.05); white-space: nowrap; vertical-align: bottom;
+}
+.doc tbody th { font-weight: 650; color: var(--text); min-width: 150px; position: sticky; left: 0; background: #101216; z-index: 1; box-shadow: 1px 0 0 var(--line); }
+.doc tbody td { min-width: 128px; color: #d3d7df; }
+.doc tbody tr:hover > td { background: rgb(255 255 255 / 0.035); }
+.doc tbody tr:hover > th { background: #171a20; }
+.doc .us, .doc tr.us > * { background: rgb(92 178 255 / 0.11); }
+.doc thead th.us { color: var(--accent); background: rgb(92 178 255 / 0.2); }
+.doc tr.us > th { background: #13202e; color: #fff; box-shadow: 1px 0 0 var(--line); }
+.doc tbody tr:hover > .us { background: rgb(92 178 255 / 0.15); }
+.pill { display: inline-block; padding: 1px 9px; border-radius: 99px; font: 650 13px var(--display); letter-spacing: 0.01em; }
+.pill.yes { color: #6fe09d; background: rgb(95 211 141 / 0.14); }
+.pill.no { color: var(--text-faint); background: rgb(255 255 255 / 0.07); }
+.note { color: var(--text-dim); font-size: 14px; }
 
 @media (max-width: 880px) {
   .hero, .agent, .feedback { grid-template-columns: minmax(0, 1fr); }
@@ -405,17 +432,72 @@ footer.site nav { display: flex; flex-wrap: wrap; gap: 20px; }
 .updated, .crumbs { color: var(--text-faint); font-size: 14px; margin: 0 0 6px; }
 .crumbs a, .updated a { color: var(--text-dim); }
 .doc .lede { color: var(--text-dim); font-size: 19px; }
-.guide-list { list-style: none; padding: 0; display: grid; gap: 18px; }
-.guide-list a { font: 650 20px var(--display); color: var(--text); }
-.guide-list span { display: block; color: var(--text-dim); margin-top: 4px; }
 .related { margin-top: 56px; }
 .doc .cta { margin-top: 48px; max-width: none; }
 .answer { font-size: clamp(17px, 1.5vw, 19px); color: var(--text); }
+/* Guides and comparisons: a wide header (title beside the short answer), a row of jump links, a centred
+   reading column, tables that break out of it, and cards to the other guides. */
+.doc.guide { max-width: none; padding-top: 28px; }
+.g-hero { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); gap: clamp(28px, 5vw, 72px); align-items: start; }
+.guide .g-hero h1 { margin: 14px 0 0; font-size: clamp(38px, 5.4vw, 68px); line-height: 1.02; max-width: 15ch; }
+.g-answer {
+  position: relative; padding: 26px 28px 28px; border-radius: 26px; backdrop-filter: blur(16px);
+  background: linear-gradient(155deg, rgb(92 178 255 / 0.15), transparent 42%), rgb(13 14 18 / 0.8);
+  box-shadow: 0 24px 60px -30px rgb(92 178 255 / 0.35);
+}
+/* The rim of a lens: light catching one corner, a violet and a warm glint on the others. */
+.g-answer::before {
+  content: ""; position: absolute; inset: 0; padding: 1px; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(150deg, rgb(170 210 255 / 0.9), rgb(150 110 255 / 0.35) 38%, rgb(255 255 255 / 0.06) 68%, rgb(230 150 110 / 0.4));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;
+}
+.g-kicker {
+  display: inline-flex; align-items: center; gap: 7px; margin-bottom: 14px; padding: 4px 12px 4px 9px; border-radius: 99px;
+  font: 650 12px var(--display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent);
+  background: rgb(92 178 255 / 0.13); box-shadow: inset 0 0 0 1px rgb(92 178 255 / 0.32);
+}
+.g-kicker::before {
+  content: ""; width: 12px; height: 12px; background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='34 22 42 60'%3E%3Cpath d='M40 27v44.2l11.18-10.4 7.28 16.12 6.76-2.86-7.28-15.6h13.78z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='34 22 42 60'%3E%3Cpath d='M40 27v44.2l11.18-10.4 7.28 16.12 6.76-2.86-7.28-15.6h13.78z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.guide .g-answer p { margin: 0; font-size: clamp(16px, 1.35vw, 18px); line-height: 1.6; color: #e3e6ec; }
+.g-install { margin-top: 30px; max-width: 470px; }
+.g-hint { max-width: 470px; }
+.toc { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 36px 0 0; padding: 14px 0 0; border-top: 1px solid var(--line); }
+.toc span { margin-right: 6px; font: 650 12px var(--display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); }
+.toc a { padding: 5px 13px; border-radius: 99px; font-size: 14px; color: var(--text-dim); text-decoration: none; background: rgb(255 255 255 / 0.05); box-shadow: inset 0 0 0 1px var(--line); transition: background-color 140ms ease, color 140ms ease; }
+.toc a:hover { color: var(--text); background: rgb(92 178 255 / 0.16); }
+.g-body { max-width: 800px; margin: 8px auto 0; font-size: 17.5px; }
+.g-body > :first-child { margin-top: 0; }
+.g-body > h2:first-child { margin-top: 32px; border-top: 0; padding-top: 0; }
+.g-body h2 { margin-top: 64px; font-size: clamp(28px, 3.2vw, 36px); scroll-margin-top: 28px; }
+.g-body h3 { scroll-margin-top: 28px; }
+.g-body p, .g-body li { line-height: 1.7; }
+.guide .table-wrap.mid, .guide .table-wrap.wide { position: relative; left: 50%; transform: translateX(-50%); }
+.guide .table-wrap.mid { width: min(980px, calc(100vw - 40px)); }
+.guide > .shot, .guide > .about, .guide > .cta, .guide > .hint { max-width: 800px; margin-inline: auto; }
+.guide > .related { margin-top: 64px; }
+.guide .related ul, .guide-list { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; }
+.guide .related a, .guide-list a { display: block; height: 100%; padding: 18px 20px; border-radius: 18px; text-decoration: none; background: rgb(13 14 18 / 0.7); box-shadow: inset 0 0 0 1px var(--line); transition: background-color 140ms ease, box-shadow 140ms ease; }
+.guide .related a:hover, .guide-list a:hover { background: rgb(92 178 255 / 0.1); box-shadow: inset 0 0 0 1px rgb(92 178 255 / 0.5); }
+.guide .related strong, .guide-list strong { display: block; font: 650 18px var(--display); letter-spacing: -0.01em; color: var(--text); }
+.guide .related span, .guide-list span { display: block; margin-top: 6px; font-size: 14.5px; line-height: 1.45; color: var(--text-dim); }
+.guide-index h1 { margin: 0; font-size: clamp(40px, 5.6vw, 68px); line-height: 1; }
+.guide-index .lede { max-width: 60ch; margin-bottom: 36px; }
+@media (max-width: 880px) {
+  .g-hero { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .guide .g-hero h1 { max-width: none; }
+  .g-install, .g-hint { display: none; }
+  .guide .table-wrap.mid, .guide .table-wrap.wide { position: static; transform: none; width: 100%; }
+  .g-body { font-size: 17px; }
+}
 .compare-links { display: grid; gap: 8px; padding-left: 20px; }
 footer.site nav[aria-label="Guides and comparisons"] { flex-basis: 100%; gap: 8px 20px; }
 @media (max-width: 760px) {
-  .doc table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .doc th, .doc td { min-width: 120px; }
+  .table-wrap.wide { width: 100%; }
+  .doc th, .doc td { padding: 12px 12px; }
+  .doc tbody th { min-width: 118px; }
 }
 .shot { margin: 40px 0 0; }
 .shot img { width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--line); }

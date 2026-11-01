@@ -13,7 +13,7 @@ bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
 cliclack = "0.5.6"
 console = "0.16.6"
-glass-proto = { version = "0.8.3", path = "../glass-proto" }
+glass-proto = { version = "0.9.1", path = "../glass-proto" }
 openh264 = "0.9"
 openh264-sys2 = "0.9"
 ring = "0.17.14"
@@ -59,3 +59,13 @@ objc2-video-toolbox = "0.3.2"
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "file_chooser"] }
 evdev = "0.13"
 pipewire = "0.10"
+# Hardware H.264 through VA-API (Intel, AMD), with OpenH264 as the fallback.
+gstreamer = { version = "0.25", optional = true }
+gstreamer-app = { version = "0.25", optional = true }
+gstreamer-video = { version = "0.25", optional = true }
+
+[features]
+# Linux: GLASS_ENCODER=vaapi encodes on the GPU through GStreamer's VA-API plugin (falling
+# back to OpenH264). Off by default: it links the GStreamer libraries, so the host would
+# need them to start.
+vaapi = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]

@@ -1,0 +1,41 @@
+name: Site
+
+# glassdesk.dev ships on its own: a change under site/ deploys the site without a release or any host
+# build (it serves the current release's files, fetched from GitHub). Needs the repository secrets
+# CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID; without them every step is skipped.
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', 'web/**', 'skills/**']
+  workflow_dispatch:
+
+concurrency:
+  group: site-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.CLOUDFLARE_API_TOKEN != ''
+      - uses: actions/setup-node@v4
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        with: { node-version: 24, cache: npm, cache-dependency-path: site/package-lock.json }
+      - name: Test
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        run: |
+          (cd site && npm ci --no-audit --no-fund)
+          node --test tests/site/site.test.mjs
+          node --test tests/site/accounts.test.mjs
+      - name: Deploy glassdesk.dev
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        working-directory: site
+        run: npm run deploy

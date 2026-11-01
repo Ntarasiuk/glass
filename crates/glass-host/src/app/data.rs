@@ -21,6 +21,8 @@ pub struct Snapshot {
     /// Which owner-only secrets are set: OIDC client secret, LDAP password, SCIM token.
     pub secrets: [bool; 3],
     pub remote: bool,
+    /// Its address from anywhere, while remote access is on.
+    pub anywhere_url: Option<String>,
     /// Privacy screen on right now.
     pub privacy: bool,
     pub agent: Agent,
@@ -137,6 +139,7 @@ pub fn gather() -> Snapshot {
             settings::scim_token().is_some(),
         ],
         remote: remote::enabled(),
+        anywhere_url: remote::enabled().then(|| remote::HostKey::load_or_create().ok().map(|k| remote::open_url(&k))).flatten(),
         log: connlog::recent(200).into_iter().rev().collect(),
         token: std::fs::read_to_string(crate::default_token_file()).unwrap_or_default().trim().to_string(),
         mic: crate::mic::device_name(),

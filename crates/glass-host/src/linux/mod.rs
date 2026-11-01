@@ -1,4 +1,4 @@
-//! Linux (Wayland): xdg-desktop-portal + PipeWire capture, OpenH264 encode, uinput input,
+//! Linux (Wayland): xdg-desktop-portal + PipeWire capture, VA-API or OpenH264 encode, uinput input,
 //! wl-clipboard, and a systemd user service. Built and tested against Hyprland (Omarchy).
 
 pub mod agent;
@@ -10,7 +10,10 @@ pub mod keymap;
 pub mod permissions;
 pub mod portal;
 pub mod privacy;
+pub mod session;
 pub mod setup;
+#[cfg(feature = "vaapi")]
+pub mod va_encode;
 pub mod video;
 
 use std::process::{Command, Stdio};

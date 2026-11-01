@@ -26,8 +26,6 @@ jobs:
               - 'crates/**'
               - 'web/**'
               - 'tests/unit/**'
-              - 'site/src/**'
-              - 'site/package*.json'
               - 'Cargo.*'
               - '.github/workflows/**'
             site:

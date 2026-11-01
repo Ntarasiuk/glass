@@ -13,6 +13,28 @@ marked.use({
       const id = text.toLowerCase().replace(/<[^>]+>|`/g, '').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '-');
       return `<h${depth} id="${id}">${this.parser.parseInline(tokens)}</h${depth}>\n`;
     },
+    // Tables: the row label is a header cell, a leading Yes / No / None becomes a coloured pill (the word stays
+    // in the text), Glass's own row or column is highlighted, and the table scrolls inside its own frame.
+    table(t) {
+      const inline = (c) => this.parser.parseInline(c.tokens);
+      const isUs = (c) => /^Glass\b/.test(c.text.replace(/[*_`]/g, ''));
+      const usCol = t.header.findIndex((c, i) => i > 0 && isUs(c));
+      const value = (c) => {
+        const html = inline(c);
+        const m = c.text.replace(/[*_`]/g, '').match(/^(Yes|No|None)\b/);
+        if (!m) return html;
+        const rest = html.replace(new RegExp(`^(<[^>]+>)*${m[1]}`), '').replace(/^[\s;,:]+/, '').trim();
+        return `<span class="pill ${m[1] === 'No' ? 'no' : 'yes'}">${m[1]}</span>${rest ? ` <span class="note">${rest}</span>` : ''}`;
+      };
+      const head = t.header.map((c, i) => `<th scope="col"${i === usCol ? ' class="us"' : ''}>${inline(c)}</th>`).join('');
+      const rows = t.rows.map((r) => {
+        const us = isUs(r[0]);
+        const cells = r.map((c, i) => (i === 0 ? `<th scope="row">${inline(c)}</th>` : `<td${i === usCol ? ' class="us"' : ''}>${value(c)}</td>`)).join('');
+        return `<tr${us ? ' class="us"' : ''}>${cells}</tr>`;
+      }).join('\n');
+      const wide = t.header.length > 5 ? ' wide' : t.header.length > 3 ? ' mid' : '';
+      return `<div class="table-wrap${wide}" role="region" aria-label="Comparison table" tabindex="0"><table><thead><tr>${head}</tr></thead><tbody>\n${rows}\n</tbody></table></div>\n`;
+    },
   },
 });
 
@@ -98,7 +120,7 @@ Install on the computer to be controlled: \`curl -fsSL glassdesk.dev | sh\` (mac
 
 Features:
 - Picture and speed: about 20 ms, up to 120 fps on fast screens, Display P3 colour, Sharp text (native size, 4:2:2, lossless 4:4:4 once still), every display (live previews, or side by side), the viewing device as a second display that extends the Mac's desktop, fit-this-device resolution, adaptive bitrate.
-- Control: touch, trackpad, mouse and keyboard (⌘ shortcuts on iPad, per-machine keyboard profiles, a shortcut bar), trackpad mode on phones (a laptop-style pointer the zoomed view follows; the toolbar folds into menus), Apple Pencil pressure and tilt as Mac tablet input, pointer lock for games, game controllers (Linux), Wake-on-LAN, restart Glass or the computer.
+- Control: touch, trackpad, mouse and keyboard (⌘ shortcuts on iPad, per-machine keyboard profiles, a shortcut bar), trackpad mode on phones (a laptop-style pointer the zoomed view follows; the toolbar folds into menus), Apple Pencil pressure and tilt as Mac tablet input, pointer lock for games, game controllers (Linux), Wake-on-LAN, restart Glass or the computer, unlock from the lock screen (a closed laptop on power too, with \`glass config lid-awake on\`).
 - Between devices: your microphone on the computer (Mac: Glass Microphone, our own audio driver, \`glass mic install\`; Linux: PipeWire/PulseAudio), system audio (the browser's media controls and lock screen show and control what the computer is playing), clipboard with rich text and images both ways, files and folders both ways, an owner-only file browser (browse, preview, upload into any folder, rename, Trash), share to the computer from other apps.
 - On every device: just a browser; installable app (badge, per-machine shortcuts, share target, picture in picture, window controls overlay, opens offline); notifications even with Glass closed (Web Push, end-to-end encrypted; answer connection requests and agent questions from the notification).
 - Helping someone: quick support (\`curl -fsSL glassdesk.dev/help | sh\` on their computer shows a code you type at glassdesk.dev/help; nothing stays installed), one-time links and links with limits (view-only, no files, no clipboard, time limits, ask first, passkey required), chat, drawing on the screen, a privacy screen, \`glass link --anywhere\` over WebRTC.
@@ -284,17 +306,38 @@ for (const g of guides) {
     },
     ...(faqItems.length ? [{ '@type': 'FAQPage', '@id': `${SITE}${g.path}#faq`, mainEntity: faqItems }] : []),
   ];
-  const html = marked.parse(g.markdown);
-  const related = guides.filter((o) => o !== g).map((o) => `<li><a href="${o.path}">${esc(o.title)}</a></li>`).join('');
+  const parsed = marked.parse(g.markdown);
+  // The header holds the title and the short answer side by side; the rest is the article.
+  const h1 = parsed.match(/<h1[^>]*>[\s\S]*?<\/h1>\n?/)?.[0] ?? '';
+  const afterTitle = parsed.replace(h1, '');
+  const intro = afterTitle.match(/^\s*<p>([\s\S]*?)<\/p>\n?/);
+  const shortAnswer = intro?.[1].startsWith('<strong>Short answer:</strong>');
+  const rest = shortAnswer ? afterTitle.replace(intro[0], '') : afterTitle;
+  const answer = shortAnswer
+    ? `<div class="g-answer"><span class="g-kicker">Short answer</span><p>${intro[1].replace('<strong>Short answer:</strong>', '').trim().replace(/^((?:<[^>]+>)*)([a-z])/, (_, tags, ch) => tags + ch.toUpperCase())}</p></div>`
+    : '';
+  const toc = [...rest.matchAll(/<h2 id="([^"]+)">([\s\S]*?)<\/h2>/g)]
+    .map(([, id, label]) => `<a href="#${id}">${label.replace(/<[^>]+>/g, '')}</a>`).join('');
+  const related = guides.filter((o) => o !== g).map((o) => `<li><a href="${o.path}"><strong>${esc(o.label)}</strong><span>${esc(o.title)}</span></a></li>`).join('');
   writePage(g.path, {
     title: g.title,
     description: g.description,
     modified,
     type: 'article',
+    mainClass: 'doc guide',
     graph,
-    body: `<nav class="crumbs" aria-label="Breadcrumb"><a href="/">Glass</a> › <a href="/guides">Guides</a></nav>
+    body: `<header class="g-hero">
+<div class="g-title"><nav class="crumbs" aria-label="Breadcrumb"><a href="/">Glass</a> › <a href="/guides">Guides</a></nav>
 <p class="updated">Updated <time datetime="${modified}">${human(modified)}</time> · by <a href="https://github.com/Ntarasiuk">Nathan Tarasiuk</a>, who makes Glass</p>
-${html}
+${h1}
+<div class="command lg-glass-surface g-install" data-lg-preset="control" data-copy="curl -fsSL glassdesk.dev | sh"><code><span class="prompt" aria-hidden="true">$</span> curl -fsSL glassdesk.dev | sh</code><button type="button" class="copy">Copy</button></div>
+<p class="hint g-hint">Run it on the Mac or Linux computer you want to reach. Free and <a href="https://github.com/Ntarasiuk/glass">open source</a>.</p></div>
+${answer}
+</header>
+${toc ? `<nav class="toc" aria-label="On this page"><span>On this page</span>${toc}</nav>` : ''}
+<div class="g-body">
+${rest}
+</div>
 <figure class="shot"><img src="/og.png" width="1200" height="630" loading="lazy" alt="Glass: your computer, in any browser. About 20 ms from your Mac or Linux screen to an iPad, phone or laptop. Install with curl -fsSL glassdesk.dev | sh."><figcaption>Glass installs with one line on the Mac or Linux computer; you open it from any browser.</figcaption></figure>
 <aside class="about"><h2>How this page was checked</h2><p>Written by <a href="https://github.com/Ntarasiuk">Nathan Tarasiuk</a>, who builds Glass. Every claim about another product links to that product's own page or documentation, checked on ${human(modified)}; Glass's own numbers come from its built-in latency meter on a home network. Products change: if something here is out of date, <a href="/features#feedback">tell us</a> and it gets fixed.</p></aside>
 <aside class="related"><h2>More guides</h2><ul>${related}</ul></aside>`,
@@ -306,6 +349,7 @@ writePage('/guides', {
   description: 'Honest guides to controlling a Mac or Linux computer remotely, and how Glass compares with Jump Desktop, Parsec, RustDesk and Apple Sidecar.',
   modified: guidesModified,
   type: 'website',
+  mainClass: 'doc guide guide-index',
   graph: [
     ORG,
     {
@@ -321,11 +365,11 @@ writePage('/guides', {
   ],
   body: `<h1>Guides and comparisons</h1>
 <p class="lede">Glass is a free, open-source remote desktop for Mac and Linux, used from any browser. These pages answer the questions people ask before choosing one, including when another tool fits better.</p>
-<ul class="guide-list">${guides.map((g) => `<li><a href="${g.path}">${esc(g.title)}</a><span>${esc(g.description)}</span></li>`).join('')}</ul>`,
+<ul class="guide-list">${guides.map((g) => `<li><a href="${g.path}"><strong>${esc(g.title)}</strong><span>${esc(g.description)}</span></a></li>`).join('')}</ul>`,
 });
 
 /** A page in the docs' layout: head, header, body, shared footer. */
-function writePage(path, { title, description, modified, type, graph, body: content }) {
+function writePage(path, { title, description, modified, type, graph, body: content, mainClass = 'doc' }) {
   const url = `${SITE}${path}`;
   mkdirSync(`public${path}`, { recursive: true });
   writeFileSync(
@@ -373,7 +417,7 @@ function writePage(path, { title, description, modified, type, graph, body: cont
       <a class="brand" href="/"><img src="/icon.svg" alt="Glass logo" width="26" height="26">Glass</a>
       <nav class="site" aria-label="Main"><a href="/">Home</a><a href="/features">Features</a><a href="/docs">Docs</a><a href="https://github.com/Ntarasiuk/glass">GitHub</a></nav>
     </header>
-    <main class="doc">
+    <main class="${mainClass}">
 ${content}
 <div class="command lg-glass-surface cta" data-lg-preset="control" data-copy="curl -fsSL glassdesk.dev | sh"><code><span class="prompt" aria-hidden="true">$</span> curl -fsSL glassdesk.dev | sh</code><button type="button" class="copy">Copy</button></div>
 <p class="hint">Try Glass: run this on the Mac or Linux computer you want to reach. Free and <a href="https://github.com/Ntarasiuk/glass">open source</a>.</p>

@@ -22,6 +22,9 @@ pub struct Settings {
     pub privacy: bool,
     /// Prefer HEVC over H.264 when every viewer can decode it.
     pub hevc: bool,
+    /// Stay awake with the lid closed while on power, so a closed MacBook can still be
+    /// unlocked and used from a viewer (see `lid`).
+    pub lid_awake: bool,
     /// Local ports on this computer (or reachable from it) a signed-in owner device may
     /// open through Glass, e.g. [3000, 8888]. Empty: port forwarding off.
     pub forward_ports: Vec<u16>,
@@ -160,6 +163,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("recordings-dir", "folder for recordings"),
     ("privacy", "on/off: blank this screen and block local input while viewed"),
     ("hevc", "on/off: use HEVC when every viewer supports it"),
+    ("lid-awake", "on/off: stay awake with the lid closed while on power (laptops; on a Mac, asks for your password once)"),
     ("agents", "on/off: AI agents on other devices may ask to use this computer (glass agents)"),
     ("forward-ports", "comma-separated ports owner devices may open, e.g. 3000,8888"),
     ("name", "name shown in the viewer"),
@@ -237,6 +241,7 @@ impl Settings {
             "recordings-dir" => recordings_dir(self).display().to_string(),
             "privacy" => show_bool(self.privacy),
             "hevc" => show_bool(self.hevc),
+            "lid-awake" => show_bool(self.lid_awake),
             // Kept with the agents' grants, not here.
             "agents" => show_bool(crate::grants::load().enabled),
             "forward-ports" => self
@@ -281,6 +286,13 @@ impl Settings {
             }
             "privacy" => self.privacy = on_off(value)?,
             "hevc" => self.hevc = on_off(value)?,
+            "lid-awake" => {
+                let on = on_off(value)?;
+                if on && !self.lid_awake {
+                    crate::lid::allow()?;
+                }
+                self.lid_awake = on;
+            }
             "agents" => crate::grants::set_enabled(on_off(value)?)?,
             "forward-ports" => {
                 self.forward_ports = value
