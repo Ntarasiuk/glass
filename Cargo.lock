@@ -2536,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "glass-host"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "glass-proto"
-version = "0.9.1"
+version = "0.10.0"
 
 [[package]]
 name = "glib"
