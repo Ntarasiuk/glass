@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod audio;
+pub mod ax;
 pub mod capture;
 pub mod clipboard;
 pub mod clock;
