@@ -69,6 +69,11 @@ mod platform;
 #[cfg(windows)]
 #[path = "windows/mod.rs"]
 mod platform;
+// The Windows port's pure parts, so their tests run on every OS.
+#[cfg(all(test, not(windows)))]
+#[path = "windows/convert.rs"]
+#[allow(dead_code)]
+mod windows_convert;
 
 // Platform modules keep the same names everywhere, so shared code says `crate::input` etc.
 use platform::{agent, audio, clipboard, clock, input, permissions, video};
@@ -749,6 +754,13 @@ fn set_token(path: &std::path::Path) -> Result<()> {
 const FEEDBACK_URL: &str = "https://glassdesk.dev/api/feedback";
 
 fn main() -> Result<()> {
+    // Windows: the helper holding the local-input hooks (see platform::front).
+    #[cfg(windows)]
+    if let [_, flag, pid] = std::env::args().collect::<Vec<_>>().as_slice()
+        && flag == platform::front::HOOK_HELPER_ARG
+    {
+        return platform::front::run_hook_helper(pid);
+    }
     let args = Args::parse();
     // Quick support keeps everything in its own temporary config, chosen before anything
     // (or any thread) reads the environment.
