@@ -80,7 +80,7 @@ function footer(modified, { wrap = true } = {}) {
   const compare = guides.map((g) => `<a href="${g.path}">${esc(g.label)}</a>`).join('');
   return `<footer class="site${wrap ? ' wrap' : ''}">
     <span>Glass is a free, open-source remote desktop for Mac and Linux (MIT). Updated <time datetime="${modified}">${human(modified)}</time>.</span>
-    <nav aria-label="Footer"><a href="/features">Features</a><a href="/docs">Documentation</a><a href="/guides">Guides</a><a href="/help">Quick support</a><a href="/features#feedback">Feedback</a><a href="https://github.com/Ntarasiuk/glass">Star on GitHub</a><a href="/docs.md">docs.md</a><a href="/llms.txt">llms.txt</a><a href="/install.sh">install.sh</a></nav>
+    <nav aria-label="Footer"><a href="/features">Features</a><a href="/docs">Documentation</a><a href="/changelog">Changelog</a><a href="/guides">Guides</a><a href="/help">Quick support</a><a href="/features#feedback">Feedback</a><a href="https://github.com/Ntarasiuk/glass">Star on GitHub</a><a href="/docs.md">docs.md</a><a href="/llms.txt">llms.txt</a><a href="/install.sh">install.sh</a></nav>
     <nav aria-label="Guides and comparisons">${compare}</nav>
   </footer>`;
 }
@@ -132,6 +132,7 @@ Features:
 
 - [Full documentation](${SITE}/llms-full.txt): everything in one file: install, setup, features, keyboard behaviour on iPad, CLI reference, architecture, security, troubleshooting, FAQ
 - [Documentation (HTML)](${SITE}/docs): the same, as a web page
+- [Changelog](${SITE}/changelog.md): what changed in each release
 - [Install script](${SITE}/install.sh): what \`curl -fsSL glassdesk.dev | sh\` runs
 - [Your computers](${SITE}/computers): sign in with a passkey to see which of your computers are online and open them; \`glass account add\` on a computer adds it
 - [Agent skill](${SITE}/skill.md): how an AI agent sets Glass up on any machine in the user's Tailscale tailnet over SSH (\`glass setup --yes --json\`)
@@ -431,12 +432,26 @@ ${content}
   );
 }
 
+// Changelog: ../CHANGELOG.md, as a page and as markdown for agents.
+const changelog = readFileSync('../CHANGELOG.md', 'utf8');
+const changelogModified = lastModified('../CHANGELOG.md');
+writeFileSync('public/changelog.md', changelog);
+writePage('/changelog', {
+  title: 'Glass changelog: what changed in each release',
+  description: 'What changed in each release of Glass, the free, open-source remote desktop for Mac and Linux.',
+  modified: changelogModified,
+  type: 'article',
+  graph: [{ '@type': 'WebPage', '@id': `${SITE}/changelog`, url: `${SITE}/changelog`, name: 'Glass changelog', dateModified: changelogModified, inLanguage: 'en' }],
+  body: `<p class="updated">Updated <time datetime="${changelogModified}">${human(changelogModified)}</time> · <a href="/changelog.md">Markdown</a></p>\n${marked.parse(changelog)}`,
+});
+
 // Sitemap: the HTML pages, each dated by its source's last commit.
 const pages = [
   ['/', 'index.html'],
   ['/features', 'pages/features.html'],
   ['/help', 'pages/help.html'],
   ['/docs', 'docs.md'],
+  ['/changelog', '../CHANGELOG.md'],
   ...guides.map((g) => [g.path, g.src]),
 ];
 writeFileSync(
@@ -491,7 +506,7 @@ for (const p of PLATFORMS) {
   writeFileSync(`public/releases/${f}.sha256`, `${sum}  ${f}\n`);
 }
 
-console.log('built: index.html, features/, help/, computers/, guides/, vs/, skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, index.md, sitemap.xml, app/, releases/');
+console.log('built: index.html, features/, help/, computers/, guides/, vs/, changelog/, changelog.md, skill.md, llms.txt, llms-full.txt, docs.md, docs/index.html, index.md, sitemap.xml, app/, releases/');
 
 /** YYYY-MM-DD of the first commit adding a file, if it's committed. */
 function firstCommitted(file) {

@@ -18,6 +18,7 @@ Features:
 
 - [Full documentation](https://glassdesk.dev/llms-full.txt): everything in one file: install, setup, features, keyboard behaviour on iPad, CLI reference, architecture, security, troubleshooting, FAQ
 - [Documentation (HTML)](https://glassdesk.dev/docs): the same, as a web page
+- [Changelog](https://glassdesk.dev/changelog.md): what changed in each release
 - [Install script](https://glassdesk.dev/install.sh): what `curl -fsSL glassdesk.dev | sh` runs
 - [Your computers](https://glassdesk.dev/computers): sign in with a passkey to see which of your computers are online and open them; `glass account add` on a computer adds it
 - [Agent skill](https://glassdesk.dev/skill.md): how an AI agent sets Glass up on any machine in the user's Tailscale tailnet over SSH (`glass setup --yes --json`)
