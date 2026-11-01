@@ -393,7 +393,7 @@ const ui = createUI({
   onUploadFiles: uploadFiles,
   onRequestFiles: () => {
     control({ t: 'pickFiles' });
-    ui.toast({ text: 'Choose files in the dialog on your Mac' });
+    ui.toast({ text: 'Choose files in the dialog on the computer' });
   },
   onAudio: toggleAudio,
   onMic: toggleMic,
@@ -780,6 +780,7 @@ function onControl(msg) {
       input.setHostOs(msg.host_os ?? 'macos');
       ui.setHostOs(msg.host_os ?? 'macos');
       applyKeyboard(msg.host_os ?? 'macos');
+      files.setHostOs(msg.host_os ?? 'macos');
       if (remoteKey) {
         setLogSink((lines) => control({ t: 'log', lines }));
         rememberRemote(msg.computer);
@@ -787,7 +788,7 @@ function onControl(msg) {
       guest = Boolean(msg.guest);
       // Remote: other machines aren't reachable from here, so no machines menu either.
       ui.setGuest(guest || Boolean(remoteKey));
-      ui.setCanFit(!guest);
+      ui.setCanFit(!guest && msg.features?.fit !== false);
       // A new session has no second display (the host removed it when the last one ended).
       extended = undefined;
       ui.setExtend({ available: Boolean(msg.features?.extend && (msg.perms ? msg.perms.owner : !guest)), on: false });
