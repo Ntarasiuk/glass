@@ -34,11 +34,12 @@ Windows is in a stack of PRs (#75 onwards); a ✅ there means it ran in a Window
 | Relative mouse (games) | ✅ | ✅ | 🧪 | |
 | Type any text (agents) | ✅ | ❌ | 🧪 Unicode key events | |
 | Pen pressure and tilt | ✅ | ❌ | 🧪 synthetic pen | |
-| Game controllers | ❌ | ✅ uinput | ❌ | Windows needs ViGEmBus |
-| Unlock from the lock screen | ✅ | ? | ❌ | Windows needs a SYSTEM service |
-| Control elevated windows, UAC prompts | — | — | ❌ | Same: SYSTEM service |
+| Game controllers | ❌ | ✅ uinput | 🧪 ViGEmBus | Windows: a virtual Xbox 360 controller when ViGEmBus is installed |
+| Use the lock screen / sign-in screen (while signed in) | ✅ | ? | ✅ SYSTEM helper | Windows: `glass service install` keeps a SYSTEM helper on the input desktop |
+| Control elevated windows, UAC prompts | — | — | ✅ SYSTEM helper | Same service; input passes UIPI through SYSTEM |
+| Send Ctrl+Alt+Del | — | — | ✅ SendSAS | Viewer's More menu. Needs the secure-desktop service (sets the SoftwareSASGeneration policy) |
 | Wake on LAN, restart Glass/computer | ✅ | ✅ | 🧪 | |
-| Stay awake with the lid closed | ✅ | ✅ | ❌ | |
+| Stay awake with the lid closed | ✅ | ✅ | 🧪 power plan lid action | Windows: "Do nothing" on power while it's on, put back after |
 
 ## Sound, clipboard, files
 
@@ -53,7 +54,7 @@ Windows is in a stack of PRs (#75 onwards); a ✅ there means it ran in a Window
 | File transfer, folders | ✅ | ✅ | 🧪 | |
 | File browser | ✅ | ✅ | 🧪 | |
 | Move to Trash | ✅ | ✅ gio | 🧪 Recycle Bin | |
-| File previews | ✅ Quick Look | ❌ | ❌ | |
+| File previews | ✅ Quick Look | ❌ | 🧪 shell thumbnails | |
 | Pick files on the host | ✅ | ✅ portal | 🧪 Open dialog | |
 
 ## People and agents
@@ -77,10 +78,14 @@ Windows is in a stack of PRs (#75 onwards); a ✅ there means it ran in a Window
 | Feature | macOS | Linux | Windows | Notes |
 |---|---|---|---|---|
 | One-line install | ✅ install.sh | ✅ install.sh | ✅ install.ps1 | `irm glassdesk.dev \| iex` |
-| Release builds | ✅ universal | ✅ x86_64 | 🧪 x64 + Arm64 zips | |
+| Release builds | ✅ universal | ✅ x86_64 | 🧪 x64 + Arm64 zips and MSIs | |
+| Signed builds | ✅ stable identity | — | 🧪 Authenticode, timestamped | Windows: Azure Trusted Signing or a .pfx (release.yml) |
+| Managed deployment | ❌ | ❌ | 🧪 per-machine MSI, winget manifests | `msiexec /i glass-….msi /qn`; Program Files, starts for every user, firewall rule |
+| Admin policies (locked settings) | ❌ | ❌ | 🧪 Group Policy / Intune (ADMX) | HKLM/HKCU\SOFTWARE\Policies\Glass; packaging/windows/policies |
 | Background service | ✅ LaunchAgent | ✅ systemd user | ✅ glassw at sign-in | |
-| Self-update | ✅ | ✅ | ✅ | |
-| Guided setup | ✅ | ✅ | ✅ (unattended) | Windows adds a firewall rule (one UAC prompt) |
+| Secure-desktop service (SYSTEM) | — | — | ✅ optional | `glass service install`; keeps a SYSTEM helper in the console session for the lock screen, UAC and Ctrl+Alt+Del. Host stays the only network/auth endpoint |
+| Self-update | ✅ | ✅ | ✅ | Windows MSI installs update with the MSI or winget; a policy can turn updates off |
+| Guided setup | ✅ | ✅ | ✅ (unattended) | Windows adds a firewall rule and offers the secure-desktop service (one UAC prompt each) |
 | Desktop app | ✅ Glass.app | ❌ | ✅ Start menu | Same window |
 | Status icon (who's viewing, quick controls) | ✅ menu bar | ❌ | ✅ notification area | |
 | CLI ↔ host channel | ✅ Unix socket | ✅ Unix socket | ✅ named pipe | |

@@ -33,6 +33,7 @@ mod now_playing;
 mod pcm;
 mod oidc;
 mod passkey;
+mod policy;
 mod posture;
 mod power;
 mod privacy;
@@ -348,6 +349,14 @@ enum Command {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
+    /// The secure-desktop service (LocalSystem): lets viewers use the lock screen, answer
+    /// UAC prompts, control elevated windows and send Ctrl+Alt+Del. Install or remove it
+    /// (needs administrator; `glass setup` asks for you).
+    #[cfg(windows)]
+    Service {
+        #[arg(value_parser = ["install", "uninstall", "status"], default_value = "status")]
+        action: String,
+    },
     /// Wake a machine with Wake-on-LAN, by a MAC address or a tailnet name seen before.
     Wake { target: String },
     /// Show the access token for devices outside your tailnet.
@@ -533,8 +542,18 @@ fn config_cli(key: Option<&str>, value: Option<&str>) -> Result<()> {
     let mut s = settings::load();
     match (key, value) {
         (None, _) => {
+            let policy = policy::load();
             for (k, help) in settings::KEYS {
-                println!("{k:<16} {:<12} {help}", s.get(k)?);
+                let managed = if policy.locked(k) { format!(" ({})", policy::MANAGED) } else { String::new() };
+                println!("{k:<16} {:<12} {help}{managed}", s.get(k)?);
+            }
+            // Policies on things that aren't settings here (remote access, files…).
+            let others: Vec<_> = policy.iter().filter(|(d, _)| !settings::KEYS.iter().any(|(k, _)| *k == d.key)).collect();
+            if !others.is_empty() {
+                println!("\nAlso {}:", policy::MANAGED);
+                for (d, v) in others {
+                    println!("{:<16} {v:<12} {}", d.key, d.what);
+                }
             }
         }
         (Some(k), None) => println!("{}", s.get(k)?),
@@ -762,6 +781,17 @@ fn main() -> Result<()> {
         && flag == platform::front::HOOK_HELPER_ARG
     {
         return platform::front::run_hook_helper(pid);
+    }
+    // Windows: the secure-desktop service (started by the SCM) and the SYSTEM helper it
+    // keeps running in the active console session (see platform::service / platform::secure).
+    #[cfg(windows)]
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        match argv.get(1).map(String::as_str) {
+            Some(platform::service::SERVICE_ARG) => return platform::service::run_service(),
+            Some(platform::secure::HELPER_ARG) => return platform::secure::run_helper(),
+            _ => {}
+        }
     }
     let args = Args::parse();
     // Quick support keeps everything in its own temporary config, chosen before anything
@@ -1017,6 +1047,8 @@ async fn async_main(args: Args) -> Result<()> {
             println!("Sent a wake-up to {target} ({macs}).");
             Ok(())
         }
+        #[cfg(windows)]
+        Some(Command::Service { action }) => platform::service::cli(action),
         Some(Command::Remote { action }) => remote_cli(action),
         Some(Command::Account { action, json }) => account_cli(action, *json),
         Some(Command::Fleet { action, arg, json }) => fleet_cli(action, arg.as_deref(), *json),
@@ -1081,6 +1113,10 @@ fn print_status() -> Result<()> {
                 _ => "off (glass remote on)",
             };
             println!("  remote:           {remote}");
+            if cfg!(windows) {
+                let pads = if gamepad::supported() { "yes (ViGEmBus)".to_string() } else { format!("no: install ViGEmBus ({})", gamepad::VIGEM_DOWNLOAD) };
+                println!("  controllers:      {pads}");
+            }
             if let Some(url) = &s.url {
                 println!("  open:             {url}");
             }
@@ -1169,6 +1205,14 @@ async fn run_host(args: Args) -> Result<()> {
     let (audio, _) = broadcast::channel(16);
     let (events, _) = broadcast::channel(32);
 
+    // Windows: link to the SYSTEM secure-desktop helper if the service is installed, so
+    // viewers can use the lock screen, answer UAC, control elevated windows and Ctrl+Alt+Del.
+    // A no-op (degrading to today's behaviour) when it isn't.
+    #[cfg(windows)]
+    if !args.test {
+        platform::secure::start(frames.clone());
+    }
+
     let token = control::load_or_create_token(&args.token_file)?;
     let tls = match args.cert.clone().zip(args.key.clone()) {
         Some((cert, key)) => Some(server::TlsFiles { cert, key }),
@@ -1237,6 +1281,9 @@ async fn run_host(args: Args) -> Result<()> {
         // Keep displays (and the system) awake for as long as the host runs.
         let awake = platform::keep_awake();
         lid::watch();
+        if cfg!(windows) && !gamepad::supported() {
+            info!("game controllers: off until ViGEmBus is installed ({})", gamepad::VIGEM_DOWNLOAD);
+        }
         let video = Arc::new(video::Video::new(
             video::VideoConfig {
                 // Linux encodes in software: 60 at most. Windows caps OpenH264 at 60 itself
