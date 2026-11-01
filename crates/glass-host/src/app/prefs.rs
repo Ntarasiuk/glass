@@ -157,7 +157,7 @@ impl GlassApp {
             self.field(
                 "bind",
                 "Listen addresses",
-                "Where Glass accepts connections. Blank (shown as 0.0.0.0) is every IPv4 address. tailscale is this Mac's Tailscale addresses, or list them: 127.0.0.1, 100.64.0.2. Restart to apply.",
+                "Where Glass accepts connections. Blank (shown as 0.0.0.0) is every IPv4 address. tailscale is this Mac's Tailscale addresses, or list them: 127.0.0.1, 100.64.0.2. On macOS, port 443 needs the default bind or 0.0.0.0. Restart to apply.",
                 cx,
             ),
         ];

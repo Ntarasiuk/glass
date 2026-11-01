@@ -102,7 +102,8 @@ struct Args {
     /// Addresses to listen on, for the web client and WebTransport. Repeat the flag or
     /// separate addresses with commas (`127.0.0.1,100.64.0.2`). `tailscale` uses this
     /// machine's Tailscale addresses and fails if Tailscale isn't running. Default:
-    /// `0.0.0.0`. When set, overrides `glass config bind`.
+    /// `0.0.0.0`. On macOS, port 443 needs the default bind (or `0.0.0.0`). When set,
+    /// overrides `glass config bind`.
     #[arg(long, value_name = "ADDR", value_delimiter = ',')]
     bind: Vec<String>,
     /// Capture frame rate cap. Viewers get 60, or up to 120 on a fast screen (macOS).

@@ -218,6 +218,12 @@ pub fn bind_https(listen: &Listen, port: u16) -> Result<Vec<TcpListener>> {
         Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
             anyhow::bail!("can't listen on {e}. Check --bind or `glass config bind`.")
         }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            tracing::warn!(
+                "port {port} refused ({e}). On macOS, port 443 needs the default bind (or 0.0.0.0); links include the web port."
+            );
+            Ok(Vec::new())
+        }
         Err(e) => {
             tracing::info!("port {port} unavailable ({e}); links include the web port");
             Ok(Vec::new())
