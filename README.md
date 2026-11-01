@@ -22,6 +22,7 @@
   <a href="https://glassdesk.dev">Website</a> ·
   <a href="https://glassdesk.dev/docs">Docs</a> ·
   <a href="https://glassdesk.dev/features">Features</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
   <a href="#faq">FAQ</a>
 </p>
 
