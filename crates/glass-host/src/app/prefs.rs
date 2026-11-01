@@ -124,6 +124,7 @@ impl GlassApp {
             self.toggle("ask-guests", "Ask before guests connect", "Someone with a link waits until you allow them.", s.ask_guests, cx),
             self.toggle("ask-everyone", "Ask before anyone connects", "Your own devices too.", s.ask_everyone, cx),
             self.toggle("privacy", "Privacy screen while viewed", "Blank this screen and block its keyboard and mouse.", s.privacy, cx),
+            self.toggle("lid-awake", "Stay awake with the lid closed", "While on power, so you can still unlock it from a viewer. Asks for your password once.", s.lid_awake, cx),
             ui::row(
                 "Reach from anywhere",
                 "Links can work outside your tailnet, over WebRTC through glassdesk.dev.",

@@ -19,6 +19,7 @@ mod gamepad;
 mod ipc;
 mod keys;
 mod ldap;
+mod lid;
 mod lossless;
 mod mcp;
 mod oauth;
@@ -1200,6 +1201,7 @@ async fn run_host(args: Args) -> Result<()> {
     } else {
         // Keep displays (and the system) awake for as long as the host runs.
         let awake = platform::keep_awake();
+        lid::watch();
         let video = Arc::new(video::Video::new(
             video::VideoConfig {
                 // Linux encodes in software: 60 at most.

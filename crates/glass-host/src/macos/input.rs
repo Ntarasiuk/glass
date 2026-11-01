@@ -24,6 +24,33 @@ unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
 }
 
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOPMAssertionDeclareUserActivity(name: *const std::ffi::c_void, user_type: u32, id: *mut u32) -> i32;
+}
+
+/// kIOPMUserActiveLocal: what a person at the keyboard declares (the remote kind doesn't
+/// wake the display).
+const USER_ACTIVE_LOCAL: u32 = 0;
+
+/// Tells macOS someone is using the computer. Posted events alone don't count while the
+/// display sleeps, and the lock screen won't check a password until someone does: without
+/// this, typing the right password from a viewer fails as "incorrect". At most once a second.
+fn declare_user_active() {
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    static ID: AtomicU32 = AtomicU32::new(0);
+    static AT: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    if now.saturating_sub(AT.swap(now, Ordering::Relaxed)) < 1000 {
+        return;
+    }
+    let name = objc2_core_foundation::CFString::from_str("Glass remote input");
+    let mut id = ID.load(Ordering::Relaxed);
+    // SAFETY: a valid CFString; the same assertion is updated each time.
+    unsafe { IOPMAssertionDeclareUserActivity((&*name as *const objc2_core_foundation::CFString).cast(), USER_ACTIVE_LOCAL, &mut id) };
+    ID.store(id, Ordering::Relaxed);
+}
+
 /// Without Accessibility permission, posted events are silently dropped.
 pub fn has_accessibility() -> bool {
     unsafe { AXIsProcessTrusted() }
@@ -289,6 +316,7 @@ impl Injector {
 
     fn post(&self, ev: Option<CFRetained<CGEvent>>) {
         if let Some(ev) = ev {
+            declare_user_active();
             CGEvent::set_flags(Some(&ev), self.flags);
             // Lets privacy mode's event tap tell these from the local keyboard and mouse.
             CGEvent::set_integer_value_field(
@@ -388,3 +416,4 @@ mod tests {
         assert_eq!((edge.x, edge.y), (900.0, 50.0), "clamped to the window");
     }
 }
+

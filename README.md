@@ -52,7 +52,7 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Steady on bad Wi-Fi.** Adapts bitrate, reconnects after sleep or tab suspension, never shows a corrupted frame, and asks for a smaller picture when your device struggles.
 
 ### Control
-- **Full control.** Mouse, trackpad, keyboard, touch and pinch to zoom, or trackpad mode on a phone (drag the pointer, the zoomed view follows it). ⌘Tab works on iPad. Unlock a locked Mac from the lock screen.
+- **Full control.** Mouse, trackpad, keyboard, touch and pinch to zoom, or trackpad mode on a phone (drag the pointer, the zoomed view follows it). ⌘Tab works on iPad. Unlock a locked Mac from the lock screen, even a MacBook with its lid closed (`glass config lid-awake on`, while it's plugged in).
 - **Apple Pencil.** Pressure and tilt reach the Mac as tablet input, so drawing apps respond as they do to a drawing tablet.
 - **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps remembered for each computer, and a shortcut bar for touch screens.
 - **Games.** Capture the mouse (relative motion) for games and 3D apps; game controllers reach Linux hosts.
