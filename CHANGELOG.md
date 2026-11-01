@@ -2,6 +2,26 @@
 
 What changed in each release of Glass. `glass update` (or the Glass app) installs the newest; every build is on [GitHub Releases](https://github.com/Ntarasiuk/glass/releases).
 
+## 0.11.0-windows.1
+
+November 1, 2026
+
+A preview of Glass on Windows, for testing. A GitHub pre-release only: glassdesk.dev and `glass update` stay on 0.10.0, so no installed computer is offered it.
+
+To try it, run the MSI below (installs for everyone on the computer), or unzip `glass-0.11.0-windows.1-windows-<arch>.zip` anywhere and run `glass\bin\glass.exe setup`.
+
+### Windows host (preview)
+
+- Windows 10 (2004 or newer) and 11, x64 and Arm. A zip, and an MSI for installing for everyone on a computer (`msiexec /i glass-….msi /qn`), with Group Policy settings (packaging/windows/policies).
+- Every display through DXGI Desktop Duplication, with the pointer drawn in. H.264 on the GPU through Media Foundation, or OpenH264.
+- Mouse, keyboard (by scan code), scroll, pen, and game controllers with the free ViGEmBus driver.
+- Clipboard text, rich text and images; file transfer and the file browser; system audio; the viewer's microphone through VB-CABLE.
+- PowerShell in the viewer's terminal; agent screenshots, clicks, keys and `snapshot` through UI Automation; the privacy screen.
+- Starts at sign-in, with an icon in the notification area showing who's viewing. The Glass app from the Start menu, with the same settings as on a Mac. Uninstall from Settings › Apps.
+- Optional: `glass service install` adds a service so viewers can use the lock screen, UAC prompts and elevated windows, and send Ctrl+Alt+Del.
+
+The Windows programs aren't code-signed yet, so SmartScreen may warn before the MSI runs.
+
 ## 0.10.0
 
 October 31, 2026
