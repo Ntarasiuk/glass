@@ -63,6 +63,9 @@ mod platform;
 #[cfg(target_os = "linux")]
 #[path = "linux/mod.rs"]
 mod platform;
+#[cfg(windows)]
+#[path = "windows/mod.rs"]
+mod platform;
 
 // Platform modules keep the same names everywhere, so shared code says `crate::input` etc.
 use platform::{agent, audio, clipboard, clock, input, permissions, video};
@@ -1326,15 +1329,22 @@ fn bind_first_free(port: u16) -> Result<std::net::TcpListener> {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME")
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .unwrap_or_default()
 }
 
-/// ~/.config/glass, or $GLASS_CONFIG_DIR (tests use it to stay out of the real config).
+/// ~/.config/glass (%APPDATA%\Glass on Windows), or $GLASS_CONFIG_DIR (tests use it to
+/// stay out of the real config).
 pub fn config_dir() -> PathBuf {
     std::env::var_os("GLASS_CONFIG_DIR")
         .map(PathBuf::from)
+        .or_else(|| {
+            cfg!(windows)
+                .then(|| std::env::var_os("APPDATA"))
+                .flatten()
+                .map(|d| PathBuf::from(d).join("Glass"))
+        })
         .unwrap_or_else(|| home().join(".config/glass"))
 }
 
