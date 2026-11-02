@@ -13,7 +13,7 @@ bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
 cliclack = "0.5.6"
 console = "0.16.6"
-glass-proto = { version = "0.11.0-windows.1", path = "../glass-proto" }
+glass-proto = { version = "0.10.0", path = "../glass-proto" }
 openh264 = "0.9"
 openh264-sys2 = "0.9"
 ring = "0.17.14"
@@ -68,9 +68,11 @@ gstreamer-video = { version = "0.25", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
+    "Data_Xml_Dom",
     "Foundation",
     "Media_Control",
     "Storage_Streams",
+    "UI_Notifications",
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
