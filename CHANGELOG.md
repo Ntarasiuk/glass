@@ -2,6 +2,22 @@
 
 What changed in each release of Glass. `glass update` (or the Glass app) installs the newest; every build is on [GitHub Releases](https://github.com/Ntarasiuk/glass/releases).
 
+## 0.11.0-windows.3
+
+November 2, 2026
+
+The third Windows preview, for testing: 0.11.0-windows.2 plus the changes below. A GitHub pre-release only: glassdesk.dev and `glass update` stay on 0.10.0, so no installed computer is offered it.
+
+To try it, run the MSI below (installs for everyone on the computer), or unzip `glass-0.11.0-windows.3-windows-<arch>.zip` anywhere and run `glass\bin\glass.exe setup`. Uninstall from Settings › Apps.
+
+### Changed since 0.11.0-windows.2
+
+- The viewer's stats say how loud the sound reaching it is (`audioPeak`), not just how many packets came: silence comes as packets too.
+- Glass never sends Glass Microphone's feed back to viewers as the computer's sound.
+- With our own Glass Microphone driver installed (not in this release: it needs Microsoft's signature), Glass uses it over VB-CABLE.
+
+The Windows programs aren't code-signed yet, so SmartScreen may warn before the MSI runs.
+
 ## 0.10.0
 
 October 31, 2026
