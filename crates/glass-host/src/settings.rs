@@ -13,6 +13,9 @@ pub struct Settings {
     pub ask_guests: bool,
     /// Ask before anyone connects, the owner's own devices included.
     pub ask_everyone: bool,
+    /// Let anyone on this computer's tailnet in without the token (as a guest), not just
+    /// the owner's own devices and the people the access rules name.
+    pub tailnet_members: bool,
     /// Record every session to a video file in `recordings_dir`.
     pub record: bool,
     /// Where recordings go (default ~/Movies/Glass or ~/Videos/Glass).
@@ -28,6 +31,9 @@ pub struct Settings {
     /// Local ports on this computer (or reachable from it) a signed-in owner device may
     /// open through Glass, e.g. [3000, 8888]. Empty: port forwarding off.
     pub forward_ports: Vec<u16>,
+    /// Addresses to listen on (IPs, or `tailscale`). Empty: `0.0.0.0` for TCP, and
+    /// WebTransport's dual-stack default. Applied the next time the host starts.
+    pub bind: Vec<String>,
     /// Name shown in the viewer instead of the computer's (branding).
     pub name: Option<String>,
     /// Accent colour for the viewer, as #rrggbb (branding).
@@ -184,6 +190,7 @@ pub fn save(s: &Settings) -> Result<()> {
 pub const KEYS: &[(&str, &str)] = &[
     ("ask-guests", "on/off: ask before a guest (magic link) connects"),
     ("ask-everyone", "on/off: ask before anyone connects"),
+    ("tailnet-members", "on/off: anyone on this tailnet connects without the token, as a guest"),
     ("record", "on/off: record every session"),
     ("recordings-dir", "folder for recordings"),
     ("privacy", "on/off: blank this screen and block local input while viewed"),
@@ -198,6 +205,10 @@ pub const KEYS: &[(&str, &str)] = &[
     ),
     ("agents", "on/off: AI agents on other devices may ask to use this computer (glass agents)"),
     ("forward-ports", "comma-separated ports owner devices may open, e.g. 3000,8888"),
+    (
+        "bind",
+        "listen addresses, comma-separated (or tailscale); default 0.0.0.0; on macOS, port 443 needs the default or 0.0.0.0; applies on restart",
+    ),
     ("name", "name shown in the viewer"),
     ("accent", "viewer accent colour, e.g. #ff8800"),
     ("relay", "self-hosted remote-access server, e.g. https://glass.example.com"),
@@ -269,6 +280,7 @@ impl Settings {
         Ok(match key {
             "ask-guests" => show_bool(self.ask_guests),
             "ask-everyone" => show_bool(self.ask_everyone),
+            "tailnet-members" => show_bool(self.tailnet_members),
             "record" => show_bool(self.record),
             "recordings-dir" => recordings_dir(self).display().to_string(),
             "privacy" => show_bool(self.privacy),
@@ -282,6 +294,13 @@ impl Settings {
                 .map(|p| p.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
+            "bind" => {
+                if self.bind.is_empty() {
+                    "0.0.0.0".into()
+                } else {
+                    self.bind.join(",")
+                }
+            }
             "name" => self.name.clone().unwrap_or_default(),
             "accent" => self.accent.clone().unwrap_or_default(),
             "relay" => self.relay.clone().unwrap_or_default(),
@@ -318,6 +337,7 @@ impl Settings {
         match key {
             "ask-guests" => self.ask_guests = on_off(value)?,
             "ask-everyone" => self.ask_everyone = on_off(value)?,
+            "tailnet-members" => self.tailnet_members = on_off(value)?,
             "record" => self.record = on_off(value)?,
             "recordings-dir" => {
                 self.recordings_dir = (!value.is_empty()).then(|| PathBuf::from(value))
@@ -345,6 +365,15 @@ impl Settings {
                             .ok_or_else(|| anyhow::anyhow!("{p} isn't a port"))
                     })
                     .collect::<Result<_>>()?
+            }
+            "bind" => {
+                if value.is_empty() {
+                    self.bind.clear();
+                } else {
+                    let parsed = crate::listen::parse_bind([value])?;
+                    anyhow::ensure!(!parsed.is_empty(), "expected an IP address or tailscale");
+                    self.bind = parsed;
+                }
             }
             "name" => {
                 let name: String = value.chars().filter(|c| !c.is_control()).take(40).collect();
@@ -514,6 +543,14 @@ mod tests {
         assert!(s.set("nope", "on").is_err());
         s.set("name", "").unwrap();
         assert_eq!(s.name, None);
+        assert_eq!(s.get("bind").unwrap(), "0.0.0.0");
+        s.set("bind", "Tailscale, 127.0.0.1").unwrap();
+        assert_eq!(s.bind, vec!["tailscale".to_string(), "127.0.0.1".into()]);
+        assert_eq!(s.get("bind").unwrap(), "tailscale,127.0.0.1");
+        assert!(s.set("bind", "nope").is_err());
+        assert!(s.set("bind", "127.0.0.1:8080").is_err());
+        s.set("bind", "").unwrap();
+        assert!(s.bind.is_empty());
         // Unknown and missing fields are fine.
         let old: Settings = serde_json::from_str(r#"{"ask_guests":true,"future":1}"#).unwrap();
         assert!(old.ask_guests && !old.record);

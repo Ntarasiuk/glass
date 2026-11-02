@@ -1,11 +1,12 @@
 //! WebTransport session handling plus the HTTP(S) server for the web client.
 
+use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use axum::Json;
 use axum::http::{HeaderValue, header};
 use axum::routing::{get, post};
@@ -16,6 +17,8 @@ use tokio::sync::{broadcast, mpsc};
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{info, warn};
+use wtransport::config::Ipv6DualStackConfig;
+use wtransport::endpoint::endpoint_side::Server;
 use wtransport::endpoint::IncomingSession;
 use wtransport::tls::Sha256DigestFmt;
 use wtransport::{Endpoint, Identity, RecvStream, SendStream, ServerConfig};
@@ -56,8 +59,9 @@ pub async fn run(
     web_dir: PathBuf,
     // The usual web port, where other machines' hosts are probed.
     http_port: u16,
-    http_listener: std::net::TcpListener,
-    https_listener: Option<std::net::TcpListener>,
+    http_listeners: Vec<std::net::TcpListener>,
+    https_listeners: Vec<std::net::TcpListener>,
+    listen: crate::listen::Listen,
     wt_port: u16,
     wt_host: Option<String>,
     tls: Option<TlsFiles>,
@@ -76,35 +80,22 @@ pub async fn run(
     });
 
     // The usual port, or the next free one: clients learn it from /config.json.
-    let mut bound = None;
-    for port in wt_port..wt_port.saturating_add(crate::PORT_TRIES) {
-        let config = ServerConfig::builder()
-            .with_bind_default(port)
-            .with_identity(identity.clone_identity())
-            .keep_alive_interval(Some(Duration::from_secs(2)))
-            .max_idle_timeout(Some(Duration::from_secs(10)))?
-            .build();
-        match Endpoint::server(config) {
-            Ok(endpoint) => {
-                bound = Some((endpoint, port));
-                break;
-            }
-            Err(e) => warn!("udp/{port} unavailable ({e}); trying the next port"),
-        }
-    }
-    let Some((endpoint, wt_port)) = bound else {
-        anyhow::bail!(
-            "UDP ports {wt_port}–{} are all in use; free one or pass --wt-port",
-            wt_port.saturating_add(crate::PORT_TRIES - 1)
-        );
+    // Every listen address shares that port. The default is one dual-stack socket.
+    let (endpoints, wt_port) = bind_wt(&identity, &listen, wt_port)?;
+    let wt_where = match &listen {
+        crate::listen::Listen::Default => "0.0.0.0 and [::]".to_string(),
+        other => crate::listen::describe(other),
     };
-    info!("WebTransport listening on udp/{wt_port}");
-    crate::remote::watch(wt_port);
-    crate::fleet::watch();
-    // What the computer is playing, for viewers' media controls (while anyone is connected).
-    crate::now_playing::watch(shared.events.clone());
-    // A mic left on when the host last stopped left BlackHole as the default input.
-    crate::mic::recover();
+    info!("WebTransport listening on {wt_where} udp/{wt_port}");
+    crate::remote::watch(wt_port, listen.wt_dial());
+    // Fleet's scripts and the microphone belong to a signed-in user, not the sign-in screen.
+    if !crate::signin::active() {
+        crate::fleet::watch();
+        // What the computer is playing, for viewers' media controls (while anyone is connected).
+        crate::now_playing::watch(shared.events.clone());
+        // A mic left on when the host last stopped left BlackHole as the default input.
+        crate::mic::recover();
+    }
 
     let cert_hash = cert_hash.map(|h| serde_json::from_str::<Vec<u8>>(&h).unwrap());
     let version_dir = web_dir.clone();
@@ -130,18 +121,26 @@ pub async fn run(
     let machines_cache: MachinesCache = Arc::new(tokio::sync::Mutex::new(None));
     let manifest_cache = machines_cache.clone();
     let manifest_dir = web_dir.clone();
+    // The sign-in host (SYSTEM) serves the viewer and nothing else: forwarded ports, the
+    // admin console, single sign-on, agents and file links would all act as SYSTEM.
+    let extras = if crate::signin::active() {
+        axum::Router::new()
+    } else {
+        axum::Router::new()
+            .merge(crate::forward::routes())
+            .merge(crate::oidc::routes())
+            .merge(crate::admin::routes())
+            .merge(crate::ldap::routes())
+            .merge(crate::scim::routes())
+            .merge(crate::acl::routes())
+            .merge(crate::computer::routes())
+            .merge(crate::oauth::routes())
+            .merge(crate::push::routes())
+            .merge(crate::browse::routes())
+    };
     let app = axum::Router::new()
         .merge(extra_routes.unwrap_or_default())
-        .merge(crate::forward::routes())
-        .merge(crate::oidc::routes())
-        .merge(crate::admin::routes())
-        .merge(crate::ldap::routes())
-        .merge(crate::scim::routes())
-        .merge(crate::acl::routes())
-        .merge(crate::computer::routes())
-        .merge(crate::oauth::routes())
-        .merge(crate::push::routes())
-        .merge(crate::browse::routes())
+        .merge(extras)
         .route("/config.json", get(client_config))
         .route(
             "/manifest.webmanifest",
@@ -162,47 +161,36 @@ pub async fn run(
             HeaderValue::from_static("no-store"),
         ));
     // Agents from anywhere: only the OAuth and MCP routes, on this computer alone, for
-    // Tailscale Funnel to publish (glass agents public on).
-    crate::oauth::serve_public();
-    let web_port = http_listener.local_addr()?.port();
-    http_listener.set_nonblocking(true)?;
-    tokio::spawn(async move {
-        let result = match tls {
-            Some(t) => {
-                let rustls =
-                    axum_server::tls_rustls::RustlsConfig::from_pem_file(&t.cert, &t.key).await?;
-                if let Some(listener) = https_listener {
-                    let port = listener.local_addr()?.port();
-                    listener.set_nonblocking(true)?;
-                    let server = axum_server::from_tcp_rustls(listener, rustls.clone())?;
-                    let app = app.clone();
-                    info!("web client at https://<host>/ (port {port})");
-                    tokio::spawn(async move {
-                        if let Err(e) = server.serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
-                            warn!("port {port}: {e}");
-                        }
-                    });
-                }
-                info!("web client at https://<host>:{web_port}");
-                axum_server::from_tcp_rustls(http_listener, rustls)?
-                    .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                    .await
-            }
-            None => {
-                info!("web client at http://localhost:{web_port}");
-                axum_server::from_tcp(http_listener)?
-                    .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                    .await
-            }
-        };
-        if let Err(e) = &result {
-            tracing::error!("web server stopped: {e}");
+    // Tailscale Funnel to publish (glass agents public on). This listener is loopback-only
+    // and does not follow --bind.
+    if !crate::signin::active() {
+        crate::oauth::serve_public();
+    }
+    let web_port = http_listeners
+        .first()
+        .context("no web listener")?
+        .local_addr()?
+        .port();
+    let scheme = if tls.is_some() { "https" } else { "http" };
+    if !https_listeners.is_empty() {
+        info!(
+            "web client at https://<host>/ (port {})",
+            https_listeners[0].local_addr()?.port()
+        );
+    }
+    info!("web client at {scheme}://<host>:{web_port}");
+    let rustls = match &tls {
+        Some(t) => {
+            Some(axum_server::tls_rustls::RustlsConfig::from_pem_file(&t.cert, &t.key).await?)
         }
-        anyhow::Ok(result?)
-    });
+        None => None,
+    };
+    spawn_web(https_listeners, app.clone(), rustls.clone());
+    spawn_web(http_listeners, app, rustls);
 
     loop {
-        let incoming = endpoint.accept().await;
+        let (incoming, _, _) =
+            futures_util::future::select_all(endpoints.iter().map(|ep| Box::pin(ep.accept()))).await;
         let shared = shared.clone();
         tokio::spawn(async move {
             if let Err(e) = session(incoming, shared).await {
@@ -210,6 +198,132 @@ pub async fn run(
             }
         });
     }
+}
+
+fn spawn_web(
+    listeners: Vec<std::net::TcpListener>,
+    app: axum::Router,
+    tls: Option<axum_server::tls_rustls::RustlsConfig>,
+) {
+    for listener in listeners {
+        let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+        if let Err(e) = listener.set_nonblocking(true) {
+            warn!("port {port}: {e}");
+            continue;
+        }
+        let app = app.clone();
+        let tls = tls.clone();
+        tokio::spawn(async move {
+            let result = serve_one(listener, app, tls).await;
+            if let Err(e) = result {
+                tracing::error!("web server on port {port} stopped: {e}");
+            }
+        });
+    }
+}
+
+async fn serve_one(
+    listener: std::net::TcpListener,
+    app: axum::Router,
+    tls: Option<axum_server::tls_rustls::RustlsConfig>,
+) -> Result<()> {
+    let service = app.into_make_service_with_connect_info::<SocketAddr>();
+    match tls {
+        Some(cfg) => {
+            axum_server::from_tcp_rustls(listener, cfg)?
+                .serve(service)
+                .await?;
+        }
+        None => {
+            axum_server::from_tcp(listener)?.serve(service).await?;
+        }
+    }
+    Ok(())
+}
+
+enum WtBind {
+    Default,
+    Address(IpAddr),
+}
+
+enum WtBindError {
+    /// The address isn't assigned on this machine; another port won't help.
+    AddrNotAvailable(String),
+    /// Port taken, or another error worth trying the next port for.
+    Unavailable(std::io::Error),
+    Config(anyhow::Error),
+}
+
+fn bind_wt(
+    identity: &Identity,
+    listen: &crate::listen::Listen,
+    first_port: u16,
+) -> Result<(Vec<Endpoint<Server>>, u16)> {
+    let last = first_port.saturating_add(crate::PORT_TRIES - 1);
+    let mut last_err = None;
+    for port in first_port..=last {
+        match bind_wt_endpoints(identity, listen, port) {
+            Ok(endpoints) => return Ok((endpoints, port)),
+            Err(WtBindError::AddrNotAvailable(msg)) => anyhow::bail!("{msg}"),
+            Err(WtBindError::Config(err)) => return Err(err),
+            Err(WtBindError::Unavailable(err)) => {
+                warn!("udp/{port} unavailable ({err}); trying the next port");
+                last_err = Some(err);
+            }
+        }
+    }
+    let why = last_err.map(|e| format!(" ({e})")).unwrap_or_default();
+    anyhow::bail!("UDP ports {first_port}–{last} are all in use{why}; free one or pass --wt-port")
+}
+
+fn bind_wt_endpoints(
+    identity: &Identity,
+    listen: &crate::listen::Listen,
+    port: u16,
+) -> Result<Vec<Endpoint<Server>>, WtBindError> {
+    let specs: Vec<WtBind> = match listen {
+        crate::listen::Listen::Default => vec![WtBind::Default],
+        crate::listen::Listen::Explicit(ips) => ips.iter().copied().map(WtBind::Address).collect(),
+    };
+    let mut endpoints = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let config = wt_server_config(identity, port, &spec)?;
+        match Endpoint::server(config) {
+            Ok(endpoint) => endpoints.push(endpoint),
+            Err(err) if err.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                return Err(WtBindError::AddrNotAvailable(format!(
+                    "can't listen on udp/{port} ({err}). Check --bind or `glass config bind`."
+                )));
+            }
+            Err(err) => return Err(WtBindError::Unavailable(err)),
+        }
+    }
+    Ok(endpoints)
+}
+
+fn wt_server_config(
+    identity: &Identity,
+    port: u16,
+    spec: &WtBind,
+) -> Result<ServerConfig, WtBindError> {
+    let builder = ServerConfig::builder();
+    let builder = match spec {
+        WtBind::Default => builder.with_bind_default(port),
+        WtBind::Address(IpAddr::V4(ip)) => {
+            builder.with_bind_address(SocketAddr::new(IpAddr::V4(*ip), port))
+        }
+        WtBind::Address(IpAddr::V6(ip)) => builder.with_bind_address_v6(
+            SocketAddrV6::new(*ip, port, 0, 0),
+            // IPv4 has its own socket when it's in the list. Dual-stack would take that port.
+            Ipv6DualStackConfig::Deny,
+        ),
+    };
+    let configured = builder
+        .with_identity(identity.clone_identity())
+        .keep_alive_interval(Some(Duration::from_secs(2)))
+        .max_idle_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| WtBindError::Config(anyhow::anyhow!("WebTransport idle timeout: {err:?}")))?;
+    Ok(configured.build())
 }
 
 async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
@@ -459,10 +573,15 @@ async fn control(
         && hello_ok
         // Over WebRTC the address is public, never a tailnet device's.
         && ctx.relayed.is_none()
-        && let Some(owner) = &shared.tailnet_owner
-        && tailscale::is_trusted(peer, owner).await
+        && let Some(login) = tailscale::identity(peer).await
     {
-        auth = Some(Auth::Tailnet);
+        if shared.tailnet_owner.as_deref() == Some(login.as_str()) {
+            auth = Some(Auth::Tailnet);
+        } else if let Some(scope) = tailnet_guest_scope(&login) {
+            // Someone else on the tailnet: the access rules name them, or the owner lets the
+            // whole tailnet in (tailnet-members).
+            auth = Some(Auth::TailnetGuest { login, scope });
+        }
     }
     // A policy can turn guest links (or, in its own host, quick support) off: new links and
     // devices already let in by one are refused.
@@ -580,22 +699,32 @@ async fn control(
         }
     }
     let mut perms = match &auth {
-        Auth::Guest { scope, .. } => control::Perms::guest(scope),
+        Auth::Guest { scope, .. } | Auth::TailnetGuest { scope, .. } => control::Perms::guest(scope),
         _ => control::Perms::owner(),
     };
     // Files and the clipboard can be off for everyone, by policy.
     perms.files &= policy.allows("files");
     perms.clipboard &= policy.allows("clipboard");
     let terminal = crate::terminal::SUPPORTED && policy.allows("terminal");
+    // The sign-in host runs as SYSTEM: its owner-only features would be the whole computer.
+    // Everyone gets the screen and input there, and nothing else.
+    let signin = crate::signin::active();
+    let asked = !perms.owner;
+    if signin {
+        perms.owner = false;
+        perms.files = false;
+        perms.clipboard = false;
+    }
+    let terminal = terminal && !signin;
     let guest = !perms.owner;
-    if matches!(auth, Auth::Tailnet)
+    if matches!(auth, Auth::Tailnet | Auth::TailnetGuest { .. })
         && let Some(name) = tailscale::device_name(peer).await
     {
         device = format!("{name} ({device})");
     }
     let how = match &auth {
         Auth::Token => crate::viewers::How::Token,
-        Auth::Tailnet => crate::viewers::How::Tailnet,
+        Auth::Tailnet | Auth::TailnetGuest { .. } => crate::viewers::How::Tailnet,
         Auth::Guest { .. } => crate::viewers::How::Guest,
     };
     let session_id = crate::viewers::next_id();
@@ -609,6 +738,7 @@ async fn control(
     };
     let scope_detail = match &auth {
         Auth::Guest { scope, .. } => scope.describe(),
+        Auth::TailnetGuest { login, scope } => format!("{login}, {}", scope.describe()),
         _ => String::new(),
     };
 
@@ -625,8 +755,9 @@ async fn control(
 
     // Ask before connecting: the person at the computer allows (or denies) this viewer.
     let settings = crate::settings::load();
-    let scope_asks = matches!(&auth, Auth::Guest { scope, .. } if scope.ask);
-    if settings.ask_everyone || (guest && (settings.ask_guests || scope_asks)) {
+    let scope_asks = matches!(&auth, Auth::Guest { scope, .. } | Auth::TailnetGuest { scope, .. } if scope.ask);
+    // (Nobody is at the sign-in screen to ask.)
+    if !signin && (settings.ask_everyone || (asked && (settings.ask_guests || scope_asks))) {
         let msg = "Waiting for the person at this computer to let you in…".into();
         control::write_json(&mut send, &ServerMsg::Waiting { msg }).await?;
         let mut who = viewer.describe();
@@ -652,6 +783,9 @@ async fn control(
     match &auth {
         Auth::Token => info!("{peer}: authenticated via token"),
         Auth::Tailnet => info!("{peer}: authenticated via tailnet identity"),
+        Auth::TailnetGuest { login, scope } => {
+            info!("{peer}: authenticated via tailnet identity {login}, a guest ({})", scope.describe())
+        }
         Auth::Guest {
             expires,
             new,
@@ -1354,6 +1488,48 @@ async fn fit(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>) -> Result<(
     let peer = ctx.conn.remote_address();
     // Put any current one back first (dropping it unmirrors and removes it).
     let old = FIT.lock().unwrap().take();
+    // The display to reshape: the one this fit replaces mirrored, else the one being
+    // watched (main when it's a window, every display, or a second display we added).
+    let target = match old.as_ref().and_then(|f| f._display.replaced()) {
+        Some(id) => Some(id),
+        None => {
+            let shared = ctx.shared.clone();
+            tokio::task::spawn_blocking(move || {
+                let streams = shared.video.streams();
+                let [watching] = streams.as_slice() else { return None };
+                let added = EXTENDED.lock().unwrap().iter().any(|(_, d)| d.id == watching.id);
+                let physical = shared.video.displays().is_ok_and(|ds| ds.iter().any(|d| d.id == watching.id));
+                (physical && !added).then_some(watching.id)
+            })
+            .await?
+        }
+    };
+    let size = size.map(|[w, h]| [w & !3, h & !3]); // even points
+    // A new size for the same viewer (it turned): resize the display it has, so the windows
+    // on it stay there.
+    let old = match (old, size) {
+        (Some(mut fit), Some([w, h])) => {
+            let (fit, resized) = tokio::task::spawn_blocking(move || {
+                let resized = fit._display.resize(w, h);
+                (fit, resized)
+            })
+            .await?;
+            match resized {
+                Ok(()) => {
+                    let id = fit._display.id;
+                    info!("{peer}: fit resized to {w}×{h} (virtual display {id})");
+                    *FIT.lock().unwrap() = Some(Fit { owner: session, _display: fit._display });
+                    fit_windows(id);
+                    return set_layout(ctx, Layout::Single(Some(id))).await;
+                }
+                Err(e) => {
+                    info!("{peer}: can't resize the fit in place ({e:#}); making a new one");
+                    Some(fit)
+                }
+            }
+        }
+        (old, _) => old,
+    };
     let had = old.is_some();
     if let Some(old) = old {
         tokio::task::spawn_blocking(move || drop(old)).await?;
@@ -1361,14 +1537,14 @@ async fn fit(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>) -> Result<(
     let Some([w, h]) = size else {
         if had {
             info!("{peer}: displays restored");
-            set_layout(ctx, Layout::Single(None)).await?;
+            set_layout(ctx, Layout::Single(target)).await?;
         }
         return Ok(());
     };
-    let (w, h) = (w & !1, h & !1);
     let created = tokio::task::spawn_blocking(move || {
-        let mut display = crate::platform::virtual_display::VirtualDisplay::create(w, h)?;
-        display.mirror_main()?;
+        // Retina: the viewer's pixels, at the size things look on it.
+        let mut display = crate::platform::virtual_display::VirtualDisplay::create_scaled(w, h, true)?;
+        display.replace(target.unwrap_or_else(|| objc2_core_graphics::CGMainDisplayID()))?;
         anyhow::Ok(display)
     })
     .await?;
@@ -1382,7 +1558,8 @@ async fn fit(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>) -> Result<(
         }
     };
     let id = display.id;
-    info!("{peer}: fitting the desktop to {w}×{h} (virtual display {id})");
+    let [vw, vh] = [display.width, display.height];
+    info!("{peer}: fitting the desktop to {vw}×{vh} for {w}×{h} (virtual display {id})");
     *FIT.lock().unwrap() = Some(Fit {
         owner: session,
         _display: display,
@@ -1398,8 +1575,33 @@ async fn fit(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>) -> Result<(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    fit_windows(id);
     set_layout(ctx, Layout::Single(Some(id))).await
 }
+
+/// Once a fitted display has its size: windows that don't fit on it any more shrink and
+/// move onto it (in the background; asking every app can take a moment).
+#[cfg(target_os = "macos")]
+fn fit_windows(id: u32) {
+    tokio::task::spawn_blocking(move || {
+        // macOS moves windows off a display that changed a moment after it does.
+        std::thread::sleep(Duration::from_millis(400));
+        let b = objc2_core_graphics::CGDisplayBounds(id);
+        let display = [b.origin.x, b.origin.y, b.size.width, b.size.height];
+        // The menu bar is on the main display.
+        let bar = if objc2_core_graphics::CGMainDisplayID() == id { MENU_BAR } else { 0.0 };
+        let area = [display[0], display[1] + bar, display[2], display[3] - bar];
+        let moved = crate::platform::ax::fit_windows(display, area);
+        if moved > 0 {
+            let [_, _, fw, fh] = area;
+            info!("fit: {moved} windows resized or moved to fit {fw}×{fh}");
+        }
+    });
+}
+
+/// The menu bar's height, in points.
+#[cfg(target_os = "macos")]
+const MENU_BAR: f64 = 25.0;
 
 #[cfg(not(target_os = "macos"))]
 async fn fit(ctx: &SessionCtx, _session: u64, size: Option<[u32; 2]>) -> Result<()> {
@@ -1642,6 +1844,11 @@ async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
 enum Auth {
     Token,
     Tailnet,
+    /// Someone else's tailnet device, let in by the access rules or `tailnet-members`.
+    TailnetGuest {
+        login: String,
+        scope: crate::access::Scope,
+    },
     /// Via a magic link: `new` when the link was opened just now (the pass is sent back).
     Guest {
         pass: String,
@@ -1650,6 +1857,15 @@ enum Auth {
         scope: crate::access::Scope,
         passkey: Option<crate::access::Passkey>,
     },
+}
+
+/// What someone else on the tailnet (`login`) may do: the access rules' first match, else a
+/// guest's default if the owner lets the whole tailnet in; `None`: they need the token.
+fn tailnet_guest_scope(login: &str) -> Option<crate::access::Scope> {
+    if let Some((scope, _)) = crate::acl::decide(&crate::acl::effective(), login, &[]) {
+        return Some(scope);
+    }
+    crate::settings::load().tailnet_members.then(crate::access::Scope::default)
 }
 
 /// How often a guest session re-checks that its pass is still valid.
@@ -2163,4 +2379,29 @@ fn unix_now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}.{:03}", d.as_secs(), d.subsec_millis())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::*;
+
+    fn identity() -> Identity {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        Identity::self_signed(["localhost"]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn webtransport_binds_the_chosen_address_and_skips_a_taken_port() {
+        let identity = identity();
+        let listen = crate::listen::Listen::Explicit(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+        let hold = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let taken = hold.local_addr().unwrap().port();
+        let (endpoints, port) = bind_wt(&identity, &listen, taken).unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert!(port > taken && port < taken.saturating_add(crate::PORT_TRIES), "{port}");
+        assert_eq!(endpoints[0].local_addr().unwrap().ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(endpoints[0].local_addr().unwrap().port(), port);
+    }
 }

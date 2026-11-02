@@ -2,21 +2,22 @@
 
 What changed in each release of Glass. `glass update` (or the Glass app) installs the newest; every build is on [GitHub Releases](https://github.com/Ntarasiuk/glass/releases).
 
-## 0.11.0-windows.3
+## 0.11.0
 
 November 2, 2026
 
-The third Windows preview, for testing: 0.11.0-windows.2 plus the changes below. A GitHub pre-release only: glassdesk.dev and `glass update` stay on 0.10.0, so no installed computer is offered it.
+### Fit this device
 
-To try it, run the MSI below (installs for everyone on the computer), or unzip `glass-0.11.0-windows.3-windows-<arch>.zip` anywhere and run `glass\bin\glass.exe setup`. Uninstall from Settings › Apps.
+- Fitting now gives your iPad or iPhone its full resolution: a Retina display in its shape (3180×2320 on a 12.9" iPad, laid out like 1590×1160), so text is sharp and a normal size.
+- The fitted display stands in for the one you're watching: that monitor turns off while you're fitted, and the fitted display takes its place, menu bar and all. Before, the monitor mirrored it, which some monitors can't show (they lost the signal every few seconds and the screens flipped).
+- Your other displays stay where they are, and come back exactly as they were when you stop.
+- Turning your device resizes the fitted display to match, and windows that don't fit on it any more shrink and move onto it.
+- The pointer reaches the very top of the fitted display, so the menu bar can be clicked.
+- If Glass quits while fitted, macOS turns the monitor back on.
 
-### Changed since 0.11.0-windows.2
+### Listen addresses
 
-- The viewer's stats say how loud the sound reaching it is (`audioPeak`), not just how many packets came: silence comes as packets too.
-- Glass never sends Glass Microphone's feed back to viewers as the computer's sound.
-- With our own Glass Microphone driver installed (not in this release: it needs Microsoft's signature), Glass uses it over VB-CABLE.
-
-The Windows programs aren't code-signed yet, so SmartScreen may warn before the MSI runs.
+- `--bind` (or `glass config bind`) picks the addresses Glass listens on, for example `--bind tailscale --bind 127.0.0.1` to stay on your tailnet and this computer. `tailscale` means this machine's Tailscale addresses. The default is unchanged: every address. Also in the Mac app's settings. Thanks [@ddedic](https://github.com/ddedic).
 
 ## 0.10.0
 

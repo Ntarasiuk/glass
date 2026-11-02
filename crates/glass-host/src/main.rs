@@ -21,6 +21,7 @@ mod ipc;
 mod keys;
 mod ldap;
 mod lid;
+mod listen;
 mod lossless;
 #[cfg(not(target_os = "macos"))]
 mod mailbox;
@@ -42,6 +43,7 @@ mod push;
 mod recording;
 mod scim;
 mod settings;
+mod signin;
 mod sharp;
 mod terminal;
 mod wol;
@@ -112,6 +114,13 @@ struct Args {
     /// Port for WebTransport (UDP).
     #[arg(long, default_value_t = 4433)]
     wt_port: u16,
+    /// Addresses to listen on, for the web client and WebTransport. Repeat the flag or
+    /// separate addresses with commas (`127.0.0.1,100.64.0.2`). `tailscale` uses this
+    /// machine's Tailscale addresses and fails if Tailscale isn't running. Default:
+    /// `0.0.0.0`. On macOS, port 443 needs the default bind (or `0.0.0.0`). When set,
+    /// overrides `glass config bind`.
+    #[arg(long, value_name = "ADDR", value_delimiter = ',')]
+    bind: Vec<String>,
     /// Capture frame rate cap. Viewers get 60, or up to 120 on a fast screen (macOS).
     #[arg(long, default_value_t = 120)]
     fps: i32,
@@ -129,8 +138,9 @@ struct Args {
     #[arg(long, requires = "cert")]
     key: Option<PathBuf>,
     /// Host the browser should connect WebTransport to, when it differs from the page's
-    /// host (e.g. page served through a tunnel, video direct over the LAN).
-    #[arg(long)]
+    /// host (e.g. page served through a tunnel, video direct over the LAN). GLASS_WT_HOST
+    /// sets it too, for a host started by the background service.
+    #[arg(long, env = "GLASS_WT_HOST")]
     wt_host: Option<String>,
     /// Test mode: a generated test pattern instead of screen capture, recorded input, an
     /// in-memory clipboard, no Tailscale, and /test/* hooks. Never touches the real desktop.
@@ -798,6 +808,16 @@ fn main() -> Result<()> {
             _ => {}
         }
     }
+    // Windows: the sign-in host (see signin.rs) is the host, minus its flag.
+    #[cfg(windows)]
+    let args = if std::env::args().nth(1).as_deref() == Some(signin::ARG) {
+        signin::enable();
+        platform::secure::mark_helper();
+        Args::parse_from(std::env::args().enumerate().filter(|(i, _)| *i != 1).map(|(_, a)| a))
+    } else {
+        Args::parse()
+    };
+    #[cfg(not(windows))]
     let args = Args::parse();
     // Quick support keeps everything in its own temporary config, chosen before anything
     // (or any thread) reads the environment.
@@ -855,7 +875,7 @@ fn main() -> Result<()> {
     // The host on Windows shows a notification-area icon (who's viewing) on its own thread.
     #[cfg(windows)]
     // (Quick support's host sets GLASS_NO_MENUBAR, as on a Mac: its window is the UI.)
-    if args.command.is_none() && !args.test && std::env::var_os("GLASS_NO_MENUBAR").is_none() {
+    if args.command.is_none() && !args.test && std::env::var_os("GLASS_NO_MENUBAR").is_none() && !signin::active() {
         platform::tray::start(rt.handle().clone());
     }
     rt.block_on(async_main(args))
@@ -1221,9 +1241,13 @@ async fn run_host(args: Args) -> Result<()> {
     // Windows: link to the SYSTEM secure-desktop helper if the service is installed, so
     // viewers can use the lock screen, answer UAC, control elevated windows and Ctrl+Alt+Del.
     // A no-op (degrading to today's behaviour) when it isn't.
+    // (The sign-in host is SYSTEM itself, on the sign-in screen: it needs no helper.)
     #[cfg(windows)]
-    if !args.test {
+    if !args.test && !signin::active() {
         platform::secure::start(frames.clone());
+    }
+    if signin::active() {
+        info!("sign-in host: the sign-in screen, until someone signs in (screen, keyboard and mouse only)");
     }
 
     let token = control::load_or_create_token(&args.token_file)?;
@@ -1240,28 +1264,32 @@ async fn run_host(args: Args) -> Result<()> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "localhost".into());
     let scheme = if tls.is_some() { "https" } else { "http" };
+    let listen = listen::Listen::resolve(&args.bind, &settings::load().bind).await?;
+    info!("listening on {}", listen::describe(&listen));
     // The standard HTTPS port, if we can have it: then URLs carry no port at all.
-    let https_listener = match (&tls, args.https_port) {
-        (Some(_), port) if port != 0 => match std::net::TcpListener::bind(("0.0.0.0", port)) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                info!("port {port} unavailable ({e}); links include the web port");
-                None
-            }
-        },
-        _ => None,
+    let https_listeners = if tls.is_some() {
+        listen::bind_https(&listen, args.https_port)?
+    } else {
+        Vec::new()
     };
-    // The usual web port, or the next free one.
-    let http_listener = bind_first_free(args.http_port)?;
-    let web_port = http_listener.local_addr()?.port();
+    // The usual web port, or the next free one, on every listen address.
+    let http_listeners = listen::bind_tcp(&listen, args.http_port)?;
+    let web_port = http_listeners[0].local_addr()?.port();
     if web_port != args.http_port {
         tracing::warn!(
             "port {} is in use; serving the web client on {web_port}",
             args.http_port
         );
     }
-    let portless =
-        https_listener.is_some() || (tls.is_some() && tailscale::serves_https_to(web_port).await);
+    // `tailscale serve` (Linux, when 443 isn't available) forwards to localhost. That only
+    // reaches Glass when the listen list includes IPv4 loopback, which the default does.
+    let via_serve = tls.is_some() && tailscale::serves_https_to(web_port).await;
+    if via_serve && !listen.covers_ipv4_loopback() {
+        tracing::warn!(
+            "tailscale serve forwards to localhost:{web_port}, but that address isn't being listened on. Add 127.0.0.1 to --bind so those URLs connect."
+        );
+    }
+    let portless = !https_listeners.is_empty() || (via_serve && listen.covers_ipv4_loopback());
     let url = if portless {
         format!("{scheme}://{host}/")
     } else {
@@ -1287,7 +1315,8 @@ async fn run_host(args: Args) -> Result<()> {
             video,
             Box::new(testmode::FakeInput),
             Arc::new(testmode::FakeClipboard),
-            None,
+            // Who owns the computer on Tailscale, when a test says (see tailscale::identity).
+            std::env::var("GLASS_TEST_TAILNET_OWNER").ok(),
             None,
         )
     } else {
@@ -1337,7 +1366,9 @@ async fn run_host(args: Args) -> Result<()> {
                 }
             }
         };
-        clipboard::watch(events.clone());
+        if !signin::active() {
+            clipboard::watch(events.clone());
+        }
         let tailnet_owner = match tailscale::self_login().await {
             Ok(login) => {
                 info!("tailnet devices owned by {login} connect without a token");
@@ -1357,9 +1388,13 @@ async fn run_host(args: Args) -> Result<()> {
         )
     };
     status::set_capturing(true);
-    update::watch();
-    if let Err(e) = ipc::serve() {
-        tracing::warn!("CLI socket: {e:#}");
+    // The sign-in host neither updates itself nor takes CLI commands (the user's host,
+    // started at sign-in, does).
+    if !signin::active() {
+        update::watch();
+        if let Err(e) = ipc::serve() {
+            tracing::warn!("CLI socket: {e:#}");
+        }
     }
 
     let test_routes = args
@@ -1396,8 +1431,9 @@ async fn run_host(args: Args) -> Result<()> {
         shared,
         paths.web_dir,
         args.http_port,
-        http_listener,
-        https_listener,
+        http_listeners,
+        https_listeners,
+        listen,
         args.wt_port,
         args.wt_host,
         tls,
@@ -1409,16 +1445,6 @@ async fn run_host(args: Args) -> Result<()> {
 
 /// How many ports past the usual one to try when it's taken.
 pub const PORT_TRIES: u16 = 20;
-
-/// Binds `port`, or the next free one within `PORT_TRIES`.
-fn bind_first_free(port: u16) -> Result<std::net::TcpListener> {
-    let last = port.saturating_add(PORT_TRIES - 1);
-    (port..=last)
-        .find_map(|p| std::net::TcpListener::bind(("0.0.0.0", p)).ok())
-        .ok_or_else(|| {
-            anyhow::anyhow!("TCP ports {port}–{last} are all in use; free one or pass --http-port")
-        })
-}
 
 pub fn home() -> PathBuf {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
@@ -1474,5 +1500,37 @@ impl Paths {
             None => source.join("logs"),
         });
         Self { web_dir, log_dir }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_flag_is_repeatable_and_comma_separated() {
+        let args = Args::try_parse_from([
+            "glass",
+            "--bind",
+            "127.0.0.1,::1",
+            "--bind",
+            "Tailscale",
+        ])
+        .unwrap();
+        assert_eq!(
+            listen::parse_bind(&args.bind).unwrap(),
+            vec!["127.0.0.1", "::1", "tailscale"]
+        );
+    }
+
+    #[test]
+    fn saved_bind_applies_when_the_flag_is_absent() {
+        let args = Args::try_parse_from(["glass"]).unwrap();
+        assert!(args.bind.is_empty());
+        let saved = vec!["100.64.0.2".to_string()];
+        assert_eq!(
+            listen::parse_bind(if args.bind.is_empty() { &saved } else { &args.bind }).unwrap(),
+            vec!["100.64.0.2"]
+        );
     }
 }

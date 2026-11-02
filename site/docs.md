@@ -432,6 +432,8 @@ glass acl remove 0        # by position
 
 A rule matches an email, `@domain`, `group:name` or `*`, and takes the same limits as `glass link`. With no rules, nobody signs in with a directory account. Rules live in `~/.config/glass/acl.json`.
 
+**People on your tailnet.** The rules apply to Tailscale too: someone else on the computer's tailnet (a member you invited, or a device you shared it with) whose Tailscale login a rule names connects without the token, as a guest with that rule's limits. `glass config tailnet-members on` lets everyone on the tailnet in that way (off by default; on a company tailnet that's everyone in it). Devices tagged in Tailscale belong to no one and never count.
+
 **SCIM.** `glass config scim-token new` prints a token for SCIM 2.0 provisioning at `https://<computer>/scim/v2` (Okta, Entra ID). Users and groups stay in sync; deactivated users can't sign in and lose their sessions at once.
 
 **Device posture.** Checked on every connection:
@@ -486,7 +488,7 @@ glass uninstall     Stop the background service and remove it from login items
 glass --version
 ```
 
-Host options: `--http-port` (default 8080; if it's taken, the next free port up to 8099), `--https-port` (default 443: also serve there when free, so URLs need no port; 0 turns it off), `--wt-port` (UDP, default 4433; likewise moves to the next free port, which browsers learn automatically), `--fps` (default 60), `--mbps` (default 30), `--scale`, `--cert`/`--key` (custom TLS), `--token-file`, `--web-dir`, `--log-dir`.
+Host options: `--bind` (repeatable, or comma-separated) sets the address for the web ports and WebTransport together. The default is `0.0.0.0` (every IPv4 address; WebTransport also accepts IPv6, as before). `tailscale` listens on this machine's Tailscale addresses and fails if Tailscale isn't running. For example `--bind tailscale --bind 127.0.0.1`, or `--bind 127.0.0.1,100.64.0.2`. The same list is saved with `glass config bind` and applies the next time Glass starts; a `--bind` flag overrides it. On macOS, port 443 needs the default bind (or `0.0.0.0`): an unprivileged process can only bind a port below 1024 on the wildcard address, so a specific address falls back to the web port. `--http-port` (default 8080; if it's taken, the next free port up to 8099, on every chosen address), `--https-port` (default 443: also serve there when free, so URLs need no port; 0 turns it off), `--wt-port` (UDP, default 4433; likewise moves to the next free port, which browsers learn automatically), `--fps` (default 60), `--mbps` (default 30), `--scale`, `--cert`/`--key` (custom TLS), `--token-file`, `--web-dir`, `--log-dir`.
 
 Files:
 
@@ -521,7 +523,7 @@ The same one-liner installs Glass on Linux x86_64. The Linux host uses:
 - **Screen capture:** xdg-desktop-portal ScreenCast over PipeWire. On Hyprland (Omarchy), the share picker asks once which screen to share; Glass saves a restore token so it doesn't ask again.
 - **Encoding:** software H.264 (OpenH264, screen-content mode). Screens larger than 2560×1600 are halved before encoding, to keep the frame rate up. Hardware VA-API encoding is planned.
 - **Input:** a virtual keyboard and absolute pointer through `/dev/uinput`. `glass setup` installs a one-line udev rule (`/etc/udev/rules.d/60-glass-uinput.rules`) giving the logged-in user access; this needs `sudo` once.
-- **Address:** Linux only lets root listen on port 443, so `glass setup` runs `tailscale serve` to forward `https://<machine>.<tailnet>.ts.net/` to Glass. If that isn't possible, use the `:8080` address.
+- **Address:** Linux only lets root listen on port 443, so `glass setup` runs `tailscale serve` to forward `https://<machine>.<tailnet>.ts.net/` to Glass on localhost. If that isn't possible, use the `:8080` address. `--bind` / `glass config bind` chooses which addresses the ports use; include `127.0.0.1` when `tailscale serve` is what publishes port 443, because that forward targets localhost.
 - **Clipboard:** `wl-copy` / `wl-paste` (wl-clipboard).
 - **Audio:** the default output's monitor, through PipeWire. The viewer's microphone appears as a "Glass microphone" input while it's on.
 - **Controllers:** game controllers on the viewing device appear as a virtual Xbox 360 controller through `/dev/uinput`.
@@ -552,7 +554,7 @@ It installs to `%LOCALAPPDATA%\Programs\Glass` for your user (no administrator n
 - **Audio:** system audio through WASAPI loopback; the viewer's microphone through [VB-CABLE](https://vb-audio.com/Cable/) if it's installed.
 - **Terminal:** PowerShell in the viewer, through ConPTY.
 - **Background:** `glassw.exe` starts Glass at sign-in (the Run key), with an icon in the notification area showing who's viewing. Logs: `%LOCALAPPDATA%\Glass\Logs`.
-- **Lock screen, UAC and Ctrl+Alt+Del (optional):** `glass service install` (one UAC prompt) adds the Glass Secure Desktop service, which keeps a helper running as SYSTEM in the console session so viewers can see and use the lock screen, UAC prompts and elevated windows, and send Ctrl+Alt+Del. Only the signed-in console user's own Glass can talk to it, and it adds no network access. `glass service uninstall` removes it.
+- **Lock screen, UAC, Ctrl+Alt+Del and signing in after a restart (optional):** `glass service install` (one UAC prompt) adds the Glass Secure Desktop service, which keeps a helper running as SYSTEM in the console session so viewers can see and use the lock screen, UAC prompts and elevated windows, and send Ctrl+Alt+Del. Only the signed-in console user's own Glass can talk to it. After a restart, while nobody is signed in, the service also serves the sign-in screen to the same viewers (from a copy of your token and settings that only SYSTEM and administrators can read): screen, keyboard and mouse only, no files, clipboard, terminal or agents. Once you sign in, your own Glass takes over and the page reconnects. `glass service uninstall` removes it.
 
 To remove Glass, uninstall it in **Settings › Apps › Installed apps**: that takes away the programs, the start-at-sign-in entry, the Start menu shortcut, the firewall rule and the secure-desktop service (one UAC prompt), and keeps your settings in `%APPDATA%\Glass`. `glass uninstall` only stops Glass starting at sign-in.
 
@@ -570,7 +572,7 @@ Hyprland keeps its own Super shortcuts. In fullscreen (Ctrl+Shift+F), Chromium's
 
 - All traffic is encrypted (TLS 1.3 via QUIC/HTTPS).
 - With Tailscale, traffic stays on your private tailnet and goes directly between devices when possible.
-- Access control: a device is let in if Tailscale reports it belongs to the same user as the Mac, or if it presents the access token. Glass sends nothing to a session (video, audio, clipboard, input) until it is authenticated. Links, single sign-on, LDAP, access rules, posture checks and passkeys can narrow that further; see above.
+- Access control: a device is let in if Tailscale reports it belongs to the same user as the Mac, if it presents the access token, or (as a guest) if its Tailscale user is named by an access rule or `tailnet-members` is on. Glass sends nothing to a session (video, audio, clipboard, input) until it is authenticated. Links, single sign-on, LDAP, access rules, posture checks and passkeys can narrow that further; see above.
 - Glass runs as your user (a LaunchAgent on macOS, a systemd user service on Linux, a sign-in entry on Windows), never as root. On Windows you can opt into the Glass Secure Desktop service, whose SYSTEM helper only serves your own Glass (see [Windows host](#windows-host-preview)). The one exception you can opt into: **Stay awake with the lid closed** on a Mac installs a sudoers rule that lets it turn sleep off and on (`pmset -a disablesleep 0|1`), nothing else.
 - Keys pressed into a password field, or anywhere while a Linux session is locked, aren't shown to viewers or logged.
 - The file browser is for the computer's owner only (not links or guests), sees only the home folder (no `..`, no symlinks out), and moves to the Trash rather than deleting.

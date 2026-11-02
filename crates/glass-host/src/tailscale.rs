@@ -37,6 +37,40 @@ async fn json(args: &[&str]) -> Result<Value> {
     Ok(serde_json::from_slice(&out.stdout)?)
 }
 
+/// This machine's Tailscale addresses (`100.x.x.x` and the tailnet IPv6), for `--bind tailscale`.
+pub async fn self_ips() -> Result<Vec<IpAddr>> {
+    let status = json(&["status", "--json"]).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Tailscale isn't up, so there's no Tailscale address to listen on ({e:#}). Start it with `tailscale up`, or pass an IP address."
+        )
+    })?;
+    self_addresses(&status)
+}
+
+/// `TailscaleIPs` from `tailscale status --json`, when the backend is running.
+pub fn self_addresses(status: &Value) -> Result<Vec<IpAddr>> {
+    let state = status["BackendState"].as_str().unwrap_or("unknown");
+    if state != "Running" {
+        anyhow::bail!("Tailscale isn't up ({state}). Run `tailscale up`, or pass an IP address.");
+    }
+    let Some(list) = status["Self"]["TailscaleIPs"].as_array() else {
+        anyhow::bail!("Tailscale is running but reported no addresses.");
+    };
+    let mut ips = Vec::new();
+    for value in list {
+        let Some(text) = value.as_str() else { continue };
+        let Ok(ip) = text.parse() else { continue };
+        if !ips.contains(&ip) {
+            ips.push(ip);
+        }
+    }
+    anyhow::ensure!(
+        !ips.is_empty(),
+        "Tailscale is running but reported no addresses."
+    );
+    Ok(ips)
+}
+
 /// The login name of the tailnet user this Mac is signed in as.
 pub async fn self_login() -> Result<String> {
     let status = json(&["status", "--json"]).await?;
@@ -218,19 +252,31 @@ fn is_tailscale_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// True if `peer` is a tailnet device owned by `owner`.
-pub async fn is_trusted(peer: IpAddr, owner: &str) -> bool {
+/// Who a tailnet device belongs to: its user's login name, or `None` for a device that
+/// isn't anyone's (tagged, e.g. a server), or one off the tailnet.
+pub async fn identity(peer: IpAddr) -> Option<String> {
+    // Tests: every viewer is this tailnet user (GLASS_TEST_TAILNET_LOGIN).
+    if crate::testmode::enabled() {
+        return std::env::var("GLASS_TEST_TAILNET_LOGIN").ok();
+    }
     let peer = peer.to_canonical();
     if !is_tailscale_ip(peer) {
-        return false;
+        return None;
     }
     match json(&["whois", "--json", &peer.to_string()]).await {
-        Ok(who) => who["UserProfile"]["LoginName"].as_str() == Some(owner),
+        Ok(who) => login_of(&who),
         Err(e) => {
             tracing::warn!("tailscale whois {peer}: {e:#}");
-            false
+            None
         }
     }
+}
+
+/// A whois answer's person: tagged devices have none ("tagged-devices").
+fn login_of(who: &Value) -> Option<String> {
+    let tagged = who["Node"]["Tags"].as_array().is_some_and(|t| !t.is_empty());
+    let login = who["UserProfile"]["LoginName"].as_str()?;
+    (!tagged && login != "tagged-devices" && !login.is_empty()).then(|| login.to_string())
 }
 
 /// What Tailscale knows about a tailnet peer, for device posture: `None` off the tailnet.
@@ -258,6 +304,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_person_owns_a_device_a_tag_does_not() {
+        let who = |v: &str| login_of(&serde_json::from_str(v).unwrap());
+        assert_eq!(who(r#"{"UserProfile":{"LoginName":"ana@example.com"},"Node":{}}"#), Some("ana@example.com".into()));
+        assert_eq!(who(r#"{"UserProfile":{"LoginName":"ana@example.com"},"Node":{"Tags":["tag:server"]}}"#), None);
+        assert_eq!(who(r#"{"UserProfile":{"LoginName":"tagged-devices"},"Node":{}}"#), None);
+        assert_eq!(who(r#"{"Node":{}}"#), None);
+    }
+
+    #[test]
     fn tailscale_ranges() {
         assert!(is_tailscale_ip("100.101.102.103".parse().unwrap()));
         assert!(is_tailscale_ip(
@@ -271,6 +326,26 @@ mod tests {
                 .unwrap()
                 .to_canonical()
         ));
+    }
+
+    #[test]
+    fn reads_self_addresses() {
+        let status = serde_json::json!({
+            "BackendState": "Running",
+            "Self": { "TailscaleIPs": ["100.64.0.2", "fd7a:115c:a1e0::12", "100.64.0.2"] }
+        });
+        assert_eq!(
+            self_addresses(&status).unwrap(),
+            vec![
+                "100.64.0.2".parse::<IpAddr>().unwrap(),
+                "fd7a:115c:a1e0::12".parse().unwrap(),
+            ]
+        );
+        let logged_out = serde_json::json!({"BackendState": "NeedsLogin"});
+        let err = self_addresses(&logged_out).unwrap_err().to_string();
+        assert!(err.contains("NeedsLogin"), "{err}");
+        let empty = serde_json::json!({"BackendState": "Running", "Self": {"TailscaleIPs": []}});
+        assert!(self_addresses(&empty).is_err());
     }
 
     #[test]
