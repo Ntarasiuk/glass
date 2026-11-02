@@ -2,6 +2,37 @@
 
 What changed in each release of Glass. `glass update` (or the Glass app) installs the newest; every build is on [GitHub Releases](https://github.com/Ntarasiuk/glass/releases).
 
+## 0.11.0-windows.2
+
+November 2, 2026
+
+A second preview of Glass on Windows, for testing. A GitHub pre-release only: glassdesk.dev and `glass update` stay on 0.10.0, so no installed computer is offered it.
+
+To try it, run the MSI below (installs for everyone on the computer), or unzip `glass-0.11.0-windows.2-windows-<arch>.zip` anywhere and run `glass\bin\glass.exe setup`. Uninstall from Settings › Apps.
+
+### Windows host (preview)
+
+- Windows 10 (2004 or newer) and 11, x64 and Arm. A zip, and an MSI for installing for everyone on a computer, with Group Policy settings.
+- Every display, with the pointer; one window on its own. Mouse, keyboard, scroll, pen, game controllers (ViGEmBus).
+- Copy and paste both ways: text, rich text and images. Ctrl+C on the computer copies to your device; ⌘V or Ctrl+V pastes from it.
+- Files: send, get, and the file browser (with previews and the Recycle Bin). Recording to MP4, one-time links, chat.
+- Notifications as Windows toasts from Glass; a notice when someone is viewing.
+- System audio; turning sound on says when the computer has no sound output.
+- The lock screen, UAC prompts, elevated windows and Ctrl+Alt+Del, with `glass service install`.
+- AI agents: screenshots, clicks, keys and typing any text.
+
+### Fixed since 0.11.0-windows.1
+
+- Copying on the computer now reaches your device.
+- Notifications show (they didn't before).
+- Keys that arrive close together no longer get dropped, and a viewer leaving no longer lets go of another viewer's keys.
+- ⌘V from a Mac no longer opens Start.
+- Agents type exactly what they're given.
+- The secure-desktop service survives installing and uninstalling the MSI.
+- The microphone setup opens VB-CABLE's installer, not a web page.
+
+The Windows programs aren't code-signed yet, so SmartScreen may warn before the MSI runs.
+
 ## 0.10.0
 
 October 31, 2026
