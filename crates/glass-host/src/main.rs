@@ -22,6 +22,7 @@ mod keys;
 mod ldap;
 mod lid;
 mod listen;
+mod local_ca;
 mod lossless;
 #[cfg(not(target_os = "macos"))]
 mod mailbox;
@@ -58,6 +59,7 @@ mod soft_encode;
 mod status;
 mod support;
 mod tailscale;
+mod trust;
 mod testmode;
 mod thumbs;
 mod update;
@@ -142,13 +144,19 @@ struct Args {
     /// sets it too, for a host started by the background service.
     #[arg(long, env = "GLASS_WT_HOST")]
     wt_host: Option<String>,
-    /// Certificate for WebTransport when the pages have one (--cert, `tailscale cert`):
-    /// `tls` uses the same, `self-signed` a short-lived one the page pins by hash, renewed
-    /// automatically. Use self-signed with a private CA: Chromium's QUIC rejects CAs
-    /// installed by the user (CERTIFICATE_VERIFY_FAILED) even when the pages load.
+    /// Certificate for WebTransport when the pages have one (--cert, `tailscale cert`,
+    /// `glass tls init`): `tls` uses the same, `self-signed` a short-lived one the page pins
+    /// by hash, renewed automatically. A private CA needs self-signed: Chromium's QUIC
+    /// rejects CAs installed by the user (CERTIFICATE_VERIFY_FAILED) even when the pages
+    /// load. `auto`: self-signed with the local CA's certificate, tls otherwise.
     /// GLASS_WT_CERT sets it too.
-    #[arg(long, env = "GLASS_WT_CERT", value_enum, default_value_t = server::WtCert::Tls)]
+    #[arg(long, env = "GLASS_WT_CERT", value_enum, default_value_t = server::WtCert::Auto)]
     wt_cert: server::WtCert,
+    /// Also serve the "trust this computer" page (/trust: the local CA to install) over
+    /// plain HTTP on this port, for viewers that don't trust the CA yet. 0 = off.
+    /// GLASS_TRUST_PORT sets it too.
+    #[arg(long, env = "GLASS_TRUST_PORT", default_value_t = 0)]
+    trust_port: u16,
     /// Test mode: a generated test pattern instead of screen capture, recorded input, an
     /// in-memory clipboard, no Tailscale, and /test/* hooks. Never touches the real desktop.
     #[arg(long)]
@@ -319,6 +327,12 @@ enum Command {
         action: Option<AclCommand>,
         #[arg(long)]
         json: bool,
+    },
+    /// HTTPS with a private certificate authority, for tailnets without `tailscale cert`
+    /// (e.g. Headscale): `glass tls init`, then viewers trust the CA once (/trust).
+    Tls {
+        #[command(subcommand)]
+        action: local_ca::TlsCommand,
     },
     /// Show or change settings (no arguments: list them all).
     Config {
@@ -968,6 +982,7 @@ async fn async_main(args: Args) -> Result<()> {
             },
         ),
         Some(Command::Config { key, value }) => config_cli(key.as_deref(), value.as_deref()),
+        Some(Command::Tls { action }) => local_ca::cli(action).await,
         Some(Command::Acl { action, json }) => acl_cli(action.as_ref(), *json),
         Some(Command::Log { count, json }) => {
             let entries = connlog::recent(*count);
@@ -1261,14 +1276,28 @@ async fn run_host(args: Args) -> Result<()> {
     let tls = match args.cert.clone().zip(args.key.clone()) {
         Some((cert, key)) => Some(server::TlsFiles { cert, key }),
         None if args.test => None,
-        None => tailscale::ensure_cert(&config_dir().join("certs"))
-            .await
-            .map(|(cert, key)| server::TlsFiles { cert, key }),
+        None => match tailscale::ensure_cert(&config_dir().join("certs")).await {
+            Some(pair) => Some(pair),
+            // No `tailscale cert` (e.g. Headscale): the local CA's, from `glass tls init`.
+            None => local_ca::host_files(),
+        }
+        .map(|(cert, key)| server::TlsFiles { cert, key }),
+    };
+    let local_ca = tls.as_ref().is_some_and(|t| local_ca::is_local(&t.cert));
+    let wt_cert = match args.wt_cert {
+        server::WtCert::Auto if local_ca => server::WtCert::SelfSigned,
+        server::WtCert::Auto => server::WtCert::Tls,
+        other => other,
     };
     let host = tls
         .as_ref()
-        .and_then(|t| t.cert.file_stem())
-        .map(|s| s.to_string_lossy().into_owned())
+        .and_then(|t| {
+            if local_ca {
+                local_ca::read_cert(&t.cert).ok()?.names.dns.into_iter().next()
+            } else {
+                t.cert.file_stem().map(|s| s.to_string_lossy().into_owned())
+            }
+        })
         .unwrap_or_else(|| "localhost".into());
     let scheme = if tls.is_some() { "https" } else { "http" };
     let listen = listen::Listen::resolve(&args.bind, &settings::load().bind).await?;
@@ -1444,7 +1473,8 @@ async fn run_host(args: Args) -> Result<()> {
         args.wt_port,
         args.wt_host,
         tls,
-        args.wt_cert,
+        wt_cert,
+        args.trust_port,
         paths.log_dir.join("client.log"),
         test_routes,
     )

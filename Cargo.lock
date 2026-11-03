@@ -2584,11 +2584,13 @@ dependencies = [
  "pipewire",
  "png 0.17.16",
  "qrcode",
+ "rcgen",
  "ring",
  "rtc",
  "rustls",
  "serde",
  "serde_json",
+ "time",
  "tokio",
  "tokio-tungstenite",
  "tower-http",
@@ -2599,6 +2601,7 @@ dependencies = [
  "windows 0.62.2",
  "winresource",
  "wtransport",
+ "x509-parser 0.18.1",
 ]
 
 [[package]]
