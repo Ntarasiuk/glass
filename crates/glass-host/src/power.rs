@@ -13,9 +13,25 @@ pub fn restart_glass() -> Result<()> {
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_millis(300));
         // A non-zero exit: the login item / systemd unit starts it again.
-        std::process::exit(75);
+        exit_now(75);
     });
     Ok(())
+}
+
+/// Exits at once. On Linux without running exit handlers: with NVENC loaded, CUDA's
+/// handlers deadlocked against the encoder's threads, so a restart left Glass hanging
+/// (still running, not restarted). Logs are flushed first.
+fn exit_now(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    #[cfg(target_os = "linux")]
+    // SAFETY: _exit ends the process; nothing runs after it.
+    unsafe {
+        libc::_exit(code)
+    }
+    #[cfg(not(target_os = "linux"))]
+    std::process::exit(code)
 }
 
 pub fn restart_computer() -> Result<()> {

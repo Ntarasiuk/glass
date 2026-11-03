@@ -291,19 +291,14 @@ impl Video {
             std::thread::Builder::new()
                 .name(format!("glass-encode-{i}"))
                 .spawn(move || encode_loop(m, rx, frames, fps, bitrate, scale))?;
-            captures.push((s.node_id, monitor.clone(), tx));
+            captures.push((monitor.clone(), tx));
             monitors.push(monitor);
         }
         *RECTS.lock().unwrap() = rects;
 
-        let fd = cast.fd;
         std::thread::Builder::new()
             .name("glass-pipewire".into())
-            .spawn(move || {
-                if let Err(e) = run_pipewire(fd, captures) {
-                    warn!("pipewire capture stopped: {e:#}");
-                }
-            })
+            .spawn(move || capture_loop(cast, captures))
             .context("starting capture thread")?;
 
         *guard = Some(monitors.clone());
@@ -553,25 +548,75 @@ impl VideoEncoder {
     }
 }
 
+/// Captures until the portal loses the streams, then opens a new session (no dialog: the
+/// restore token) and carries on into the same encoders. COSMIC's portal (1.11) exits
+/// every few minutes of capture on a Wayland protocol error, and its streams go with it.
+fn capture_loop(mut cast: portal::Cast, captures: Vec<(Arc<Monitor>, FrameSender)>) {
+    loop {
+        let portal::Cast { fd, streams, close } = cast;
+        if streams.len() != captures.len() {
+            warn!("the portal shares {} screen(s) now, {} before", streams.len(), captures.len());
+        }
+        let pairs: Vec<(u32, Arc<Mailbox>)> = streams
+            .iter()
+            .zip(&captures)
+            .map(|(s, (_, tx))| (s.node_id, tx.0.clone()))
+            .collect();
+        match run_pipewire(fd, pairs) {
+            Ok(()) => warn!("screen capture lost (the portal stopped the stream); reopening it"),
+            Err(e) => warn!("pipewire capture stopped: {e:#}; reopening it"),
+        }
+        drop(close);
+        // The portal is restarted on demand; give it a moment.
+        let mut delay = Duration::from_secs(2);
+        cast = loop {
+            std::thread::sleep(delay);
+            match portal::start_within(Some(Duration::from_secs(15))) {
+                Ok(c) => break c,
+                Err(e) => {
+                    warn!("screen cast: {e:#}; retrying in {}s", delay.as_secs());
+                    delay = (delay * 2).min(Duration::from_secs(30));
+                }
+            }
+        };
+        info!("screen cast reopened: {} monitor(s)", cast.streams.len());
+        // Viewers joined mid-stream get a keyframe from the new capture.
+        for (monitor, _) in &captures {
+            monitor.keyframe.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 struct StreamState {
     format: spa::param::video::VideoInfoRaw,
     pixel: Option<PixelFormat>,
-    tx: FrameSender,
+    tx: Arc<Mailbox>,
     first: bool,
     id: usize,
+    /// Streaming has started (losing it after that means the source went away).
+    streaming: bool,
 }
 
-fn run_pipewire(
-    fd: std::os::fd::OwnedFd,
-    captures: Vec<(u32, Arc<Monitor>, FrameSender)>,
-) -> Result<()> {
+/// Runs the PipeWire streams for these portal nodes; returns when they're lost.
+fn run_pipewire(fd: std::os::fd::OwnedFd, captures: Vec<(u32, Arc<Mailbox>)>) -> Result<()> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
     let core = context.connect_fd_rc(fd, None)?;
+    // The portal's PipeWire connection going away (it exited) ends the capture too.
+    let quit = mainloop.clone();
+    let _core_listener = core
+        .add_listener_local()
+        .error(move |id, _seq, res, message| {
+            warn!("pipewire: error on {id}: {message} ({res})");
+            if id == pw::core::PW_ID_CORE {
+                quit.quit();
+            }
+        })
+        .register();
 
     let mut keep = Vec::new();
-    for (i, (node, _monitor, tx)) in captures.into_iter().enumerate() {
+    for (i, (node, tx)) in captures.into_iter().enumerate() {
         let stream = pw::stream::StreamBox::new(
             &core,
             "glass-screen",
@@ -587,14 +632,38 @@ fn run_pipewire(
             tx,
             first: true,
             id: i,
+            streaming: false,
         };
+        let (quit, quit_format) = (mainloop.clone(), mainloop.clone());
         let listener = stream
             .add_local_listener_with_user_data(state)
-            .param_changed(|_, st, id, param| {
-                let Some(param) = param else { return };
+            .state_changed(move |_, st, old, new| {
+                use pw::stream::StreamState as S;
+                match &new {
+                    S::Streaming => st.streaming = true,
+                    S::Error(e) => {
+                        warn!("screen {}: stream error: {e}", st.id);
+                        quit.quit();
+                    }
+                    S::Paused | S::Unconnected if st.streaming => {
+                        warn!("screen {}: stream {old:?} -> {new:?}: the source went away", st.id);
+                        quit.quit();
+                    }
+                    _ => {}
+                }
+            })
+            .param_changed(move |_, st, id, param| {
                 if id != spa::param::ParamType::Format.as_raw() {
                     return;
                 }
+                let Some(param) = param else {
+                    // The format is cleared when the source node is gone.
+                    if st.streaming {
+                        warn!("screen {}: format cleared: the source went away", st.id);
+                        quit_format.quit();
+                    }
+                    return;
+                };
                 if st.format.parse(param).is_err() {
                     return;
                 }
@@ -640,7 +709,7 @@ fn run_pipewire(
                     info!("screen {}: first frame", st.id);
                 }
                 let captured_us = now_us();
-                let mut pixels = st.tx.0.buffer();
+                let mut pixels = st.tx.buffer();
                 pixels.clear();
                 pixels.extend_from_slice(&bytes[offset..needed]);
                 let frame = Frame {
@@ -651,7 +720,7 @@ fn run_pipewire(
                     data: pixels,
                 };
                 // Replaces a frame the encoder hasn't started on: it always gets the newest.
-                st.tx.0.put(frame, captured_us);
+                st.tx.put(frame, captured_us);
             })
             .register()?;
 
