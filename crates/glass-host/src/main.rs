@@ -16,6 +16,7 @@ mod control;
 mod files;
 mod forward;
 mod grants;
+mod h264_vui;
 mod gamepad;
 mod ipc;
 mod keys;

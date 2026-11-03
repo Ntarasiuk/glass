@@ -95,6 +95,8 @@ pub struct VaEncoder {
     frame_duration: u64,
     /// Bitrate (bps) the encoder runs at, the latest target, and when it last changed.
     bitrate: (u32, u32, Instant),
+    /// NVENC's SPS and the same with `bitstream_restriction` added (see h264_vui).
+    sps: Option<(Vec<u8>, Vec<u8>)>,
     pub name: &'static str,
 }
 
@@ -266,6 +268,7 @@ impl VaEncoder {
             next_pts: 0,
             frame_duration: 1_000_000_000 / fps.max(1) as u64,
             bitrate: (bitrate, bitrate, Instant::now()),
+            sps: None,
             name,
         })
     }
@@ -360,6 +363,12 @@ impl VaEncoder {
         if let Some(e) = self.pipeline.bus_error() {
             return Err(anyhow!("{} pipeline: {e}", self.backend.label()));
         }
+        // NVENC's SPS says nothing about reordering, so Chromium's hardware decoder held
+        // back ~10 frames (200 ms at 3440x1440): say there's none.
+        let data = match self.backend {
+            Backend::Nvenc if keyframe => crate::h264_vui::add_reorder_limit(data, &mut self.sps),
+            _ => data,
+        };
         Ok((!data.is_empty()).then_some((data, keyframe)))
     }
 

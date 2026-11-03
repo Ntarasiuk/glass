@@ -82,7 +82,7 @@ self.onmessage = async ({ data }) => {
     ({ url, certHash, token, link, pass, rtcPort, device } = data);
     wideColor = Boolean(data.wideColor);
     setDecoderStep(data.decoderStep ?? 0);
-    await probeDecoders(log);
+    await probeDecoders(log, undefined, data.decoder ?? null);
     codecs = await probeCodecs();
     setInterval(() => datagramWriter?.write(ping(performance.now())).catch(() => {}), PING_INTERVAL_MS);
     setInterval(tick, 1000);

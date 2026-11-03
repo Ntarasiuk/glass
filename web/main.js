@@ -40,6 +40,18 @@ const PASS_KEY = 'glass.pass'; // guest pass from a magic link: { pass, expires 
 const SWAP_KEY = 'glass.swapCmdOption';
 const CTRL_AS_CMD_KEY = 'glass.ctrlAsCmd';
 const DECODER_STEP_KEY = 'glass.decoderStep';
+// A video decoder chosen for this device: ?decoder=hw-lowlatency|hw|sw|auto (kept),
+// ?decoder=default to go back to choosing automatically.
+const DECODER_KEY = 'glass.decoder';
+const DECODER_CHOICES = ['hw-lowlatency', 'hw', 'sw', 'auto'];
+{
+  const asked = new URLSearchParams(location.search).get('decoder');
+  if (asked !== null) {
+    storage((s) => (DECODER_CHOICES.includes(asked) ? s.setItem(DECODER_KEY, asked) : s.removeItem(DECODER_KEY)));
+    // Forget a fallback found with another decoder.
+    storage((s) => s.removeItem(DECODER_STEP_KEY));
+  }
+}
 const PC_KEYBOARD_KEY = 'glass.pcKeyboard';
 const MACHINE_KEY = 'glass.machine';
 const REMOTES_KEY = 'glass.remotes'; // computers opened from anywhere, for glassdesk.dev/computers
@@ -625,6 +637,7 @@ worker.postMessage({
   // A wide-colour screen: a Display P3 stream is drawn in P3, not clipped to sRGB.
   wideColor: matchMedia('(color-gamut: p3)').matches,
   decoderStep: Number(storage((s) => s.getItem(DECODER_STEP_KEY)) ?? 0),
+  decoder: storage((s) => s.getItem(DECODER_KEY)) ?? null,
 }, rtcPort ? [rtcPort] : []);
 armMachineTimeout();
 showStatus('connecting', 'Connecting', machineName(currentHost));
