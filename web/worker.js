@@ -87,6 +87,9 @@ self.onmessage = async ({ data }) => {
     setInterval(() => datagramWriter?.write(ping(performance.now())).catch(() => {}), PING_INTERVAL_MS);
     setInterval(tick, 1000);
     run();
+  } else if (data.type === 'certHash') {
+    // The host's self-signed WebTransport certificate was replaced (main.js refetched it).
+    certHash = data.certHash;
   } else if (data.type === 'canvas') {
     videoStream(data.stream).setCanvas(data.canvas, wideColor);
   } else if (data.type === 'streams') {

@@ -142,6 +142,13 @@ struct Args {
     /// sets it too, for a host started by the background service.
     #[arg(long, env = "GLASS_WT_HOST")]
     wt_host: Option<String>,
+    /// Certificate for WebTransport when the pages have one (--cert, `tailscale cert`):
+    /// `tls` uses the same, `self-signed` a short-lived one the page pins by hash, renewed
+    /// automatically. Use self-signed with a private CA: Chromium's QUIC rejects CAs
+    /// installed by the user (CERTIFICATE_VERIFY_FAILED) even when the pages load.
+    /// GLASS_WT_CERT sets it too.
+    #[arg(long, env = "GLASS_WT_CERT", value_enum, default_value_t = server::WtCert::Tls)]
+    wt_cert: server::WtCert,
     /// Test mode: a generated test pattern instead of screen capture, recorded input, an
     /// in-memory clipboard, no Tailscale, and /test/* hooks. Never touches the real desktop.
     #[arg(long)]
@@ -1437,6 +1444,7 @@ async fn run_host(args: Args) -> Result<()> {
         args.wt_port,
         args.wt_host,
         tls,
+        args.wt_cert,
         paths.log_dir.join("client.log"),
         test_routes,
     )

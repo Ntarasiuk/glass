@@ -54,6 +54,21 @@ pub struct TlsFiles {
     pub key: PathBuf,
 }
 
+/// Which certificate WebTransport presents when the web pages have a TLS certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum WtCert {
+    /// The pages' certificate (a public CA's, e.g. `tailscale cert`).
+    #[default]
+    Tls,
+    /// A self-signed one the page pins by hash (`serverCertificateHashes`). For a private
+    /// CA: Chromium's QUIC doesn't accept CAs installed by the user, so WebTransport fails
+    /// with them even where the pages load.
+    SelfSigned,
+}
+
+/// How often the self-signed WebTransport certificate is checked for replacement.
+const SELF_SIGNED_CHECK: Duration = Duration::from_secs(3600);
+
 pub async fn run(
     shared: Arc<Shared>,
     web_dir: PathBuf,
@@ -65,23 +80,35 @@ pub async fn run(
     wt_port: u16,
     wt_host: Option<String>,
     tls: Option<TlsFiles>,
+    wt_cert: WtCert,
     client_log: PathBuf,
     extra_routes: Option<axum::Router>,
 ) -> Result<()> {
+    let self_signed = tls.is_none() || wt_cert == WtCert::SelfSigned;
     let identity = match &tls {
-        Some(t) => Identity::load_pemfiles(&t.cert, &t.key).await?,
-        None => self_signed_identity(wt_host.as_deref()).await?,
+        Some(t) if !self_signed => Identity::load_pemfiles(&t.cert, &t.key).await?,
+        _ => self_signed_identity(wt_host.as_deref()).await?,
     };
+    if tls.is_some() && self_signed {
+        info!("WebTransport: self-signed certificate pinned by hash (--wt-cert self-signed); the pages keep --cert");
+    }
     // Only meaningful for the self-signed identity; a real cert validates normally.
-    let cert_hash = tls.is_none().then(|| {
-        identity.certificate_chain().as_slice()[0]
-            .hash()
-            .fmt(Sha256DigestFmt::BytesArray)
-    });
+    let cert_hash: CertHash =
+        Arc::new(Mutex::new(self_signed.then(|| identity_hash(&identity))));
 
     // The usual port, or the next free one: clients learn it from /config.json.
     // Every listen address shares that port. The default is one dual-stack socket.
     let (endpoints, wt_port) = bind_wt(&identity, &listen, wt_port)?;
+    let endpoints = Arc::new(endpoints);
+    if self_signed {
+        tokio::spawn(rotate_self_signed(
+            endpoints.clone(),
+            listen.clone(),
+            wt_port,
+            wt_host.clone(),
+            cert_hash.clone(),
+        ));
+    }
     let wt_where = match &listen {
         crate::listen::Listen::Default => "0.0.0.0 and [::]".to_string(),
         other => crate::listen::describe(other),
@@ -97,10 +124,9 @@ pub async fn run(
         crate::mic::recover();
     }
 
-    let cert_hash = cert_hash.map(|h| serde_json::from_str::<Vec<u8>>(&h).unwrap());
     let version_dir = web_dir.clone();
     let client_config = move || {
-        let (wt_host, cert_hash) = (wt_host.clone(), cert_hash.clone());
+        let (wt_host, cert_hash) = (wt_host.clone(), cert_hash.lock().unwrap().clone());
         let version = web_version(&version_dir);
         async move {
             Json(serde_json::json!({
@@ -281,10 +307,7 @@ fn bind_wt_endpoints(
     listen: &crate::listen::Listen,
     port: u16,
 ) -> Result<Vec<Endpoint<Server>>, WtBindError> {
-    let specs: Vec<WtBind> = match listen {
-        crate::listen::Listen::Default => vec![WtBind::Default],
-        crate::listen::Listen::Explicit(ips) => ips.iter().copied().map(WtBind::Address).collect(),
-    };
+    let specs = wt_specs(listen);
     let mut endpoints = Vec::with_capacity(specs.len());
     for spec in specs {
         let config = wt_server_config(identity, port, &spec)?;
@@ -299,6 +322,14 @@ fn bind_wt_endpoints(
         }
     }
     Ok(endpoints)
+}
+
+/// One WebTransport socket per listen address (or one dual-stack default).
+fn wt_specs(listen: &crate::listen::Listen) -> Vec<WtBind> {
+    match listen {
+        crate::listen::Listen::Default => vec![WtBind::Default],
+        crate::listen::Listen::Explicit(ips) => ips.iter().copied().map(WtBind::Address).collect(),
+    }
 }
 
 fn wt_server_config(
@@ -2197,6 +2228,66 @@ async fn probe_glass(dns: &str, port: u16) -> Option<(u16, Vec<String>)> {
     None
 }
 
+/// The self-signed certificate's SHA-256, as /config.json sends it (`certHash`).
+type CertHash = Arc<Mutex<Option<Vec<u8>>>>;
+
+fn identity_hash(identity: &Identity) -> Vec<u8> {
+    let text = identity.certificate_chain().as_slice()[0]
+        .hash()
+        .fmt(Sha256DigestFmt::BytesArray);
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+/// Replaces the self-signed WebTransport certificate before it expires, without a
+/// restart: the endpoints take the new one for new connections (live ones carry on) and
+/// /config.json sends its hash, which viewers fetch again when connecting fails.
+async fn rotate_self_signed(
+    endpoints: Arc<Vec<Endpoint<Server>>>,
+    listen: crate::listen::Listen,
+    port: u16,
+    wt_host: Option<String>,
+    cert_hash: CertHash,
+) {
+    loop {
+        tokio::time::sleep(SELF_SIGNED_CHECK).await;
+        let identity = match self_signed_identity(wt_host.as_deref()).await {
+            Ok(i) => i,
+            Err(e) => {
+                warn!("WebTransport certificate: can't renew: {e:#}");
+                continue;
+            }
+        };
+        let hash = identity_hash(&identity);
+        if cert_hash.lock().unwrap().as_ref() == Some(&hash) {
+            continue;
+        }
+        if let Err(e) = reload_wt(&endpoints, &identity, &listen, port) {
+            warn!("WebTransport certificate: can't switch to the new one: {e:#}");
+            continue;
+        }
+        *cert_hash.lock().unwrap() = Some(hash);
+        info!("WebTransport: new self-signed certificate");
+    }
+}
+
+/// Gives the endpoints (bound by `bind_wt_endpoints`, in the same order) a new identity.
+fn reload_wt(
+    endpoints: &[Endpoint<Server>],
+    identity: &Identity,
+    listen: &crate::listen::Listen,
+    port: u16,
+) -> Result<()> {
+    for (endpoint, spec) in endpoints.iter().zip(wt_specs(listen)) {
+        let config = wt_server_config(identity, port, &spec).map_err(|e| match e {
+            WtBindError::Config(e) => e,
+            WtBindError::AddrNotAvailable(m) => anyhow::anyhow!(m),
+            WtBindError::Unavailable(e) => e.into(),
+        })?;
+        endpoint.reload_config(config, false)?;
+    }
+    Ok(())
+}
+
 /// Browsers accept a self-signed cert via `serverCertificateHashes` only if it is ECDSA
 /// and valid for at most 14 days. It's saved and reused (and replaced before it expires)
 /// so its hash stays stable across restarts, and hosts sharing a config dir share it.
@@ -2403,5 +2494,52 @@ mod tests {
         assert!(port > taken && port < taken.saturating_add(crate::PORT_TRIES), "{port}");
         assert_eq!(endpoints[0].local_addr().unwrap().ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert_eq!(endpoints[0].local_addr().unwrap().port(), port);
+    }
+
+    /// A renewed self-signed certificate is taken without rebinding: a viewer pinning the
+    /// old hash is refused, one with the new hash (from /config.json) gets in.
+    #[tokio::test]
+    async fn webtransport_switches_to_a_renewed_certificate() {
+        let old = identity();
+        let listen = crate::listen::Listen::Explicit(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+        let (endpoints, _) = bind_wt(&old, &listen, 0).unwrap();
+        let port = endpoints[0].local_addr().unwrap().port();
+        let endpoints = Arc::new(endpoints);
+        let server = endpoints.clone();
+        tokio::spawn(async move {
+            loop {
+                let incoming = server[0].accept().await;
+                tokio::spawn(async move {
+                    if let Ok(request) = incoming.await
+                        && let Ok(conn) = request.accept().await
+                    {
+                        conn.closed().await;
+                    }
+                });
+            }
+        });
+        let connects = |hash: Vec<u8>| async move {
+            let digest: [u8; 32] = hash.try_into().unwrap();
+            let config = wtransport::ClientConfig::builder()
+                .with_bind_default()
+                .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(digest)])
+                .build();
+            let client = Endpoint::client(config).unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                client.connect(format!("https://127.0.0.1:{port}/")),
+            )
+            .await
+            .map_err(|_| "timeout".to_string())
+            .and_then(|r| r.map(|_| ()).map_err(|e| e.to_string()))
+            .inspect_err(|e| eprintln!("connect: {e}"))
+            .is_ok()
+        };
+        assert!(connects(identity_hash(&old)).await, "the first certificate");
+        let new = identity();
+        reload_wt(&endpoints, &new, &listen, port).unwrap();
+        assert_eq!(endpoints[0].local_addr().unwrap().port(), port, "same socket");
+        assert!(!connects(identity_hash(&old)).await, "the old hash is refused");
+        assert!(connects(identity_hash(&new)).await, "the new hash gets in");
     }
 }
