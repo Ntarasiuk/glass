@@ -121,9 +121,9 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [features]
-# Linux: GLASS_ENCODER=vaapi encodes on the GPU through GStreamer's VA-API plugin (falling
-# back to OpenH264). Off by default: it links the GStreamer libraries, so the host would
-# need them to start.
+# Linux: GLASS_ENCODER=vaapi (Intel, AMD), nvenc (NVIDIA) or gpu (NVENC, else VA-API)
+# encodes on the GPU through GStreamer's va / nvcodec plugins (falling back to OpenH264).
+# Off by default: it links the GStreamer libraries, so the host would need them to start.
 vaapi = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 
 [build-dependencies]
