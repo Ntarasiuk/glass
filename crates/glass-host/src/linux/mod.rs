@@ -5,6 +5,7 @@ pub mod agent;
 pub mod audio;
 pub mod clipboard;
 pub mod clock;
+pub mod gst_lib;
 pub mod input;
 pub mod keymap;
 pub mod permissions;
@@ -12,7 +13,6 @@ pub mod portal;
 pub mod privacy;
 pub mod session;
 pub mod setup;
-#[cfg(feature = "vaapi")]
 pub mod va_encode;
 pub mod video;
 
