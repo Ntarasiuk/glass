@@ -4,9 +4,11 @@
 //! Linux: one uinput device per pad, shaped like an Xbox 360 controller (same ids and
 //! codes as the xpad driver), so games and SDL pick it up with no setup. Windows: one
 //! virtual Xbox 360 controller per pad from the ViGEmBus driver, when it's installed (Windows
-//! has no virtual controller of its own for an unsigned app). macOS has no public way to
-//! create a virtual HID controller (that needs a DriverKit extension with a special
-//! entitlement), so controllers aren't offered there.
+//! has no virtual controller of its own for an unsigned app). macOS: one IOHIDUserDevice
+//! per pad, shaped like an Xbox Wireless Controller on Bluetooth (its ids, report
+//! descriptor and reports), so SDL, Steam and GameController treat it as one. Creating it
+//! takes Apple's restricted `com.apple.developer.hid.virtual.device` entitlement, so
+//! controllers are offered only when the binary carries it.
 
 /// Linux input codes, kept here (not from evdev) so the mapping is testable everywhere.
 pub mod code {
