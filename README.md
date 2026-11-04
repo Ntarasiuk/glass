@@ -233,6 +233,8 @@ cargo run --release -p glass-host          # serves http://localhost:8080
 
 The terminal you run it from needs Screen Recording and Accessibility permission. With Tailscale HTTPS enabled, other tailnet devices can connect at `https://<mac>.<tailnet>.ts.net:8080`. Logs from the host *and* connected browsers land in `logs/`, so you can debug an iPad without a debugger.
 
+Without `tailscale cert` (e.g. a [Headscale](https://github.com/juanfont/headscale) tailnet, which issues none), `glass tls init` makes a private certificate authority that can only vouch for this computer (name constraints: its tailnet name, short name and Tailscale addresses) and a certificate for it, used automatically and renewed 30 days before it expires (`glass tls status` shows both). Each viewer installs the CA once from `/trust` (with `--trust-port 9091`, also served over plain HTTP for browsers that don't trust it yet): the certificate, a profile for iOS and macOS, its fingerprint and instructions per system. WebTransport then uses a self-signed certificate the page pins by hash (`--wt-cert auto`, the default), as Chromium's QUIC rejects CAs installed by the user; it's renewed while Glass runs.
+
 ```sh
 scripts/test.sh                             # everything: Rust, JS, end-to-end, site, Linux (if Docker is running)
 scripts/test.sh e2e                         # just the browser end-to-end suite

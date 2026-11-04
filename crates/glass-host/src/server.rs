@@ -54,9 +54,24 @@ pub struct TlsFiles {
     pub key: PathBuf,
 }
 
+/// Which certificate WebTransport presents when the web pages have a TLS certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum WtCert {
+    /// `self-signed` with the local CA's certificate (`glass tls init`), `tls` otherwise.
+    #[default]
+    Auto,
+    /// The pages' certificate (a public CA's, e.g. `tailscale cert`).
+    Tls,
+    /// A self-signed one the page pins by hash (`serverCertificateHashes`). For a private
+    /// CA: Chromium's QUIC doesn't accept CAs installed by the user, so WebTransport fails
+    /// with them even where the pages load.
+    SelfSigned,
+}
+
 /// How often the self-signed WebTransport certificate is checked for replacement.
 const SELF_SIGNED_CHECK: Duration = Duration::from_secs(3600);
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     shared: Arc<Shared>,
     web_dir: PathBuf,
@@ -68,6 +83,8 @@ pub async fn run(
     wt_port: u16,
     wt_host: Option<String>,
     tls: Option<TlsFiles>,
+    wt_cert: WtCert,
+    trust_port: u16,
     client_log: PathBuf,
     extra_routes: Option<axum::Router>,
 ) -> Result<()> {
@@ -86,11 +103,14 @@ pub async fn run(
             }
         });
     }
-    let self_signed = tls.is_none();
+    let self_signed = tls.is_none() || wt_cert == WtCert::SelfSigned;
     let identity = match &tls {
-        Some(t) => Identity::load_pemfiles(&t.cert, &t.key).await?,
-        None => self_signed_identity(wt_host.as_deref()).await?,
+        Some(t) if !self_signed => Identity::load_pemfiles(&t.cert, &t.key).await?,
+        _ => self_signed_identity(wt_host.as_deref()).await?,
     };
+    if tls.is_some() && self_signed {
+        info!("WebTransport: self-signed certificate pinned by hash (--wt-cert self-signed); the pages keep --cert");
+    }
     // Only meaningful for the self-signed identity; a real cert validates normally.
     let cert_hash: CertHash =
         Arc::new(Mutex::new(self_signed.then(|| identity_hash(&identity))));
@@ -165,8 +185,20 @@ pub async fn run(
             .merge(crate::push::routes())
             .merge(crate::browse::routes())
     };
+    let web_port = http_listeners
+        .first()
+        .context("no web listener")?
+        .local_addr()?
+        .port();
+    // Where the pages are over HTTPS, for the trust page's "open Glass" link.
+    let https_port = match https_listeners.first() {
+        Some(l) => l.local_addr()?.port(),
+        None => web_port,
+    };
+    let trust_dir = web_dir.clone();
     let app = axum::Router::new()
         .merge(extra_routes.unwrap_or_default())
+        .merge(crate::trust::routes(trust_dir.clone(), https_port))
         .merge(extras)
         .route("/config.json", get(client_config))
         .route(
@@ -195,12 +227,16 @@ pub async fn run(
     if !crate::signin::active() {
         crate::oauth::serve_public();
     }
-    let web_port = http_listeners
-        .first()
-        .context("no web listener")?
-        .local_addr()?
-        .port();
     let scheme = if tls.is_some() { "https" } else { "http" };
+    if trust_port != 0 {
+        match crate::listen::bind_port(&listen.tcp_ips(), trust_port) {
+            Ok(listeners) => {
+                info!("trust page (the local CA to install) at http://<host>:{trust_port}/trust");
+                spawn_web(listeners, crate::trust::http_app(trust_dir, https_port), None);
+            }
+            Err(e) => warn!("trust page: can't listen on tcp/{trust_port}: {e}"),
+        }
+    }
     if !https_listeners.is_empty() {
         info!(
             "web client at https://<host>/ (port {})",

@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/icon.svg">
+  <title>Trust this computer · Glass</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0c0e;
+      --surface: #16171a;
+      --border: rgb(255 255 255 / 0.09);
+      --text: #f2f3f5;
+      --text-dim: #a8acb5;
+      --accent: #5cb2ff;
+      --accent-ink: #04121f;
+      --good: #6fdc8c;
+      --warn: #f2c14e;
+      --bad: #ff7a7a;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 40px 20px 64px; }
+    h1 { font-size: 26px; margin: 0 0 8px; letter-spacing: -0.01em; }
+    h2 { font-size: 17px; margin: 32px 0 10px; }
+    p { margin: 0 0 12px; color: var(--text-dim); }
+    p.lead { color: var(--text); }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      margin: 16px 0;
+    }
+    .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); }
+    code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+    .fingerprint { word-break: break-all; margin: 4px 0 12px; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    a.button, button {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 9px 16px; border-radius: 10px; border: 1px solid var(--border);
+      background: rgb(255 255 255 / 0.06); color: var(--text);
+      font: inherit; text-decoration: none; cursor: pointer;
+    }
+    a.button.primary, button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+    a.button:hover, button:hover { filter: brightness(1.12); }
+    details {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); margin: 10px 0; padding: 0 18px;
+    }
+    details[open] { padding-bottom: 14px; }
+    summary { cursor: pointer; padding: 14px 0; font-weight: 600; }
+    details ol { margin: 0; padding-left: 20px; color: var(--text-dim); }
+    details li { margin: 6px 0; }
+    pre {
+      background: #0f1012; border: 1px solid var(--border); border-radius: 10px;
+      padding: 10px 12px; overflow-x: auto; margin: 8px 0;
+    }
+    .status { margin-top: 12px; min-height: 1.5em; }
+    .good { color: var(--good); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    .hint { font-size: 13px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Trust this computer</h1>
+  <p class="lead">Glass on <strong id="host">this computer</strong> uses its own certificate authority for HTTPS. Install it once on this device, then Glass opens securely. That's needed for the video and the input, which browsers allow only on secure pages.</p>
+
+  <div class="card" id="ca-card">
+    <div class="label">Certificate authority</div>
+    <div id="ca-name">…</div>
+    <div class="label" style="margin-top:12px">SHA-256 fingerprint</div>
+    <div class="fingerprint mono" id="fingerprint">…</div>
+    <p class="hint" id="only-for"></p>
+    <p class="hint">To be sure you're installing the right one, compare the fingerprint with what <code>glass tls status</code> shows on that computer.</p>
+    <div class="buttons">
+      <a class="button primary" id="download" href="/trust/ca.crt" download="glass-ca.crt">Download certificate</a>
+      <a class="button" href="/trust/ca.mobileconfig" download="glass-ca.mobileconfig">Profile for iPhone, iPad, Mac</a>
+    </div>
+  </div>
+
+  <h2>Install it</h2>
+  <p>Pick this device's system. Restart the browser afterwards, as many only read certificates when they start.</p>
+
+  <details data-os="windows">
+    <summary>Windows (Edge, Chrome)</summary>
+    <ol>
+      <li>Open the downloaded <code>glass-ca.crt</code> and choose <em>Install Certificate…</em></li>
+      <li>Choose <em>Current User</em>, then <em>Place all certificates in the following store</em> → <em>Trusted Root Certification Authorities</em>, and finish.</li>
+      <li>Or from a terminal:</li>
+    </ol>
+    <pre>certutil -user -addstore Root glass-ca.crt</pre>
+    <p class="hint">Firefox keeps its own list: Settings → Privacy &amp; Security → Certificates → View Certificates → Authorities → Import.</p>
+  </details>
+
+  <details data-os="mac">
+    <summary>macOS (Safari, Chrome, Edge)</summary>
+    <ol>
+      <li>Open the downloaded <code>glass-ca.mobileconfig</code>, then System Settings → Privacy &amp; Security → Profiles (or <em>Profile Downloaded</em>) → Install.</li>
+      <li>Or open <code>glass-ca.crt</code> in Keychain Access, double-click it, open <em>Trust</em> and set it to <em>Always Trust</em>.</li>
+      <li>Or from a terminal:</li>
+    </ol>
+    <pre>sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain glass-ca.crt</pre>
+  </details>
+
+  <details data-os="linux">
+    <summary>Linux (Chrome, Edge, Chromium, Firefox)</summary>
+    <ol>
+      <li>Chrome, Edge and Chromium use your NSS database (package <code>libnss3-tools</code>):</li>
+    </ol>
+    <pre>certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "Glass CA" -i glass-ca.crt</pre>
+    <ol start="2">
+      <li>Or in the browser: Settings → Privacy and security → Security → Manage certificates → Authorities → Import, and tick <em>Trust this certificate for identifying websites</em>.</li>
+      <li>For the whole system (curl, other apps):</li>
+    </ol>
+    <pre>sudo cp glass-ca.crt /usr/local/share/ca-certificates/glass-ca.crt &amp;&amp; sudo update-ca-certificates</pre>
+    <p class="hint">Firefox: Settings → Privacy &amp; Security → Certificates → View Certificates → Authorities → Import.</p>
+  </details>
+
+  <details data-os="android">
+    <summary>Android</summary>
+    <ol>
+      <li>Download the certificate.</li>
+      <li>Settings → Security (or <em>Security &amp; privacy</em>) → More security settings → Encryption &amp; credentials → Install a certificate → <em>CA certificate</em> → choose <code>glass-ca.crt</code>.</li>
+      <li>Chrome trusts it for websites straight away.</li>
+    </ol>
+  </details>
+
+  <details data-os="ios">
+    <summary>iPhone, iPad</summary>
+    <ol>
+      <li>In Safari, tap <em>Profile for iPhone, iPad, Mac</em> and allow the download.</li>
+      <li>Settings → <em>Profile Downloaded</em> → Install.</li>
+      <li>Settings → General → About → Certificate Trust Settings → turn on full trust for this certificate. Until then iOS installs it but doesn't trust it for websites.</li>
+    </ol>
+  </details>
+
+  <h2>Then</h2>
+  <div class="card">
+    <p id="check-text">Once it's installed, check that this browser trusts it and open Glass over HTTPS.</p>
+    <div class="buttons">
+      <button class="primary" id="check">Check and open Glass</button>
+      <a class="button" id="open" href="/">Open Glass anyway</a>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+</main>
+<script type="module">
+  const $ = (id) => document.getElementById(id);
+  const info = await fetch('/trust/info.json').then((r) => r.json()).catch(() => ({}));
+  $('host').textContent = location.hostname;
+  if (!info.available) {
+    $('ca-card').innerHTML = '<p class="bad">This computer has no certificate authority of its own. On it, run <code>glass tls init</code> and restart Glass.</p>';
+  } else {
+    $('ca-name').textContent = info.name ?? 'Glass local CA';
+    $('fingerprint').textContent = info.fingerprint;
+    if (info.onlyFor) {
+      $('only-for').textContent = `It can only vouch for this computer (${info.onlyFor}), never for any other site.` +
+        (info.expires ? ` Valid until ${info.expires}.` : '');
+    }
+  }
+  const https = info.https ?? `https://${location.host}/`;
+  $('open').href = https;
+
+  // Open the instructions for this device's system.
+  const ua = navigator.userAgent;
+  const os = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'ios'
+    : /Android/.test(ua) ? 'android'
+    : /Windows/.test(ua) ? 'windows'
+    : /Macintosh/.test(ua) ? 'mac'
+    : 'linux';
+  document.querySelector(`details[data-os="${os}"]`)?.setAttribute('open', '');
+
+  // A cross-origin fetch fails on a certificate the browser doesn't trust, so a success
+  // means the HTTPS page will load. (On the HTTPS page itself, after clicking through a
+  // warning, it would succeed anyway: that's why this page is best opened over HTTP.)
+  async function check() {
+    const status = $('status');
+    if (location.protocol === 'https:' && !window.isSecureContext) {
+      status.className = 'status warn';
+      status.textContent = 'This page itself was opened despite a certificate warning, so it can’t check. Install the certificate, restart the browser, and open Glass again.';
+      return;
+    }
+    status.className = 'status';
+    status.textContent = 'Checking…';
+    try {
+      await fetch(new URL('config.json', https), { mode: 'no-cors', cache: 'no-store' });
+      status.className = 'status good';
+      status.textContent = 'This browser trusts it. Opening Glass…';
+      setTimeout(() => location.assign(https), 600);
+    } catch {
+      status.className = 'status bad';
+      status.textContent = 'Not trusted yet. Install the certificate as above, restart the browser, then check again.';
+    }
+  }
+  $('check').addEventListener('click', check);
+</script>
+</body>
+</html>
