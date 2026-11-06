@@ -369,10 +369,11 @@ fn encode_loop(
 
         let size = (frame.width, frame.height);
         let mut force = wants_key;
-        if encoder.as_ref().is_none_or(|e| e.source_size() != size) {
+        if encoder.as_ref().is_none_or(|e| !e.accepts(frame)) {
             match VideoEncoder::new(
                 frame.width,
                 frame.height,
+                frame.format,
                 fps,
                 monitor.bitrate.load(Ordering::Relaxed),
                 scale,
@@ -445,13 +446,24 @@ fn encode_loop(
     }
 }
 
-/// Set once the VA-API encoder has failed: the host stays on OpenH264 after that.
+/// Set once the GPU encoder has failed: the host stays on OpenH264 after that.
 static HARDWARE_FAILED: AtomicBool = AtomicBool::new(false);
 
-/// OpenH264, or with `GLASS_ENCODER=vaapi` the GPU through VA-API. Opt-in for now: with
-/// frames captured into system memory, copying them to a discrete GPU costs about what
-/// software encoding does (the GPU path uses less CPU). Capturing DMA-BUFs would remove
-/// the copy.
+/// What `GLASS_ENCODER` asks for: `vaapi`, `nvenc`, or `gpu` (NVENC, else VA-API).
+/// Anything else (or nothing) is OpenH264.
+fn wanted_backends() -> &'static [&'static str] {
+    match std::env::var("GLASS_ENCODER").unwrap_or_default().to_ascii_lowercase().as_str() {
+        "vaapi" | "va" => &["vaapi"],
+        "nvenc" | "nvidia" => &["nvenc"],
+        "gpu" | "hardware" | "auto" => &["nvenc", "vaapi"],
+        _ => &[],
+    }
+}
+
+/// OpenH264, or with `GLASS_ENCODER` the GPU through VA-API or NVENC. Opt-in for now:
+/// with frames captured into system memory, copying them to a discrete GPU costs about
+/// what software encoding does (the GPU path uses less CPU). Capturing DMA-BUFs would
+/// remove the copy.
 enum VideoEncoder {
     Soft(Encoder),
     #[cfg(feature = "vaapi")]
@@ -459,26 +471,41 @@ enum VideoEncoder {
 }
 
 impl VideoEncoder {
-    fn new(width: usize, height: usize, fps: u32, bitrate: u32, scale: f64) -> Result<Self> {
-        let wants_vaapi = std::env::var("GLASS_ENCODER").is_ok_and(|e| e.eq_ignore_ascii_case("vaapi"));
+    fn new(
+        width: usize,
+        height: usize,
+        format: PixelFormat,
+        fps: u32,
+        bitrate: u32,
+        scale: f64,
+    ) -> Result<Self> {
+        let wanted = wanted_backends();
         #[cfg(not(feature = "vaapi"))]
-        if wants_vaapi && !HARDWARE_FAILED.swap(true, Ordering::Relaxed) {
-            warn!("GLASS_ENCODER=vaapi, but this build has no VA-API (--features vaapi); using OpenH264");
+        if !wanted.is_empty() && !HARDWARE_FAILED.swap(true, Ordering::Relaxed) {
+            let _ = format;
+            warn!("GLASS_ENCODER asks for the GPU, but this build has no GPU encoding (--features vaapi); using OpenH264");
         }
         #[cfg(feature = "vaapi")]
-        if wants_vaapi
-            && !HARDWARE_FAILED.load(Ordering::Relaxed)
-            && super::va_encode::fits(width, height, scale)
-        {
-            match super::va_encode::VaEncoder::new(width, height, fps, bitrate, scale) {
-                Ok(e) => {
-                    info!("encoder: {} (VA-API)", e.name);
-                    return Ok(Self::Va(e));
+        if !HARDWARE_FAILED.load(Ordering::Relaxed) {
+            use super::va_encode::{Backend, VaEncoder, fits};
+            let mut tried = false;
+            for name in wanted {
+                let backend = if *name == "nvenc" { Backend::Nvenc } else { Backend::Va };
+                if !fits(backend, width, height, scale) {
+                    continue;
                 }
-                Err(e) => {
-                    warn!("VA-API encoder unavailable, using OpenH264: {e:#}");
-                    HARDWARE_FAILED.store(true, Ordering::Relaxed);
+                tried = true;
+                match VaEncoder::new(backend, width, height, format, fps, bitrate, scale) {
+                    Ok(e) => {
+                        info!("encoder: {} ({})", e.name, backend.label());
+                        return Ok(Self::Va(e));
+                    }
+                    Err(e) => warn!("{} encoder unavailable: {e:#}", backend.label()),
                 }
+            }
+            if tried {
+                warn!("no GPU encoder; using OpenH264");
+                HARDWARE_FAILED.store(true, Ordering::Relaxed);
             }
         }
         Ok(Self::Soft(Encoder::new(width, height, fps, bitrate, scale)?))
@@ -488,11 +515,12 @@ impl VideoEncoder {
         !matches!(self, Self::Soft(_))
     }
 
-    fn source_size(&self) -> (usize, usize) {
+    /// Whether this encoder takes the frame (same size; NVENC also the same byte order).
+    fn accepts(&self, frame: &Frame) -> bool {
         match self {
-            Self::Soft(e) => e.source_size(),
+            Self::Soft(e) => e.source_size() == (frame.width, frame.height),
             #[cfg(feature = "vaapi")]
-            Self::Va(e) => e.source_size(),
+            Self::Va(e) => e.accepts(frame),
         }
     }
 
