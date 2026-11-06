@@ -19,6 +19,10 @@ openh264 = "0.9"
 opus = "0.4"
 openh264-sys2 = "0.9"
 ring = "0.17.14"
+# `glass tls init`: a private CA and host certificate (HTTPS without `tailscale cert`).
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
+x509-parser = "0.18"
+time = "0.3"
 qrcode = { version = "0.14.1", default-features = false }
 rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 serde = { version = "1.0.229", features = ["derive"] }

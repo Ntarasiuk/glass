@@ -124,6 +124,9 @@ self.onmessage = async ({ data }) => {
     setInterval(tick, 1000);
     setInterval(() => { if (nackOn && visible) for (const s of streams) s?.repair(rttMs); }, NACK_TICK_MS);
     run();
+  } else if (data.type === 'certHash') {
+    // The host's self-signed WebTransport certificate was replaced (main.js refetched it).
+    certHash = data.certHash;
   } else if (data.type === 'canvas') {
     videoStream(data.stream).setCanvas(data.canvas, wideColor);
   } else if (data.type === 'streams') {
