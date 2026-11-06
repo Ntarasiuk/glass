@@ -4,9 +4,11 @@
 //! Linux: one uinput device per pad, shaped like an Xbox 360 controller (same ids and
 //! codes as the xpad driver), so games and SDL pick it up with no setup. Windows: one
 //! virtual Xbox 360 controller per pad from the ViGEmBus driver, when it's installed (Windows
-//! has no virtual controller of its own for an unsigned app). macOS has no public way to
-//! create a virtual HID controller (that needs a DriverKit extension with a special
-//! entitlement), so controllers aren't offered there.
+//! has no virtual controller of its own for an unsigned app). macOS: one IOHIDUserDevice
+//! per pad, shaped like an Xbox Wireless Controller on Bluetooth (its ids, report
+//! descriptor and reports), so SDL, Steam and GameController treat it as one. Creating it
+//! takes Apple's restricted `com.apple.developer.hid.virtual.device` entitlement, so
+//! controllers are offered only when the binary carries it.
 
 /// Linux input codes, kept here (not from evdev) so the mapping is testable everywhere.
 pub mod code {
@@ -95,7 +97,17 @@ pub fn hat_value(negative: bool, positive: bool) -> i32 {
 pub const VIGEM_DOWNLOAD: &str = "https://github.com/nefarius/ViGEmBus/releases";
 
 pub fn supported() -> bool {
-    crate::testmode::enabled() || cfg!(target_os = "linux") || windows_supported()
+    crate::testmode::enabled() || cfg!(target_os = "linux") || windows_supported() || macos_supported()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_supported() -> bool {
+    mac::entitled()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_supported() -> bool {
+    false
 }
 
 #[cfg(windows)]
@@ -114,13 +126,16 @@ pub use linux::{handle, release_all};
 #[cfg(windows)]
 pub use vigem::{handle, release_all};
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(target_os = "macos")]
+pub use mac::{handle, release_all};
+
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 pub fn handle(ev: glass_proto::InputEvent) {
     let _ = ev;
 }
 
 /// A session ended: let go of its pads.
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 pub fn release_all() {}
 
 /// Xbox 360 controller (XUSB) reports, as the ViGEmBus driver takes them. Built from the
@@ -484,6 +499,309 @@ mod vigem {
     }
 }
 
+/// Xbox Wireless Controller (Xbox One S, Bluetooth, firmware 5.x) HID reports, for hosts
+/// that make a virtual HID device (macOS). Built from the XUSB report, so every host treats
+/// a pad alike. Layout as SDL's HIDAPI Xbox One driver reads it (17-byte packets).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub mod xbox_hid {
+    use super::xusb;
+
+    pub const VENDOR: u32 = 0x045e;
+    /// USB_PRODUCT_XBOX_ONE_S_REV2_BLE: firmware 5.x, Back and Guide in report 1.
+    pub const PRODUCT: u32 = 0x0b20;
+    pub const NAME: &str = "Xbox Wireless Controller";
+
+    /// The controller's own report descriptor, as captured from one (xpadneo,
+    /// docs/descriptors/xb1s_linux.md): report 1 the state, 2 the Home key, 3 rumble
+    /// (output), 4 battery.
+    pub const DESCRIPTOR: [u8; 334] = [
+    0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x01, 0xa1, 0x00, 0x09, 0x30, 0x09, 0x31,
+    0x15, 0x00, 0x27, 0xff, 0xff, 0x00, 0x00, 0x95, 0x02, 0x75, 0x10, 0x81, 0x02, 0xc0, 0x09, 0x01,
+    0xa1, 0x00, 0x09, 0x32, 0x09, 0x35, 0x15, 0x00, 0x27, 0xff, 0xff, 0x00, 0x00, 0x95, 0x02, 0x75,
+    0x10, 0x81, 0x02, 0xc0, 0x05, 0x02, 0x09, 0xc5, 0x15, 0x00, 0x26, 0xff, 0x03, 0x95, 0x01, 0x75,
+    0x0a, 0x81, 0x02, 0x15, 0x00, 0x25, 0x00, 0x75, 0x06, 0x95, 0x01, 0x81, 0x03, 0x05, 0x02, 0x09,
+    0xc4, 0x15, 0x00, 0x26, 0xff, 0x03, 0x95, 0x01, 0x75, 0x0a, 0x81, 0x02, 0x15, 0x00, 0x25, 0x00,
+    0x75, 0x06, 0x95, 0x01, 0x81, 0x03, 0x05, 0x01, 0x09, 0x39, 0x15, 0x01, 0x25, 0x08, 0x35, 0x00,
+    0x46, 0x3b, 0x01, 0x66, 0x14, 0x00, 0x75, 0x04, 0x95, 0x01, 0x81, 0x42, 0x75, 0x04, 0x95, 0x01,
+    0x15, 0x00, 0x25, 0x00, 0x35, 0x00, 0x45, 0x00, 0x65, 0x00, 0x81, 0x03, 0x05, 0x09, 0x19, 0x01,
+    0x29, 0x0f, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x0f, 0x81, 0x02, 0x15, 0x00, 0x25, 0x00,
+    0x75, 0x01, 0x95, 0x01, 0x81, 0x03, 0x05, 0x0c, 0x0a, 0x24, 0x02, 0x15, 0x00, 0x25, 0x01, 0x95,
+    0x01, 0x75, 0x01, 0x81, 0x02, 0x15, 0x00, 0x25, 0x00, 0x75, 0x07, 0x95, 0x01, 0x81, 0x03, 0x05,
+    0x0c, 0x09, 0x01, 0x85, 0x02, 0xa1, 0x01, 0x05, 0x0c, 0x0a, 0x23, 0x02, 0x15, 0x00, 0x25, 0x01,
+    0x95, 0x01, 0x75, 0x01, 0x81, 0x02, 0x15, 0x00, 0x25, 0x00, 0x75, 0x07, 0x95, 0x01, 0x81, 0x03,
+    0xc0, 0x05, 0x0f, 0x09, 0x21, 0x85, 0x03, 0xa1, 0x02, 0x09, 0x97, 0x15, 0x00, 0x25, 0x01, 0x75,
+    0x04, 0x95, 0x01, 0x91, 0x02, 0x15, 0x00, 0x25, 0x00, 0x75, 0x04, 0x95, 0x01, 0x91, 0x03, 0x09,
+    0x70, 0x15, 0x00, 0x25, 0x64, 0x75, 0x08, 0x95, 0x04, 0x91, 0x02, 0x09, 0x50, 0x66, 0x01, 0x10,
+    0x55, 0x0e, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x01, 0x91, 0x02, 0x09, 0xa7, 0x15,
+    0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x01, 0x91, 0x02, 0x65, 0x00, 0x55, 0x00, 0x09, 0x7c,
+    0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x01, 0x91, 0x02, 0xc0, 0x05, 0x06, 0x09, 0x20,
+    0x85, 0x04, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02, 0xc0,
+    ];
+
+    pub const REPORT_LEN: usize = 17;
+
+    /// The hat value: 1 up, clockwise to 8 up-left; 0 centred.
+    fn hat(buttons: u16) -> u8 {
+        let up = buttons & xusb::DPAD_UP != 0;
+        let down = buttons & xusb::DPAD_DOWN != 0;
+        let left = buttons & xusb::DPAD_LEFT != 0;
+        let right = buttons & xusb::DPAD_RIGHT != 0;
+        match (up, right, down, left) {
+            (true, false, _, false) => 1,
+            (true, true, _, _) => 2,
+            (false, true, false, _) => 3,
+            (_, true, true, _) => 4,
+            (false, false, true, false) => 5,
+            (_, false, true, true) => 6,
+            (false, _, false, true) => 7,
+            (true, false, _, true) => 8,
+            _ => 0,
+        }
+    }
+
+    /// Report 1. Sticks are unsigned with +y down, triggers 10-bit.
+    pub fn report(r: xusb::Report) -> [u8; REPORT_LEN] {
+        let mut b = [0u8; REPORT_LEN];
+        b[0] = 0x01;
+        let stick = |v: i16, flip: bool| -> [u8; 2] {
+            let v = if flip { -(v as i32) } else { v as i32 };
+            ((v + 0x8000).clamp(0, 0xffff) as u16).to_le_bytes()
+        };
+        b[1..3].copy_from_slice(&stick(r.lx, false));
+        b[3..5].copy_from_slice(&stick(r.ly, true));
+        b[5..7].copy_from_slice(&stick(r.rx, false));
+        b[7..9].copy_from_slice(&stick(r.ry, true));
+        let trigger = |v: u8| ((v as u32 * 1023 + 127) / 255) as u16;
+        b[9..11].copy_from_slice(&trigger(r.left_trigger).to_le_bytes());
+        b[11..13].copy_from_slice(&trigger(r.right_trigger).to_le_bytes());
+        b[13] = hat(r.buttons);
+        let held = |bit: u16| r.buttons & bit != 0;
+        for (bit, byte, mask) in [
+            (xusb::A, 14, 0x01),
+            (xusb::B, 14, 0x02),
+            (xusb::X, 14, 0x08),
+            (xusb::Y, 14, 0x10),
+            (xusb::LEFT_SHOULDER, 14, 0x40),
+            (xusb::RIGHT_SHOULDER, 14, 0x80),
+            (xusb::BACK, 15, 0x04),
+            (xusb::START, 15, 0x08),
+            (xusb::GUIDE, 15, 0x10),
+            (xusb::LEFT_THUMB, 15, 0x20),
+            (xusb::RIGHT_THUMB, 15, 0x40),
+        ] {
+            if held(bit) {
+                b[byte] |= mask;
+            }
+        }
+        b
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::collections::{HashMap, HashSet};
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+    use std::sync::{Mutex, OnceLock};
+
+    use glass_proto::GAMEPAD_CONNECTED;
+    use objc2_core_foundation::{CFData, CFDictionary, CFNumber, CFString, CFType};
+
+    use super::{xbox_hid, xusb};
+
+    const ENTITLEMENT: &str = "com.apple.developer.hid.virtual.device";
+    const MAX_PADS: u8 = 4;
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOHIDUserDeviceCreateWithProperties(allocator: *const c_void, properties: *const c_void, options: u32) -> *mut c_void;
+        fn IOHIDUserDeviceHandleReportWithTimeStamp(device: *mut c_void, timestamp: u64, report: *const u8, length: isize) -> i32;
+    }
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        fn SecTaskCreateFromSelf(allocator: *const c_void) -> *mut c_void;
+        fn SecTaskCopyValueForEntitlement(task: *mut c_void, entitlement: *const c_void, error: *mut *mut c_void) -> *mut c_void;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(cf: *const c_void);
+        fn CFGetTypeID(cf: *const c_void) -> usize;
+        fn CFBooleanGetTypeID() -> usize;
+        fn CFBooleanGetValue(boolean: *const c_void) -> bool;
+    }
+
+    unsafe extern "C" {
+        fn mach_absolute_time() -> u64;
+    }
+
+    /// Whether this binary is signed with the virtual HID entitlement (without it, the
+    /// kernel refuses to make the device).
+    pub fn entitled() -> bool {
+        static ENTITLED: OnceLock<bool> = OnceLock::new();
+        *ENTITLED.get_or_init(|| {
+            let name = CFString::from_str(ENTITLEMENT);
+            // SAFETY: plain CF calls; every object returned here is released here.
+            unsafe {
+                let task = SecTaskCreateFromSelf(std::ptr::null());
+                if task.is_null() {
+                    return false;
+                }
+                let value = SecTaskCopyValueForEntitlement(task, (&*name as *const CFString).cast(), std::ptr::null_mut());
+                CFRelease(task);
+                if value.is_null() {
+                    return false;
+                }
+                let on = CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue(value);
+                CFRelease(value);
+                on
+            }
+        })
+    }
+
+    /// A virtual controller. Never given a dispatch queue (it only sends input reports),
+    /// so releasing it removes the device.
+    struct Device(NonNull<c_void>);
+
+    // SAFETY: a CF object, only used under PADS' lock.
+    unsafe impl Send for Device {}
+
+    impl Drop for Device {
+        fn drop(&mut self) {
+            // SAFETY: owned here (a +1 reference from Create).
+            unsafe { CFRelease(self.0.as_ptr()) };
+        }
+    }
+
+    impl Device {
+        fn create(pad: u8) -> anyhow::Result<Device> {
+            let num = |v: u32| CFNumber::new_i32(v as i32);
+            let descriptor = CFData::from_bytes(&xbox_hid::DESCRIPTOR);
+            let (vendor, product) = (num(xbox_hid::VENDOR), num(xbox_hid::PRODUCT));
+            let version = num(0x0509);
+            // Distinct per pad, so two pads don't look like one device reconnecting.
+            let location = num(0x474c_0000 | pad as u32);
+            let (name, maker) = (CFString::from_str(xbox_hid::NAME), CFString::from_str("Microsoft"));
+            let transport = CFString::from_str("Bluetooth Low Energy");
+            let serial = CFString::from_str(&format!("glass-pad-{}", pad + 1));
+            let keys = [
+                "ReportDescriptor",
+                "VendorID",
+                "ProductID",
+                "VersionNumber",
+                "LocationID",
+                "Product",
+                "Manufacturer",
+                "Transport",
+                "SerialNumber",
+            ]
+            .map(CFString::from_str);
+            let values: [&CFType; 9] =
+                [&descriptor, &vendor, &product, &version, &location, &name, &maker, &transport, &serial];
+            let keys: Vec<&CFString> = keys.iter().map(|k| &**k).collect();
+            let props = CFDictionary::<CFString, CFType>::from_slices(&keys, &values);
+            // SAFETY: props is a valid dictionary for the call; the result is +1 or NULL.
+            let device = unsafe { IOHIDUserDeviceCreateWithProperties(std::ptr::null(), (&*props as *const CFDictionary<CFString, CFType>).cast(), 0) };
+            let device = NonNull::new(device).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "macOS refused to create a virtual controller{}",
+                    if entitled() { "" } else { " (this build lacks the virtual HID entitlement)" }
+                )
+            })?;
+            Ok(Device(device))
+        }
+
+        fn send(&self, report: &[u8]) -> Result<(), i32> {
+            // SAFETY: the device is live; report is readable for its length.
+            let r = unsafe { IOHIDUserDeviceHandleReportWithTimeStamp(self.0.as_ptr(), mach_absolute_time(), report.as_ptr(), report.len() as isize) };
+            if r == 0 { Ok(()) } else { Err(r) }
+        }
+    }
+
+    struct Pad {
+        device: Device,
+        state: xusb::Pad,
+    }
+
+    #[derive(Default)]
+    struct State {
+        pads: HashMap<u8, Pad>,
+        /// Pads whose device couldn't be made: not retried (on every stick move) until
+        /// they reconnect.
+        failed: HashSet<u8>,
+    }
+
+    static PADS: Mutex<Option<State>> = Mutex::new(None);
+
+    pub fn handle(ev: glass_proto::InputEvent) {
+        let glass_proto::InputEvent::Gamepad { pad, kind, index, value } = ev else { return };
+        if pad >= MAX_PADS {
+            return;
+        }
+        let mut state = PADS.lock().unwrap();
+        let State { pads, failed } = state.get_or_insert_with(State::default);
+        if kind == GAMEPAD_CONNECTED {
+            failed.remove(&pad);
+            if value == 0.0 {
+                if pads.remove(&pad).is_some() {
+                    tracing::info!("gamepad {pad}: disconnected");
+                }
+                return;
+            }
+        }
+        if failed.contains(&pad) {
+            return;
+        }
+        let p = match pads.entry(pad) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => match Device::create(pad) {
+                Ok(device) => {
+                    tracing::info!("gamepad {pad}: virtual Xbox controller ready");
+                    let state = xusb::Pad::default();
+                    // Start centred: sticks at rest are 0x8000, not 0.
+                    let _ = device.send(&xbox_hid::report(state.report));
+                    e.insert(Pad { device, state })
+                }
+                Err(e) => {
+                    tracing::warn!("gamepad {pad}: {e}");
+                    failed.insert(pad);
+                    return;
+                }
+            },
+        };
+        if p.state.apply(kind, index, value)
+            && let Err(e) = p.device.send(&xbox_hid::report(p.state.report))
+        {
+            tracing::warn!("gamepad {pad}: report failed: {e:#x}");
+        }
+    }
+
+    pub fn release_all() {
+        let mut state = PADS.lock().unwrap();
+        let Some(state) = state.as_mut() else { return };
+        if !state.pads.is_empty() {
+            tracing::info!("gamepads: released {}", state.pads.len());
+        }
+        state.pads.clear();
+        state.failed.clear();
+    }
+
+    /// Makes a real controller and presses A. Needs a binary signed with the entitlement
+    /// (on a Mac with SIP and AMFI checks off until Apple grants it):
+    /// `cargo test -p glass-host makes_a_virtual_controller -- --ignored`.
+    #[test]
+    #[ignore]
+    fn makes_a_virtual_controller() {
+        println!("entitled: {}", entitled());
+        let device = Device::create(0).expect("create");
+        let mut pad = xusb::Pad::default();
+        pad.apply(glass_proto::GAMEPAD_BUTTON, 0, 1.0);
+        device.send(&xbox_hid::report(pad.report)).expect("report");
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::collections::HashMap;
@@ -714,5 +1032,66 @@ mod tests {
         let s = xusb::submit(2, r);
         assert_eq!(&s[..8], &[20, 0, 0, 0, 2, 0, 0, 0]);
         assert_eq!(&s[8..], &r.to_bytes());
+    }
+
+    #[test]
+    fn xbox_hid_reports_match_sdl() {
+        use glass_proto::{GAMEPAD_AXIS, GAMEPAD_BUTTON};
+        let mut p = xusb::Pad::default();
+        let r = xbox_hid::report(p.report);
+        assert_eq!(r.len(), xbox_hid::REPORT_LEN);
+        assert_eq!(r[0], 1, "report id");
+        // At rest: sticks centred, triggers released, hat centred, nothing held.
+        assert_eq!(&r[1..9], &[0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80]);
+        assert_eq!(&r[9..], &[0; 8]);
+
+        // Browser +y down stays +y down (SDL: raw - 0x8000, +y down).
+        p.apply(GAMEPAD_AXIS, 0, -1.0);
+        p.apply(GAMEPAD_AXIS, 1, 1.0);
+        p.apply(GAMEPAD_AXIS, 3, -1.0);
+        let r = xbox_hid::report(p.report);
+        let at = |i: usize| u16::from_le_bytes([r[i], r[i + 1]]) as i32 - 0x8000;
+        assert_eq!((at(1), at(3), at(5), at(7)), (-32767, 32767, 0, -32767));
+
+        p.apply(GAMEPAD_BUTTON, 6, 1.0);
+        p.apply(GAMEPAD_BUTTON, 7, 0.5);
+        let r = xbox_hid::report(p.report);
+        assert_eq!(u16::from_le_bytes([r[9], r[10]]), 1023);
+        assert_eq!(u16::from_le_bytes([r[11], r[12]]), 514);
+
+        // SDL's bits: byte 14 A B _ X Y _ LB RB; byte 15 _ _ Back Start Guide LS RS.
+        for (i, byte, mask) in [(0, 14, 0x01), (1, 14, 0x02), (2, 14, 0x08), (3, 14, 0x10), (4, 14, 0x40), (5, 14, 0x80), (8, 15, 0x04), (9, 15, 0x08), (16, 15, 0x10), (10, 15, 0x20), (11, 15, 0x40)] {
+            let mut p = xusb::Pad::default();
+            p.apply(GAMEPAD_BUTTON, i, 1.0);
+            let r = xbox_hid::report(p.report);
+            assert_eq!((r[14], r[15]), if byte == 14 { (mask, 0) } else { (0, mask) }, "button {i}");
+        }
+
+        // Hat: 1 up, clockwise; opposite directions cancel.
+        let hat = |held: &[u16]| {
+            let mut p = xusb::Pad::default();
+            for &i in held {
+                p.apply(GAMEPAD_BUTTON, i, 1.0);
+            }
+            xbox_hid::report(p.report)[13]
+        };
+        assert_eq!(hat(&[12]), 1);
+        assert_eq!(hat(&[12, 15]), 2);
+        assert_eq!(hat(&[15]), 3);
+        assert_eq!(hat(&[13, 15]), 4);
+        assert_eq!(hat(&[13]), 5);
+        assert_eq!(hat(&[13, 14]), 6);
+        assert_eq!(hat(&[14]), 7);
+        assert_eq!(hat(&[12, 14]), 8);
+        assert_eq!(hat(&[12, 13]), 0);
+        assert_eq!(hat(&[]), 0);
+    }
+
+    #[test]
+    fn xbox_hid_descriptor_is_whole() {
+        let d = &xbox_hid::DESCRIPTOR;
+        // Gamepad application collection, report 1 first; ends closing the last one.
+        assert_eq!(&d[..8], &[0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x01]);
+        assert_eq!(d[d.len() - 1], 0xc0);
     }
 }
