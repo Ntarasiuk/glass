@@ -78,10 +78,18 @@ package_macos() {
 package_linux() {
   if [ "$(uname -s)" = Linux ]; then
     cargo build --release -p glass-host
-    tarball "linux-$(uname -m)" target/release/glass-host
+    # GPU encoding (GLASS_ENCODER): libglass_gst.so, opened at run time, so the host
+    # still starts where GStreamer isn't installed. Building it needs GStreamer's dev files.
+    if pkg-config --exists gstreamer-app-1.0 gstreamer-video-1.0; then
+      cargo build --release -p glass-gst
+      tarball "linux-$(uname -m)" target/release/glass-host target/release/libglass_gst.so
+    else
+      echo "no GStreamer dev files: packaging without GPU encoding (libglass_gst.so)"
+      tarball "linux-$(uname -m)" target/release/glass-host
+    fi
   elif docker info >/dev/null 2>&1; then
     scripts/linux/build.sh
-    tarball linux-x86_64 target/linux-x86_64/release/glass-host
+    tarball linux-x86_64 target/linux-x86_64/release/glass-host target/linux-x86_64/release/libglass_gst.so
   else
     echo "skipping Linux build (Docker isn't running)"
   fi

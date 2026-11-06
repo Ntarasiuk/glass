@@ -114,7 +114,7 @@ self.onmessage = async ({ data }) => {
     wideColor = Boolean(data.wideColor);
     setDecoderStep(data.decoderStep ?? 0);
     if (data.bench) bench = new BenchProbe();
-    await probeDecoders(log);
+    await probeDecoders(log, undefined, data.decoder ?? null);
     codecs = await probeCodecs();
     // Opus system audio (~100 kbps instead of 1.5 Mbps of PCM) where WebCodecs decodes it;
     // without AudioDecoder (Safari < 26) the host keeps sending PCM.

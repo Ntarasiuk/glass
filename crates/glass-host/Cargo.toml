@@ -64,10 +64,9 @@ objc2-video-toolbox = "0.3.2"
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "file_chooser"] }
 evdev = "0.13"
 pipewire = "0.10"
-# Hardware H.264 through VA-API (Intel, AMD), with OpenH264 as the fallback.
-gstreamer = { version = "0.25", optional = true }
-gstreamer-app = { version = "0.25", optional = true }
-gstreamer-video = { version = "0.25", optional = true }
+# GPU H.264 (VA-API, NVENC) goes through GStreamer in libglass_gst.so (crates/glass-gst),
+# opened at run time: the host doesn't link GStreamer and starts without it.
+libloading = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
@@ -124,10 +123,11 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [features]
-# Linux: GLASS_ENCODER=vaapi encodes on the GPU through GStreamer's VA-API plugin (falling
-# back to OpenH264). Off by default: it links the GStreamer libraries, so the host would
-# need them to start.
-vaapi = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+# Linux: GLASS_ENCODER=vaapi (Intel, AMD), nvenc (NVIDIA) or gpu (NVENC, else VA-API)
+# encodes on the GPU through GStreamer's va / nvcodec plugins, falling back to OpenH264.
+# Always built now (GStreamer is loaded at run time from libglass_gst.so); the feature
+# is kept so existing build commands still work.
+vaapi = []
 
 [build-dependencies]
 # Windows: the version resource (name, version) on glass.exe and glassw.exe, which code

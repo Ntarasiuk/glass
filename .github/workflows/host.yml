@@ -36,10 +36,10 @@ jobs:
           # The Windows job creates a real firewall rule and reads its addresses back.
           GLASS_FIREWALL_INTEGRATION: ${{ runner.os == 'Windows' && '1' || '0' }}
       - run: cargo build --profile ci -p glass-host
-      # The optional VA-API encoder (GLASS_ENCODER=vaapi) builds and its unit tests pass
-      # (the GPU test is ignored: runners have no VA device).
+      # The GPU encoders' GStreamer library (libglass_gst.so, loaded at run time) builds;
+      # the GPU tests are ignored: runners have no VA or NVENC device.
       - if: runner.os == 'Linux'
-        run: cargo test --profile ci -p glass-host --features vaapi
+        run: cargo build --profile ci -p glass-gst
       # Glass Microphone (native/glass-mic): builds, and loads as an audio plug-in.
       - if: runner.os == 'macOS'
         run: |
