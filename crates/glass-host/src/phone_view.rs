@@ -77,10 +77,11 @@ enum Turn {
 impl Turn {
     fn of(orientation: &str) -> Turn {
         match orientation {
-            // Turned left, its bottom on the right: what's drawn is a quarter turn clockwise
-            // of the screen's own up, so it's turned back anticlockwise.
-            "LANDSCAPE" => Turn::Left,
-            "UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT" => Turn::Right,
+            // WebDriverAgent's LANDSCAPE is drawn a quarter turn anticlockwise of the screen's
+            // own up, so it's turned back clockwise (checked on an iPhone XR); the other way
+            // for LANDSCAPERIGHT.
+            "LANDSCAPE" => Turn::Right,
+            "UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT" => Turn::Left,
             "UIA_DEVICE_ORIENTATION_PORTRAIT_UPSIDEDOWN" => Turn::Half,
             _ => Turn::None,
         }
@@ -1541,8 +1542,8 @@ mod tests {
         assert_eq!(firsts(turn_bgra(src.clone(), 2, 3, Turn::Right)), (vec![4, 2, 0, 5, 3, 1], 3, 2));
         assert_eq!(firsts(turn_bgra(src.clone(), 2, 3, Turn::Half)), (vec![5, 4, 3, 2, 1, 0], 2, 3));
         assert_eq!(firsts(turn_bgra(src, 2, 3, Turn::None)), (vec![0, 1, 2, 3, 4, 5], 2, 3));
-        assert_eq!(Turn::of("LANDSCAPE"), Turn::Left);
-        assert_eq!(Turn::of("UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT"), Turn::Right);
+        assert_eq!(Turn::of("LANDSCAPE"), Turn::Right);
+        assert_eq!(Turn::of("UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT"), Turn::Left);
         assert_eq!(Turn::of("PORTRAIT"), Turn::None);
     }
 }
