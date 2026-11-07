@@ -40,18 +40,24 @@ pub struct Phone {
     /// Wi-Fi (and Apple's device tunnel over it, about 6 Mbit/s) can carry without holding
     /// up the touches queued behind it.
     pub wifi: bool,
+    /// The phone itself (its UDID), when Glass keeps the link to it up (phone_link): it
+    /// forwards the two ports and starts WebDriverAgent. Without one, they're the user's.
+    pub udid: Option<String>,
 }
 
 impl Phone {
     /// How it's written in settings: `name=port`, or `name=port:video` when the video port
-    /// isn't the usual one, with `/wifi` after it for a phone reached over Wi-Fi.
+    /// isn't the usual one, with `/wifi` after it for a phone reached over Wi-Fi and
+    /// `@udid` for one Glass keeps connected.
     pub fn entry(&self) -> String {
         let ports = if Some(self.video) == default_video(self.port) {
             format!("{}", self.port)
         } else {
             format!("{}:{}", self.port, self.video)
         };
-        format!("{}={ports}{}", self.name, if self.wifi { "/wifi" } else { "" })
+        let wifi = if self.wifi { "/wifi" } else { "" };
+        let udid = self.udid.as_ref().map(|u| format!("@{u}")).unwrap_or_default();
+        format!("{}={ports}{wifi}{udid}", self.name)
     }
 }
 
@@ -68,7 +74,7 @@ fn port_number(s: &str) -> anyhow::Result<u16> {
         .ok_or_else(|| anyhow::anyhow!("{s} isn't a port"))
 }
 
-/// `name=port[:video][/wifi]` entries, as `glass config phones` takes them.
+/// `name=port[:video][/wifi][@udid]` entries, as `glass config phones` takes them.
 pub fn parse(entries: &[String]) -> anyhow::Result<Vec<Phone>> {
     entries
         .iter()
@@ -85,6 +91,17 @@ pub fn parse(entries: &[String]) -> anyhow::Result<Vec<Phone>> {
                         .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)),
                 "{name:?} isn't a phone name (letters, digits, - and _)"
             );
+            let (ports, udid) = match ports.trim().rsplit_once('@') {
+                Some((ports, udid)) => {
+                    let udid = udid.trim();
+                    anyhow::ensure!(
+                        (20..=64).contains(&udid.len()) && udid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'),
+                        "{name}: {udid:?} isn't a phone's UDID"
+                    );
+                    (ports, Some(udid.to_string()))
+                }
+                None => (ports, None),
+            };
             let (ports, wifi) = match ports.trim().split_once('/') {
                 Some((ports, "wifi")) => (ports, true),
                 Some((_, other)) => anyhow::bail!("{name}: unknown option /{other} (only /wifi)"),
@@ -105,6 +122,7 @@ pub fn parse(entries: &[String]) -> anyhow::Result<Vec<Phone>> {
                 port,
                 video,
                 wifi,
+                udid,
             })
         })
         .collect()
@@ -632,6 +650,21 @@ pub(crate) fn touch_then_rest(p: &Phone, path: &[(f64, f64, u64)], hold_ms: u64,
     }
     steps.push(json!({ "type": "pointerUp", "button": 0 }));
     let body = json!({ "actions": [{ "type": "pointer", "id": "finger", "parameters": { "pointerType": "touch" }, "actions": steps }] });
+    in_session(p, "POST", "/actions", Some(&body)).map(|_| ())
+}
+
+/// Two fingers on either side of `at` (points), from `from` apart to `to` apart over `ms`.
+pub(crate) fn pinch(p: &Phone, at: (f64, f64), from: f64, to: f64, ms: u64) -> Result<(), Refused> {
+    let finger = |id: &str, side: f64| {
+        let x = |gap: f64| (at.0 + side * gap / 2.0).round();
+        json!({ "type": "pointer", "id": id, "parameters": { "pointerType": "touch" }, "actions": [
+            { "type": "pointerMove", "duration": 0, "x": x(from), "y": at.1.round() },
+            { "type": "pointerDown", "button": 0 },
+            { "type": "pointerMove", "duration": ms, "x": x(to), "y": at.1.round() },
+            { "type": "pointerUp", "button": 0 },
+        ] })
+    };
+    let body = json!({ "actions": [finger("left", -1.0), finger("right", 1.0)] });
     in_session(p, "POST", "/actions", Some(&body)).map(|_| ())
 }
 
@@ -1215,19 +1248,22 @@ mod tests {
                     name: "xr".into(),
                     port: 8100,
                     video: 9100,
-                    wifi: false
+                    wifi: false,
+                    udid: None
                 },
                 Phone {
                     name: "se_2".into(),
                     port: 8101,
                     video: 9300,
-                    wifi: false
+                    wifi: false,
+                    udid: None
                 },
                 Phone {
                     name: "pro".into(),
                     port: 8200,
                     video: 9200,
-                    wifi: true
+                    wifi: true,
+                    udid: None
                 }
             ]
         );
@@ -1237,6 +1273,13 @@ mod tests {
         assert_eq!(ok[2].entry(), "pro=8200/wifi");
         assert_eq!(parse(&["pro=8200:9300/wifi".into()]).unwrap()[0].entry(), "pro=8200:9300/wifi");
         assert!(parse(&["xr=8100/fast".into()]).is_err(), "only /wifi");
+        let kept = parse(&["xr=8100@00008020-000649323451002E".into(), "pro=8200:9200/wifi@00008120-00040D520C38C01E".into()]).unwrap();
+        assert_eq!(kept[0].udid.as_deref(), Some("00008020-000649323451002E"));
+        assert!(!kept[0].wifi);
+        assert!(kept[1].wifi && kept[1].video == 9200);
+        assert_eq!(kept[1].entry(), "pro=8200/wifi@00008120-00040D520C38C01E", "9200 is 8200's usual video port");
+        assert!(parse(&["xr=8100@nope".into()]).is_err());
+        assert!(parse(&["xr=8100@../../etc".into()]).is_err());
         assert!(parse(&["xr=8100:8100".into()]).is_err(), "command and video ports differ");
         assert!(parse(&["xr=65000".into()]).is_err(), "no room for the usual video port");
         assert!(parse(&["xr".into()]).is_err());
@@ -1315,7 +1358,7 @@ mod tests {
 
     #[test]
     fn password_fields_keep_the_agent_off_the_keyboard_but_not_the_screen() {
-        let p = Phone { name: "xr".into(), port: 1, video: 2, wifi: false };
+        let p = Phone { name: "xr".into(), port: 1, video: 2, wifi: false, udid: None };
         let screen = || Ok((390.0, 844.0));
         let no_screen = || -> Result<(f64, f64), Refused> { panic!("not needed") };
         let focus = |secure: Result<bool, Refused>, keyboard: Result<Option<[f64; 4]>, Refused>| Focus { secure, keyboard };
@@ -1381,6 +1424,7 @@ mod tests {
             port: 1,
             video: 2,
             wifi: false,
+            udid: None,
         };
         // The owner isn't limited.
         assert!(check_front(&p, Some("com.apple.Preferences")).is_ok());

@@ -29,6 +29,12 @@ pub struct PhoneTag {
     pub name: String,
     /// Reached over Wi-Fi rather than USB.
     pub wifi: bool,
+    /// "ready", "locked" (both show its picture), or why it can't be shown yet: "starting",
+    /// "unlock", "approve", "offline".
+    pub state: &'static str,
+    /// What the person can do about it, when there's something.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 pub struct EncodedFrame {
@@ -169,6 +175,11 @@ pub trait InputSink: Send {
     fn handle(&mut self, ev: glass_proto::InputEvent);
     /// Pastes the host clipboard (the platform's paste shortcut).
     fn paste(&mut self);
+    /// Pastes this text where the clipboard can't reach (a phone: it's typed there);
+    /// `false` when the platform's paste should do it.
+    fn paste_text(&mut self, _text: &str) -> bool {
+        false
+    }
     /// Releases anything still held, e.g. when a client disconnects mid-drag.
     fn release_all(&mut self);
     /// Retargets absolute mouse coordinates to the streamed displays.

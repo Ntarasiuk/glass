@@ -341,10 +341,13 @@ pub mod phone_keys {
     pub const SPOTLIGHT: u16 = 0xF104;
     pub const VOLUME_UP: u16 = 0xF105;
     pub const VOLUME_DOWN: u16 = 0xF106;
+    /// Two fingers apart (zoom in) and together (zoom out), at the pointer: a trackpad pinch.
+    pub const PINCH_OUT: u16 = 0xF107;
+    pub const PINCH_IN: u16 = 0xF108;
 
     /// Whether `keycode` is one of these.
     pub fn is_phone_key(keycode: u16) -> bool {
-        (HOME..=VOLUME_DOWN).contains(&keycode)
+        (HOME..=PINCH_IN).contains(&keycode)
     }
 }
 

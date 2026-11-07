@@ -361,17 +361,23 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   // The computer's own main display, to go back to from a phone.
   let computerMain = null;
   const showComputer = () => computerMain != null && onSelectDisplay(computerMain);
+  const PHONE_STATE = { locked: 'locked', starting: 'starting…', unlock: 'unlock it', approve: 'allow automation', offline: 'offline' };
   function phoneItems() {
     return phoneList.map((d) => {
       const shown = phoneShown === d.id;
-      const item = menuItem(d.phone.name, `iPhone · ${d.phone.wifi ? 'Wi-Fi' : 'USB'}${shown ? ' · showing' : ''}`, {
+      const { state = 'ready', note } = d.phone;
+      const usable = state === 'ready' || state === 'locked';
+      const status = shown ? 'showing' : PHONE_STATE[state];
+      const item = menuItem(d.phone.name, [`iPhone · ${d.phone.wifi ? 'Wi-Fi' : 'USB'}`, status].filter(Boolean).join(' · '), {
         checked: shown,
         onSelect: () => {
           setMenuOpen('machines', false);
-          if (!shown) onSelectDisplay(d.id);
+          if (!shown && usable) onSelectDisplay(d.id);
         },
       });
       item.classList.add('sub');
+      item.disabled = !usable && !shown;
+      if (note) item.title = note;
       return item;
     });
   }
@@ -445,7 +451,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     // Phones go in the machines menu, under this machine.
     const phones = withPhoneDisplays.filter((d) => d.phone);
     const shownPhone = streamed.length === 1 && phones.some((d) => d.id === streamed[0]) ? streamed[0] : null;
-    const phonesChanged = phones.map((d) => `${d.id}${d.phone.name}${d.phone.wifi}`).join() !== phoneList.map((d) => `${d.id}${d.phone.name}${d.phone.wifi}`).join();
+    const key = (list) => list.map((d) => `${d.id}${d.phone.name}${d.phone.wifi}${d.phone.state}${d.phone.note}`).join();
+    const phonesChanged = key(phones) !== key(phoneList);
     const displays = withPhoneDisplays.filter((d) => !d.phone);
     computerMain = (displays.find((d) => d.main) ?? displays[0])?.id ?? null;
     if (phonesChanged || shownPhone !== phoneShown) {
@@ -784,6 +791,12 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
      * A phone is shown: the toolbar has its buttons instead of the computer's, and what only a
      * computer has (other displays, a terminal, the shortcut bar) is put away (index.html).
      */
+    /** Says something over a shown phone's picture (`null`: nothing). */
+    setPhoneNote(text) {
+      const note = $('phone-note');
+      if (note.textContent !== (text ?? '')) note.textContent = text ?? '';
+      note.classList.toggle('hidden', !text);
+    },
     setPhone(on) {
       if (document.body.classList.contains('phone') === on) return;
       document.body.classList.toggle('phone', on);

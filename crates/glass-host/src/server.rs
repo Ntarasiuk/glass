@@ -1268,6 +1268,11 @@ async fn control(
                     }
                     ServerMsg::Layout { streams, displays }
                 }
+                // Phones' states and notes (which name the phone and its setup) too.
+                ServerMsg::Displays { mut displays } if !phone_access(&perms) => {
+                    displays.retain(|d| !crate::phone_view::is_phone_display(d.id));
+                    ServerMsg::Displays { displays }
+                }
                 msg => msg,
             };
             // Pointer images only to viewers that draw it (they're up to 350 KB of JSON).
@@ -1315,12 +1320,19 @@ async fn control(
             }
             ClientMsg::ClipboardImage if !perms.clipboard => {}
             ClientMsg::Clipboard { text, html, paste } => {
+                // A phone shown takes it as typing (paste_text), so it's kept for that.
+                let pasted = paste.then(|| text.clone());
                 match crate::clip::html_for_viewer(html) {
                     Some(html) => shared.clipboard.set(&crate::clip::Clip { text, html: Some(html), image: None }),
                     None => shared.clipboard.set_text(&text),
                 }
-                if paste && perms.input {
-                    shared.injector.lock().unwrap().paste();
+                if let Some(text) = pasted.filter(|_| perms.input) {
+                    let mut injector = shared.injector.lock().unwrap();
+                    // Typed on a phone only by those who may use the phones (else the
+                    // computer's paste, which a shown phone ignores).
+                    if !(phone_access(&perms) && injector.paste_text(&text)) {
+                        injector.paste();
+                    }
                 }
             }
             ClientMsg::ClipboardImage => {

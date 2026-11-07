@@ -155,7 +155,7 @@ test('phone displays and phone keys match glass_proto', () => {
   assert.ok(isPhoneDisplay(0x7a000efa));
   assert.ok(!isPhoneDisplay(1) && !isPhoneDisplay(69734662) && !isPhoneDisplay('all'));
   // glass_proto::phone_keys, in order, above every macOS keycode.
-  assert.deepEqual(Object.values(PhoneKey), [0xf100, 0xf101, 0xf102, 0xf103, 0xf104, 0xf105, 0xf106]);
+  assert.deepEqual(Object.values(PhoneKey), [0xf100, 0xf101, 0xf102, 0xf103, 0xf104, 0xf105, 0xf106, 0xf107, 0xf108]);
   const down = inputEvent(Input.KEY_DOWN, { keycode: PhoneKey.HOME });
   assert.equal(new DataView(down.buffer).getUint16(2, true), 0xf100, 'sent as an ordinary key press');
 });

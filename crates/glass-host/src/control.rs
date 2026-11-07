@@ -269,6 +269,11 @@ pub enum ServerMsg {
         pass: String,
         expires: u64,
     },
+    /// The displays changed with nothing streamed moving (a phone came, went, or changed
+    /// state): only the viewer's list is updated.
+    Displays {
+        displays: Vec<DisplayInfo>,
+    },
     Layout {
         streams: Vec<DisplayInfo>,
         /// Every display there is now: fitting adds a virtual one and hides the display it

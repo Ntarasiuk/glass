@@ -13,7 +13,8 @@ On a phone:
 - There's no pointer (`move_pointer`) and no recording yet.
 
 Glass reaches each phone through [WebDriverAgent](https://github.com/appium/appium-ios/tree/main/packages/webdriveragent)
-(Appium's XCTest server) running on it, forwarded to a port on this computer over USB.
+(Appium's XCTest server) running on it, on a port of this computer: over USB, or over Wi-Fi
+through Apple's device tunnel.
 
 ## Set up a phone
 
@@ -36,16 +37,37 @@ Glass reaches each phone through [WebDriverAgent](https://github.com/appium/appi
    On iOS 14 and older, Xcode 26 can't build a WebDriverAgent that runs: use a build made with
    Xcode 14 (Appium's v4.x release), re-signed with your team, and mount the developer disk image
    for that iOS version first (`ideviceimagemounter`).
-3. Tell Glass about it: `glass config phones xr=8100` (more than one: `xr=8100,se=8101`; the
-   picture's port is the command port plus 1000 unless given, e.g. `xr=8100:9200`).
+3. Tell Glass about it, with its UDID after `@` so Glass keeps it connected:
+   `glass config phones xr=8100@00008020-000649323451002E` (more than one:
+   `xr=8100@…,se=8101@…`; the picture's port is the command port plus 1000 unless given, e.g.
+   `xr=8100:9200@…`). `ios list` or `xcrun devicectl list devices` shows the UDID.
+
+## Glass keeps it connected
+
+With a UDID in its entry, Glass looks after the phone itself; nothing else needs to run:
+
+- It forwards the two ports to this computer's loopback: over USB through usbmuxd, over Wi-Fi
+  through Apple's device tunnel (whose address it looks up again when the phone reconnects).
+- It starts WebDriverAgent when it isn't answering, and again whenever it stops (after 5 s,
+  doubling to a minute while it keeps failing). With an Xcode build of WebDriverAgent for that
+  phone in `<config>/wda/<udid>/` (the `Build/Products` folder of `xcodebuild
+  build-for-testing`) it uses Xcode; otherwise go-ios (`ios` on the PATH, or `GLASS_GO_IOS`)
+  and the WebDriverAgent installed on the phone.
+- It doesn't keep asking a phone that isn't being used: when the iPhone's "allow UI
+  automation" prompt goes unanswered, Glass waits until someone locks and unlocks it (or 5
+  minutes) before asking again, and doesn't start WebDriverAgent on a locked phone.
+
+The viewer says what each phone needs: *starting…*, *locked*, *unlock it*, *allow
+automation*, or *offline* and why, in the Machines menu and over the phone's picture.
+
+Without a UDID, Glass only uses the ports; keeping WebDriverAgent running and forwarded there
+is up to you (`ios runwda …` and `ios forward 8100 8100`, `ios forward 9100 9100`).
 
 ## Over Wi-Fi
 
 A phone paired with Xcode over the network (iOS 17 and later) works without a cable. Turn on
-Settings → Developer → Enable UI Automation, run WebDriverAgent with
-`xcodebuild test-without-building`, and forward its two ports to this computer's loopback
-through Apple's device tunnel (`xcrun devicectl device info details` shows its
-`tunnelIPAddress`). Then add `/wifi`: `glass config phones pro=8200:9200/wifi`.
+Settings → Developer → Enable UI Automation, put an Xcode build of WebDriverAgent for it in
+`<config>/wda/<udid>/`, and add `/wifi`: `glass config phones pro=8200/wifi@<udid>`.
 
 With `/wifi` the picture comes at 30% size and 10 frames a second. The tunnel carries about
 6 Mbit/s, and a full-size picture fills it so touches wait seconds behind it; this way they
@@ -59,8 +81,10 @@ same network can drive the phone while it runs. Keep such a phone on a network y
 Phones are listed in the Machines menu, under the computer they're plugged into: pick one to
 see its live picture and use it with the pointer and keyboard, and pick the computer again to
 go back to its screen. A click is a tap, holding is a long press, a drag is a swipe (played back when it's
-released: WebDriverAgent plays a gesture as one request), and scrolling swipes. Home is the
-toolbar's button (Escape isn't Home: it's also how you leave fullscreen).
+released: WebDriverAgent plays a gesture as one request), scrolling swipes, a trackpad pinch
+pinches, and ⌘V types what's on your clipboard. Home is the toolbar's button (Escape isn't
+Home: it's also how you leave fullscreen). The pointer is a fingertip, and a ripple shows
+where each click landed. Turned on its side, the picture and touches turn with it.
 
 Phones are the owner's: only viewers with full control of the computer see them listed or can
 show one. Everyone connected sees the same screen, so a phone can't be shown while a guest, a

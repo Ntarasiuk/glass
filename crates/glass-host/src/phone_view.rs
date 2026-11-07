@@ -63,9 +63,26 @@ struct Feed {
 }
 
 impl Feed {
-    fn info(&self, x: f64) -> Option<DisplayInfo> {
-        let ((w, h), (pw, ph)) = (*self.size.lock().unwrap())?;
-        Some(DisplayInfo {
+    /// Its state for the viewer: what Glass's link to it says (phone_link), else whether
+    /// its picture is arriving.
+    fn state(&self) -> (&'static str, Option<String>) {
+        let live = self.live.load(Ordering::Relaxed);
+        use crate::phone_link::State;
+        match crate::phone_link::state(&self.phone.name) {
+            // Answering, but its picture hasn't come through yet.
+            Some(State::Ready | State::Locked) if !live => ("starting", None),
+            Some(s) => s.describe(),
+            None if live => ("ready", None),
+            None => ("offline", Some(format!("Nothing is answering on port {}: start WebDriverAgent and forward it there.", self.phone.video))),
+        }
+    }
+
+    /// As a display; one not sending its picture yet is listed too (at the size it last
+    /// had, or an iPhone's), so the viewer can say why.
+    fn info(&self, x: f64) -> DisplayInfo {
+        let ((w, h), (pw, ph)) = (*self.size.lock().unwrap()).unwrap_or(((1170, 2532), (390.0, 844.0)));
+        let (state, note) = self.state();
+        DisplayInfo {
             id: self.id,
             width: w,
             height: h,
@@ -75,8 +92,8 @@ impl Feed {
             points_height: ph,
             main: false,
             builtin: false,
-            phone: Some(PhoneTag { name: self.phone.name.clone(), wifi: self.phone.wifi }),
-        })
+            phone: Some(PhoneTag { name: self.phone.name.clone(), wifi: self.phone.wifi, state, note }),
+        }
     }
 }
 
@@ -126,6 +143,16 @@ impl Phones {
             tracing::warn!("phone {}: its picture stopped ({why}); viewers are back on the computer", feed.phone.name);
             crate::server::phone_hidden(&format!("{} stopped sending its picture, so here's the computer again.", feed.phone.name));
         }
+    }
+
+    /// Changes whenever a phone comes or goes, starts or stops sending its picture, or its
+    /// link's state changes: the viewer's list is sent again then.
+    pub fn signature(&self) -> u64 {
+        let mut h = crate::phone_link::generation().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for f in self.feeds.lock().unwrap().iter() {
+            h = h.wrapping_mul(31).wrapping_add(f.id as u64).wrapping_mul(2).wrapping_add(f.live.load(Ordering::Relaxed) as u64);
+        }
+        h
     }
 
     /// Starts a feed for each phone newly in the settings, and ends those taken out.
@@ -258,12 +285,9 @@ impl PhoneVideo {
         let mut x = beside.iter().map(|d| d.x + d.points_width).fold(0.0, f64::max) + 40.0;
         let mut out = Vec::new();
         for f in self.phones.feeds.lock().unwrap().iter() {
-            if f.live.load(Ordering::Relaxed)
-                && let Some(d) = f.info(x)
-            {
-                x += d.points_width + 40.0;
-                out.push(d);
-            }
+            let d = f.info(x);
+            x += d.points_width + 40.0;
+            out.push(d);
         }
         out
     }
@@ -654,6 +678,9 @@ fn stream(feed: &Arc<Feed>, phones: &Phones) -> Result<()> {
         let (bgra, w, h) = decode(&jpeg)?;
         stats.decoded += 1;
         stats.decode += started.elapsed();
+        // Turned on its side: the picture turns, and touches go in the turned screen's
+        // points (WebDriverAgent's size was read before).
+        let points = if (w > h) != (points.0 > points.1) { (points.1, points.0) } else { points };
         *feed.size.lock().unwrap() = Some(((w, h), points));
         feed.live.store(true, Ordering::Relaxed);
         if preview_due {
@@ -819,7 +846,7 @@ enum Cmd {
     Touch { phone: Phone, path: Vec<(f64, f64, u64)>, hold: u64 },
     Keys { phone: Phone, text: String },
     /// One of the phone's buttons or system gestures (glass_proto::phone_keys).
-    System { phone: Phone, key: u16, size: (f64, f64) },
+    System { phone: Phone, key: u16, size: (f64, f64), at: (f64, f64) },
     /// Scrolling at a point (points), by `dx`, `dy` (points, content moving up/left).
     Scroll { phone: Phone, at: (f64, f64), size: (f64, f64), dx: f64, dy: f64 },
 }
@@ -874,7 +901,10 @@ impl PhoneInput {
         use crate::keys::{COMMAND, CONTROL, OPTION, SHIFT};
         let cmd = |text: &str| Cmd::Keys { phone: phone.clone(), text: text.into() };
         let send = match keycode {
-            k if glass_proto::phone_keys::is_phone_key(k) => Cmd::System { phone: phone.clone(), key: k, size },
+            k if glass_proto::phone_keys::is_phone_key(k) => {
+                let at = (self.at.0 as f64 * size.0, self.at.1 as f64 * size.1);
+                Cmd::System { phone: phone.clone(), key: k, size, at }
+            }
             SHIFT | 0x3C => {
                 self.shift = true;
                 return;
@@ -986,6 +1016,17 @@ impl InputSink for PhoneInput {
         }
     }
 
+    /// ⌘V on a phone types what was pasted (WebDriverAgent can't reach its clipboard).
+    fn paste_text(&mut self, text: &str) -> bool {
+        let Some(feed) = self.phones.shown() else {
+            return self.inner.paste_text(text);
+        };
+        if !text.is_empty() {
+            self.send(Cmd::Keys { phone: feed.phone.clone(), text: text.to_string() });
+        }
+        true
+    }
+
     fn release_all(&mut self) {
         self.press = None;
         self.shift = false;
@@ -1053,10 +1094,14 @@ fn plan_touch(button: u8, samples: &[(f32, f32, u64)], up_ms: u64, (pw, ph): (f6
 }
 
 /// One of the phone's buttons or system gestures, as an iPhone without a Home button does it.
-fn system(phone: &Phone, key: u16, (w, h): (f64, f64)) -> Result<(), crate::computer::Refused> {
+fn system(phone: &Phone, key: u16, (w, h): (f64, f64), at: (f64, f64)) -> Result<(), crate::computer::Refused> {
     use glass_proto::phone_keys::*;
-    use crate::phone::{press_key, touch, touch_then_rest};
+    use crate::phone::{pinch, press_key, touch, touch_then_rest};
+    // Room for both fingers, kept on the screen.
+    let centre = (at.0.clamp(70.0, (w - 70.0).max(70.0)), at.1.clamp(20.0, (h - 20.0).max(20.0)));
     match key {
+        PINCH_OUT => pinch(phone, centre, 40.0, 130.0, 250),
+        PINCH_IN => pinch(phone, centre, 130.0, 40.0, 250),
         HOME => press_key(phone, "home"),
         VOLUME_UP => press_key(phone, "volume_up"),
         VOLUME_DOWN => press_key(phone, "volume_down"),
@@ -1101,7 +1146,7 @@ fn input_worker(rx: mpsc::Receiver<Cmd>) {
         };
         let done = match cmd {
             Cmd::Touch { phone, path, hold } => crate::phone::touch(&phone, &path, hold),
-            Cmd::System { phone, key, size } => system(&phone, key, size),
+            Cmd::System { phone, key, size, at } => system(&phone, key, size, at),
             Cmd::Keys { phone, mut text } => {
                 // Typing outruns the phone: send what's queued together.
                 while let Ok(more) = rx.try_recv() {
@@ -1222,7 +1267,7 @@ mod tests {
     /// A phone sending its picture (on a port nothing answers on: what's sent to it fails).
     fn test_feed() -> Arc<Feed> {
         Arc::new(Feed {
-            phone: Phone { name: "xr".into(), port: 1, video: 2, wifi: false },
+            phone: Phone { name: "xr".into(), port: 1, video: 2, wifi: false, udid: None },
             id: ID_BASE | 7,
             size: Mutex::new(Some(((828, 1792), (414.0, 896.0)))),
             live: AtomicBool::new(true),
@@ -1386,10 +1431,13 @@ mod tests {
         assert_eq!((video.streams()[0].id, feed.slot.load(Ordering::Relaxed)), (1, -1));
         assert!(fake.layouts.lock().unwrap().len() == 1, "the computer's capture went on as it was");
 
-        // A phone not sending its picture can't be shown.
+        // A phone not sending its picture can't be shown, but is still listed, saying why.
         feed.live.store(false, Ordering::Relaxed);
         assert!(video.set_layout(Layout::Single(Some(ID_BASE | 7))).is_err());
-        assert!(video.displays().unwrap().iter().all(|d| !is_phone_display(d.id)));
+        let listed = video.displays().unwrap().into_iter().find(|d| d.id == ID_BASE | 7).expect("still listed");
+        let tag = listed.phone.unwrap();
+        assert_eq!(tag.state, "offline");
+        assert!(tag.note.unwrap().contains(&feed.phone.video.to_string()));
     }
 
     #[test]

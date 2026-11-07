@@ -313,7 +313,45 @@ const input = attachInput({
     cursor.refresh();
   },
   onResize: () => cursor.refresh(),
+  onPinch: (e) => phonePinch(e),
 });
+
+// A trackpad pinch over a phone, as two-finger pinches there: summed over the gesture, then
+// sent once it pauses (one to three, by how far it went).
+let pinchSum = 0;
+let pinchTimer;
+function phonePinch(e) {
+  if (!document.body.classList.contains('phone')) return false;
+  pinchSum -= e.deltaY;
+  clearTimeout(pinchTimer);
+  pinchTimer = setTimeout(() => {
+    const size = Math.abs(pinchSum);
+    if (size >= 8) {
+      const key = pinchSum > 0 ? PhoneKey.PINCH_OUT : PhoneKey.PINCH_IN;
+      for (let i = 0; i < Math.min(3, Math.ceil(size / 40)); i++) input.sendCombo([key]);
+    }
+    pinchSum = 0;
+  }, 140);
+  return true;
+}
+
+// Where a click lands on a phone, shown for a moment: there's no pointer on the phone itself.
+screens.addEventListener('pointerdown', (e) => {
+  if (!document.body.classList.contains('phone') || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  const ripple = document.createElement('div');
+  ripple.className = 'tap-ripple';
+  ripple.style.translate = `${e.clientX}px ${e.clientY}px`;
+  ripple.addEventListener('animationend', () => ripple.remove(), { once: true });
+  document.body.append(ripple);
+}, { passive: true });
+
+/** The shown phone's state, said over its picture when it needs something. */
+function showPhoneState() {
+  const shown = streamIds.length === 1 ? displays.find((d) => d.id === streamIds[0] && d.phone) : undefined;
+  const p = shown?.phone;
+  ui.setPhoneNote(p && p.state !== 'ready' ? `${p.name}: ${p.note ?? PHONE_STATE[p.state] ?? p.state}` : null);
+}
+const PHONE_STATE = { locked: 'locked', starting: 'starting…', unlock: 'unlock it', approve: 'allow automation on it', offline: 'offline' };
 // The host's pointer, drawn here rather than in the video (where the host supports it).
 const cursor = createCursor({
   screens,
@@ -944,6 +982,12 @@ function onControl(msg) {
       if (msg.displays) displays = msg.displays;
       onLayout(msg.streams);
       break;
+    case 'displays':
+      // A phone came, went or changed state; nothing streamed moved.
+      displays = msg.displays;
+      ui.renderDisplays(displays, streamIds);
+      showPhoneState();
+      break;
     case 'waiting':
       showStatus('connecting', 'Waiting to be let in', msg.msg);
       break;
@@ -1364,6 +1408,7 @@ function onLayout(streams) {
   showStreams(streams.length);
   ui.renderDisplays(displays, streams.map((d) => d.id));
   streamIds = streams.map((d) => d.id);
+  showPhoneState();
   // Phones are picked from the machines menu, not previewed beside the computer's displays.
   thumbs.setDisplays(displays.filter((d) => !streamedWindows.has(d.id) && !d.phone), streams.map((d) => d.id));
 }

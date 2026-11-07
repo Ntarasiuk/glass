@@ -55,6 +55,7 @@ mod sharp;
 mod terminal;
 mod wol;
 mod phone;
+mod phone_link;
 mod phone_view;
 mod rate;
 mod refresh;
@@ -1446,7 +1447,9 @@ async fn run_host(args: Args) -> Result<()> {
         args.fps as u32,
     );
     let video: Arc<dyn media::VideoSource> = video;
-    let injector = phone_view::wrap_input(injector, phones);
+    let injector = phone_view::wrap_input(injector, phones.clone());
+    // Glass keeps the link up to phones with a UDID in their entry (phone_link).
+    phone_link::start();
     status::set_capturing(true);
     // The sign-in host neither updates itself nor takes CLI commands (the user's host,
     // started at sign-in, does).
@@ -1474,15 +1477,26 @@ async fn run_host(args: Args) -> Result<()> {
     });
     // Once a second: restart any capture that ended, and re-share the bitrate between
     // displays by activity.
+    // And when a phone comes, goes or changes state, viewers get the new list.
     {
         let video = shared.video.clone();
+        let events = shared.events.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            let mut phones_were = phones.signature();
             loop {
                 tick.tick().await;
                 let v = video.clone();
                 let _ = tokio::task::spawn_blocking(move || v.heal()).await;
                 video.rebalance();
+                let now = phones.signature();
+                if now != phones_were {
+                    phones_were = now;
+                    let v = video.clone();
+                    if let Ok(Ok(displays)) = tokio::task::spawn_blocking(move || v.displays()).await {
+                        let _ = events.send(control::ServerMsg::Displays { displays });
+                    }
+                }
             }
         });
     }

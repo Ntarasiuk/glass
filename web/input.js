@@ -39,7 +39,7 @@ const MODIFIER_KEYCODES = new Set(MODIFIER_CODES.map((c) => MAC_KEYCODES[c]));
  */
 export function attachInput({
   screens, keySink, send: sendNow, control, nextClipboard, onMacCopy = () => {}, onPaste, onLocalShortcut, swapCmdOption = false,
-  ctrlAsCmd = true, pcKeyboard = false, onZoom, onResize = () => {},
+  ctrlAsCmd = true, pcKeyboard = false, onZoom, onResize = () => {}, onPinch = () => false,
 }) {
   // With iPadOS set to turn the physical ⌘ key into ⌥ (so it can't claim ⌘Tab etc.),
   // swap them back here so the Mac gets the keys the user actually pressed.
@@ -221,6 +221,11 @@ export function attachInput({
     const canvas = canvasOf(e);
     // Point at the screen being scrolled first, so the scroll lands on that display.
     sendMove(e.clientX, e.clientY, canvas);
+    // A trackpad pinch (the browser sends it as Ctrl+wheel): a phone's own, when it wants it.
+    if (e.ctrlKey && onPinch(e)) {
+      e.preventDefault();
+      return;
+    }
     const { dx, dy } = wheelPixels(e);
     scrollBy(dx, dy, canvas);
     e.preventDefault();

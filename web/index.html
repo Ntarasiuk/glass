@@ -585,6 +585,21 @@
       cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28'%3E%3Ccircle cx='14' cy='14' r='11' fill='rgb(255 255 255 / 0.35)' stroke='rgb(0 0 0 / 0.55)' stroke-width='2'/%3E%3Ccircle cx='14' cy='14' r='1.5' fill='rgb(0 0 0 / 0.7)'/%3E%3C/svg%3E") 14 14, crosshair !important;
     }
     body.phone #remote-cursor { display: none !important; }
+    /* What a shown phone needs (unlocking it…), over its picture. */
+    #phone-note {
+      position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 24px); transform: translateX(-50%);
+      max-width: min(90vw, 44ch); padding: 10px 16px; border-radius: 999px; text-align: center;
+      font-size: 14px; font-weight: 550; line-height: 1.35; pointer-events: none;
+    }
+    body:not(.phone) #phone-note { display: none; }
+    /* Where a click landed on a phone. */
+    .tap-ripple {
+      position: fixed; top: 0; left: 0; width: 36px; height: 36px; margin: -18px 0 0 -18px;
+      border-radius: 50%; background: rgb(255 255 255 / 0.4); box-shadow: 0 0 0 2px rgb(0 0 0 / 0.25);
+      pointer-events: none; z-index: 5; animation: tap-ripple 380ms var(--ease-out) forwards;
+    }
+    @keyframes tap-ripple { from { transform: scale(0.35); opacity: 1; } to { transform: scale(1.5); opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .tap-ripple { animation-duration: 1ms; } }
     #auth .sso { display: block; padding: 11px; border-radius: var(--radius-sm); border: 1px solid var(--border); color: var(--text); text-align: center; text-decoration: none; font-weight: 600; }
     #auth .sso:hover { background: var(--surface-hover); }
     #auth .ldap { display: grid; gap: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
@@ -762,6 +777,7 @@
     <button id="thumbs-hide" type="button" title="Hide previews" aria-label="Hide previews"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></button>
   </nav>
   <button id="thumbs-show" class="glass hidden" type="button" title="Show display previews" aria-label="Show display previews"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="6" height="10" rx="1"/><rect x="9" y="7" width="6" height="10" rx="1"/><rect x="16" y="7" width="6" height="10" rx="1"/></svg></button>
+  <div id="phone-note" class="glass hidden" role="status" aria-live="polite"></div>
   <div id="zoom-pill" class="glass hidden"><span id="zoom-level">1×</span><button id="zoom-reset" type="button">Reset</button></div>
   <div id="toasts" aria-live="polite"></div>
   <input id="file-input" type="file" multiple class="hidden">
