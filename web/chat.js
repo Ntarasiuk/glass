@@ -8,6 +8,8 @@ export function createChat({ onSend, toast }) {
   const button = document.createElement('button');
   button.id = 'btn-chat';
   button.title = 'Chat';
+  // With the people at the computer: not shown while a phone is (index.html, body.phone).
+  button.dataset.computer = '';
   button.setAttribute('aria-haspopup', 'true');
   button.setAttribute('aria-expanded', 'false');
   button.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.6A8 8 0 1 1 21 12z"/></svg><span class="dot hidden"></span>';

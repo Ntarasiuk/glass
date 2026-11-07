@@ -18,6 +18,17 @@ pub struct DisplayInfo {
     pub points_height: f64,
     pub main: bool,
     pub builtin: bool,
+    /// Set when this "display" is a phone's screen (see phone_view): what to call it in the
+    /// viewer, which lists phones under their computer rather than among its displays.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phone: Option<PhoneTag>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PhoneTag {
+    pub name: String,
+    /// Reached over Wi-Fi rather than USB.
+    pub wifi: bool,
 }
 
 pub struct EncodedFrame {

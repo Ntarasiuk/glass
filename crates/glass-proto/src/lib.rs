@@ -323,6 +323,31 @@ pub fn pong(ping: &[u8], host_us: u64) -> Option<[u8; 24]> {
 
 pub const INPUT_EVENT_LEN: usize = 12;
 
+/// Displays with ids from here on are phones connected to the host, not its own screens (the
+/// viewer shows phone buttons for them instead of the computer's).
+pub const PHONE_DISPLAY_BASE: u32 = 0x7A00_0000;
+
+pub fn is_phone_display(id: u32) -> bool {
+    id & 0xFF00_0000 == PHONE_DISPLAY_BASE
+}
+
+/// Keycodes for a phone's buttons and system gestures, sent as `KeyDown` while a phone is
+/// shown. Above every macOS keycode, so the computer never takes one for a key.
+pub mod phone_keys {
+    pub const HOME: u16 = 0xF100;
+    pub const APP_SWITCHER: u16 = 0xF101;
+    pub const CONTROL_CENTER: u16 = 0xF102;
+    pub const NOTIFICATIONS: u16 = 0xF103;
+    pub const SPOTLIGHT: u16 = 0xF104;
+    pub const VOLUME_UP: u16 = 0xF105;
+    pub const VOLUME_DOWN: u16 = 0xF106;
+
+    /// Whether `keycode` is one of these.
+    pub fn is_phone_key(keycode: u16) -> bool {
+        (HOME..=VOLUME_DOWN).contains(&keycode)
+    }
+}
+
 /// type u8 | button u8 | keycode u16 | a f32 | b f32 (for moves, `button` is the stream)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InputEvent {

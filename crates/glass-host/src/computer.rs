@@ -270,12 +270,15 @@ fn shared() -> Result<std::sync::Arc<crate::server::Shared>, Refused> {
     crate::server::shared().ok_or_else(|| Refused("Glass isn't ready".into()))
 }
 
+/// The computer's displays. Phones are left out: agents use them with `phone`, where their
+/// own rules apply (this computer's front-app checks can't see into a phone).
 async fn displays() -> Result<Vec<DisplayInfo>, Refused> {
     let shared = shared()?;
-    tokio::task::spawn_blocking(move || shared.video.displays())
+    let all = tokio::task::spawn_blocking(move || shared.video.displays())
         .await
         .map_err(|e| Refused(e.to_string()))?
-        .map_err(|e| Refused(format!("{e:#}")))
+        .map_err(|e| Refused(format!("{e:#}")))?;
+    Ok(all.into_iter().filter(|d| !crate::phone_view::is_phone_display(d.id)).collect())
 }
 
 /// The display meant: `id`, or the main one.
@@ -745,7 +748,7 @@ pub fn withdraw(id_text: &str) {
 
 /// One action by an agent under a grant: allowed by its scopes and budget, run with the
 /// grant in force (so input is checked against its apps), and written to the audit log.
-pub async fn act_as(grant: &crate::grants::Grant, action: Action, charge: bool) -> Result<Value, Refused> {
+pub async fn act_as(grant: &crate::grants::Grant, phone: Option<String>, action: Action, charge: bool) -> Result<Value, Refused> {
     let (name, view_only) = action.describe();
     let needed = if view_only { crate::grants::VIEW } else { crate::grants::USE };
     if !grant.has(needed) {
@@ -770,11 +773,16 @@ pub async fn act_as(grant: &crate::grants::Grant, action: Action, charge: bool) 
         }
     }
     AGENT_AT.store(epoch_ms(), std::sync::atomic::Ordering::Relaxed);
-    let detail = action.audit_detail();
-    // The app in front when it acted (after, a click may have switched apps).
-    let app = crate::grants::frontmost_app();
+    let on_phone = crate::phone::routes(phone.as_deref(), &action);
+    let detail = match (&phone, on_phone) {
+        (Some(p), true) => format!("{} (phone {p})", action.audit_detail()).trim_start().to_string(),
+        _ => action.audit_detail(),
+    };
+    // The app in front when it acted (after, a click may have switched apps): on the phone
+    // when it's for one.
+    let app = if on_phone { crate::phone::front_app(phone.clone(), &action).await } else { crate::grants::frontmost_app() };
     let actor = crate::grants::Actor::Agent(grant.clone());
-    let result = crate::grants::ACTOR.scope(actor, act(action)).await;
+    let result = crate::grants::ACTOR.scope(actor, act_on(phone, action)).await;
     AGENT_AT.store(epoch_ms(), std::sync::atomic::Ordering::Relaxed);
     match &result {
         Ok(_) => crate::grants::audit(grant, name, &detail, app.as_deref(), true),
@@ -871,6 +879,17 @@ pub enum Action {
     /// Records the screen for `seconds`, or starts a recording (`start`) or stops one
     /// (`stop`, its id).
     Record { seconds: Option<f64>, #[serde(default)] start: bool, stop: Option<u64> },
+    /// The phones set up on this computer (see phone.rs).
+    Phones,
+}
+
+/// An action, and the phone it's for when not this computer.
+#[derive(Deserialize)]
+pub struct Request {
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(flatten)]
+    pub action: Action,
 }
 
 impl Action {
@@ -892,6 +911,7 @@ impl Action {
             Action::Confirm { .. } => ("confirm", false),
             Action::CheckAnswer { .. } => ("check_answer", false),
             Action::Record { .. } => ("record", true),
+            Action::Phones => ("list_phones", true),
         }
     }
 
@@ -918,8 +938,17 @@ impl Action {
                 (None, true) => "start".into(),
                 (None, false) => format!("{} s", seconds.unwrap_or(5.0)),
             },
+            Action::Phones => String::new(),
         }
     }
+}
+
+/// One action on this computer, or on the phone it names (or whose snapshot ref it uses).
+pub async fn act_on(phone: Option<String>, action: Action) -> Result<Value, Refused> {
+    if crate::phone::routes(phone.as_deref(), &action) {
+        return crate::phone::act(phone, action).await;
+    }
+    act(action).await
 }
 
 pub async fn act(action: Action) -> Result<Value, Refused> {
@@ -972,6 +1001,7 @@ async fn run(action: Action) -> Result<Value, Refused> {
             (None, true) => crate::clips::start().await,
             (None, false) => crate::clips::record(crate::clips::record_len(seconds.unwrap_or(5.0))?).await,
         },
+        Action::Phones => crate::phone::act(None, Action::Phones).await,
     }
 }
 
@@ -983,8 +1013,8 @@ async fn http_act(peer: Peer, headers: HeaderMap, body: axum::body::Bytes) -> Re
     if let Some(r) = crate::origin::require_json(&headers) {
         return r;
     }
-    match serde_json::from_slice::<Action>(&body) {
-        Ok(action) => reply(act(action).await),
+    match serde_json::from_slice::<Request>(&body) {
+        Ok(Request { phone, action }) => reply(act_on(phone, action).await),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
     }
 }
@@ -994,7 +1024,7 @@ mod tests {
     use super::*;
 
     fn display(w: usize, h: usize) -> DisplayInfo {
-        DisplayInfo { id: 99, width: w, height: h, x: 0.0, y: 0.0, points_width: w as f64, points_height: h as f64, main: true, builtin: false }
+        DisplayInfo { id: 99, width: w, height: h, x: 0.0, y: 0.0, points_width: w as f64, points_height: h as f64, main: true, builtin: false, phone: None }
     }
 
     #[test]

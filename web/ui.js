@@ -19,7 +19,7 @@ const storageSet = (key, value) => {
 };
 
 
-export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onSas, onToken, onTerminal = () => {}, onOpenDevice = () => {}, onTrackpad = () => {}, onPad = () => {}, onExtend = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
+export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () => {}, onSelectDisplay, onSharp, onListWindows, onSelectWindow, onShortcut, shortcuts, swapCmdOption, onSwapCmdOption, ctrlAsCmd, onCtrlAsCmd, pcKeyboard, onPcKeyboard, onKeyboard, onUploadFiles, onRequestFiles, onAudio, onMic, onFullscreen, onToggleStats, onPrivacy, onRestart, onSas, onToken, onTerminal = () => {}, onPhoneKey = () => {}, onOpenDevice = () => {}, onTrackpad = () => {}, onPad = () => {}, onExtend = () => {}, resolution = 'auto', onResolution, fitSizes = () => [], deviceName = () => 'device' }) {
   const toolbar = $('toolbar');
   // Each toolbar menu: its button and panel.
   const menus = {
@@ -98,6 +98,10 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   on('btn-ports', () => toggleMenu('ports'));
   on('btn-hide-toolbar', () => setToolbarHidden(true));
   on('btn-trackpad', () => onTrackpad());
+  for (const b of toolbar.querySelectorAll('[data-phone-key]')) {
+    b.addEventListener('pointerdown', (e) => e.preventDefault()); // keep keyboard focus
+    b.addEventListener('click', (e) => { e.preventDefault(); onPhoneKey(b.dataset.phoneKey); });
+  }
 
   // Phones: each toolbar group is one button with a dropdown (CSS decides when). A group
   // knows how many of its buttons show, so one with a single button shows it directly.
@@ -109,7 +113,10 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
         const label = (b.title || '').replace(/\s*\(.*\)$/, '');
         if (b.dataset.label !== label) b.dataset.label = label;
       }
-      const n = String(g.querySelectorAll('.tb-items > button:not(.hidden)').length);
+      // On a phone only its buttons count, elsewhere only the computer's (index.html).
+      const phone = document.body.classList.contains('phone');
+      const n = String([...g.querySelectorAll('.tb-items > button:not(.hidden)')]
+        .filter((b) => (phone ? !('computer' in b.dataset) : !('phone' in b.dataset))).length);
       if (g.dataset.n !== n) g.dataset.n = n;
     }
   }
@@ -187,6 +194,10 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     }
   }, { capture: true });
 
+  function withClass(el, name) {
+    el.classList.add(name);
+    return el;
+  }
   function menuItem(label, meta, { checked, onSelect }) {
     const b = document.createElement('button');
     b.setAttribute('role', checked === undefined ? 'menuitem' : 'menuitemradio');
@@ -342,27 +353,71 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
   }
   renderShortcuts();
 
+  // This machine's phones (displays tagged `phone` by the host), listed under it in the
+  // machines menu rather than among its displays; and the one shown, if any.
+  let phoneList = [];
+  let phoneShown = null;
+  let lastMachines;
+  // The computer's own main display, to go back to from a phone.
+  let computerMain = null;
+  const showComputer = () => computerMain != null && onSelectDisplay(computerMain);
+  function phoneItems() {
+    return phoneList.map((d) => {
+      const shown = phoneShown === d.id;
+      const item = menuItem(d.phone.name, `iPhone · ${d.phone.wifi ? 'Wi-Fi' : 'USB'}${shown ? ' · showing' : ''}`, {
+        checked: shown,
+        onSelect: () => {
+          setMenuOpen('machines', false);
+          if (!shown) onSelectDisplay(d.id);
+        },
+      });
+      item.classList.add('sub');
+      return item;
+    });
+  }
+  /** Puts this machine's phones right after its own item (or first, under a heading). */
+  function withPhones(children, currentItem) {
+    const phones = phoneItems();
+    if (!phones.length) return children;
+    const at = children.indexOf(currentItem);
+    if (at >= 0) return [...children.slice(0, at + 1), ...phones, ...children.slice(at + 1)];
+    const heading = document.createElement('p');
+    heading.className = 'note';
+    heading.textContent = 'This computer';
+    const screen = menuItem('Its screen', '', {
+      checked: !phoneShown,
+      onSelect: () => {
+        setMenuOpen('machines', false);
+        if (phoneShown) showComputer();
+      },
+    });
+    return [heading, screen, ...phones, document.createElement('hr'), ...children];
+  }
+
   /** `current` is the id ("host" or "host:port") of the machine this session is on. */
   function renderMachines(machines, current, groups = []) {
+    lastMachines = [machines, current, groups];
     if (!machines) {
-      menus.machines.panel.replaceChildren(menuItem('Looking for machines…', '', { onSelect: () => {} }));
+      menus.machines.panel.replaceChildren(...withPhones([menuItem('Looking for machines…', '', { onSelect: () => {} })], null));
       return;
     }
     // An offline machine whose network address Glass has seen can be woken up (Wake-on-LAN).
     const wakeable = (m) => !m.online && m.macs?.length > 0;
-    const status = (m) => (m.id === current ? 'connected' : wakeable(m) ? 'offline · wake' : !m.online ? 'offline' : !m.glass ? 'Glass not running' : m.os);
+    const status = (m) => (m.id === current ? (phoneShown ? 'connected · show its screen' : 'connected') : wakeable(m) ? 'offline · wake' : !m.online ? 'offline' : !m.glass ? 'Glass not running' : m.os);
     const items = machines.map((m) => {
       const item = menuItem(m.name, status(m), {
-        checked: m.id === current,
+        checked: m.id === current && !phoneShown,
         onSelect: () => {
           setMenuOpen('machines', false);
           if (wakeable(m)) onWakeMachine(m);
           else if (m.id !== current) onSelectMachine(m);
+          else if (phoneShown) showComputer();
         },
       });
       item.disabled = m.id !== current && !wakeable(m) && (!m.online || !m.glass);
       return item;
     });
+    const currentItem = items[machines.findIndex((m) => m.id === current)] ?? null;
     if (!items.length) items.push(menuItem('No machines found', 'needs Tailscale', { onSelect: () => {} }));
     // Groups from the console's address book, as headings; the rest after them.
     const groupOf = (m) => groups.find((g) => g.machines.includes(m.dns?.toLowerCase()))?.name;
@@ -379,14 +434,25 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
         if (!members.length) continue;
         out.push(heading(g ?? 'Other'), ...members.map(([, item]) => item));
       }
-      menus.machines.panel.replaceChildren(...out);
+      menus.machines.panel.replaceChildren(...withPhones(out, currentItem));
       return;
     }
-    menus.machines.panel.replaceChildren(...items);
+    menus.machines.panel.replaceChildren(...withPhones(items, currentItem));
   }
 
   /** `streamed` lists the display ids currently shown, in stream order. */
-  function renderDisplays(displays, streamed) {
+  function renderDisplays(withPhoneDisplays, streamed) {
+    // Phones go in the machines menu, under this machine.
+    const phones = withPhoneDisplays.filter((d) => d.phone);
+    const shownPhone = streamed.length === 1 && phones.some((d) => d.id === streamed[0]) ? streamed[0] : null;
+    const phonesChanged = phones.map((d) => `${d.id}${d.phone.name}${d.phone.wifi}`).join() !== phoneList.map((d) => `${d.id}${d.phone.name}${d.phone.wifi}`).join();
+    const displays = withPhoneDisplays.filter((d) => !d.phone);
+    computerMain = (displays.find((d) => d.main) ?? displays[0])?.id ?? null;
+    if (phonesChanged || shownPhone !== phoneShown) {
+      phoneList = phones;
+      phoneShown = shownPhone;
+      if (lastMachines) renderMachines(...lastMachines);
+    }
     const all = streamed.length > 1;
     const names = positionNames(displays);
     const ordered = [...displays].sort((a, b) => a.x - b.x || a.y - b.y);
@@ -401,13 +467,13 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     );
     if (displays.length > 1) {
       items.push(
-        menuItem('All displays', `${displays.length} side by side`, {
+        withClass(menuItem('All displays', `${displays.length} side by side`, {
           checked: all,
           onSelect: () => {
             setMenuOpen('displays', false);
             if (!all) onSelectDisplay('all');
           },
-        }),
+        }), 'all-displays'),
       );
     }
     // This screen as one more display of the Mac's, beside its main one.
@@ -479,7 +545,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
         items.push(item);
       }
     }
-    lastDisplays = [displays, streamed];
+    lastDisplays = [withPhoneDisplays, streamed];
     menus.displays.panel.replaceChildren(...items);
   }
   let resolutionMode = resolution;
@@ -713,6 +779,16 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     setStatsPressed(on) {
       statsOn = on;
       renderMore();
+    },
+    /**
+     * A phone is shown: the toolbar has its buttons instead of the computer's, and what only a
+     * computer has (other displays, a terminal, the shortcut bar) is put away (index.html).
+     */
+    setPhone(on) {
+      if (document.body.classList.contains('phone') === on) return;
+      document.body.classList.toggle('phone', on);
+      for (const g of groups) setGroupOpen(g, false);
+      countGroups();
     },
     /** The ⌘ menu (Mac shortcuts and key remaps) only applies to Mac hosts. */
     setHostOs(os) {

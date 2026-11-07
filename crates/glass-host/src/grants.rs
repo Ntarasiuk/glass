@@ -195,6 +195,28 @@ pub struct Access {
 }
 
 impl Grant {
+    /// A full-access grant for tests, optionally limited to some apps.
+    #[cfg(test)]
+    pub fn for_test(apps: Option<Vec<String>>) -> Grant {
+        Grant {
+            id: "t1".into(),
+            client_id: "c1".into(),
+            client_name: "Test".into(),
+            domain: "agent.example".into(),
+            subject: "user".into(),
+            scopes: vec![VIEW.into(), USE.into()],
+            apps,
+            created: 1000,
+            last_used: 1000,
+            approved_by: "test".into(),
+            revoked: false,
+            refresh: None,
+            retired: Vec::new(),
+            rotated: 0,
+            access: Vec::new(),
+        }
+    }
+
     pub fn live(&self, now: u64) -> bool {
         !self.revoked
             && now < self.created + MAX_SECS

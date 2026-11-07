@@ -74,6 +74,7 @@ Windows shipped in 0.13.0 (beta); a ✅ there means it ran in a Windows 11 Arm V
 | Agents wait while you use it | ✅ | ❌ | 🧪 | |
 | Agents kept out of password fields | ✅ | ✅ lock screen only | 🧪 lock screen only | |
 | Front-app rules for agents | ✅ | ❌ | 🧪 | |
+| Agents on iPhones over USB ([phones](phones.md)) | ✅ | ? | ? | WebDriverAgent; ran on an iPhone XR, iOS 14.8.1 |
 
 ## Running it
 

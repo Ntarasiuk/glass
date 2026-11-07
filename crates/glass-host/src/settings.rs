@@ -40,6 +40,9 @@ pub struct Settings {
     pub accent: Option<String>,
     /// A self-hosted introducer for remote access (site/selfhost), instead of glassdesk.dev.
     pub relay: Option<String>,
+    /// Phones agents may use, as `name=port`: WebDriverAgent forwarded to that loopback
+    /// port (see phone.rs).
+    pub phones: Vec<String>,
     /// More host names the web server answers for (`.example.com` covers its subdomains),
     /// besides IP addresses, localhost and this computer's own names (see origin.rs).
     pub allowed_hosts: Vec<String>,
@@ -209,6 +212,7 @@ pub const KEYS: &[(&str, &str)] = &[
         },
     ),
     ("agents", "on/off: AI agents on other devices may ask to use this computer (glass agents)"),
+    ("phones", "iPhones agents may use, name=port of their WebDriverAgent on this computer, e.g. xr=8100 (add /wifi for one reached over Wi-Fi)"),
     ("forward-ports", "comma-separated ports owner devices may open, e.g. 3000,8888"),
     (
         "bind",
@@ -295,6 +299,7 @@ impl Settings {
             "lid-awake" => show_bool(self.lid_awake),
             // Kept with the agents' grants, not here.
             "agents" => show_bool(crate::grants::load().enabled),
+            "phones" => self.phones.join(","),
             "forward-ports" => self
                 .forward_ports
                 .iter()
@@ -363,6 +368,13 @@ impl Settings {
                 self.lid_awake = on;
             }
             "agents" => crate::grants::set_enabled(on_off(value)?)?,
+            "phones" => {
+                let phones = crate::phone::parse(&list(value))?;
+                let mut names: Vec<_> = phones.iter().map(|p| p.name.as_str()).collect();
+                names.sort_unstable();
+                anyhow::ensure!(names.windows(2).all(|w| w[0] != w[1]), "two phones have the same name");
+                self.phones = phones.iter().map(crate::phone::Phone::entry).collect();
+            }
             "forward-ports" => {
                 self.forward_ports = value
                     .split([',', ' '])

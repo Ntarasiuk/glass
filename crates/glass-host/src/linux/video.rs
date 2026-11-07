@@ -271,6 +271,7 @@ impl Video {
                     points_height: h,
                     main: i == 0,
                     builtin: false,
+                    phone: None,
                 }),
                 slot: AtomicI32::new(-1),
                 latest: Mutex::new(None),

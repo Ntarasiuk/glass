@@ -134,6 +134,7 @@ mod tests {
             points_height: h as f64,
             main: true,
             builtin: false,
+            phone: None,
         }
     }
 

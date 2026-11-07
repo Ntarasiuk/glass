@@ -668,6 +668,7 @@ impl Window {
             points_height: self.info.points_height,
             main: false,
             builtin: false,
+            phone: None,
         }
     }
 }
@@ -832,6 +833,7 @@ pub fn list_displays() -> Result<Vec<Display>> {
                 points_height: bounds.size.height,
                 main: CGDisplayIsMain(id),
                 builtin: CGDisplayIsBuiltin(id),
+                phone: None,
             };
             Display { sc, info }
         })

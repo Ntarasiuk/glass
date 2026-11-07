@@ -54,6 +54,8 @@ mod signin;
 mod sharp;
 mod terminal;
 mod wol;
+mod phone;
+mod phone_view;
 mod rate;
 mod refresh;
 mod remote;
@@ -1344,6 +1346,8 @@ async fn run_host(args: Args) -> Result<()> {
     };
     status::start(Some(url.clone()));
 
+    // The computer's own frames, which phone_view passes on unless a phone is shown.
+    let (computer_frames, _) = broadcast::channel(8);
     let (video, injector, clipboard, tailnet_owner, _awake): (
         Arc<dyn media::VideoSource>,
         Box<dyn media::InputSink>,
@@ -1352,7 +1356,7 @@ async fn run_host(args: Args) -> Result<()> {
         _,
     ) = if args.test {
         let video = Arc::new(testmode::TestVideo::new(
-            frames.clone(),
+            computer_frames.clone(),
             args.fps as u32,
             (args.mbps * 1_000_000) as u32,
         ));
@@ -1381,7 +1385,7 @@ async fn run_host(args: Args) -> Result<()> {
                 bitrate: args.mbps * 1_000_000,
                 scale: args.scale,
             },
-            frames.clone(),
+            computer_frames.clone(),
             audio.clone(),
         ));
         if input::has_accessibility() {
@@ -1433,6 +1437,16 @@ async fn run_host(args: Args) -> Result<()> {
             awake,
         )
     };
+    // Phones set up for agents are displays too, with the viewer's input going to them.
+    let (video, phones) = phone_view::wrap(
+        video,
+        computer_frames,
+        frames.clone(),
+        (args.mbps * 1_000_000) as u32,
+        args.fps as u32,
+    );
+    let video: Arc<dyn media::VideoSource> = video;
+    let injector = phone_view::wrap_input(injector, phones);
     status::set_capturing(true);
     // The sign-in host neither updates itself nor takes CLI commands (the user's host,
     // started at sign-in, does).

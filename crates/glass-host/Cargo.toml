@@ -40,6 +40,9 @@ hyper-util = { version = "0.1.21", features = ["tokio"] }
 rtc = { version = "0.21.1", default-features = false }
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
 png = "0.17"
+# Phones' live pictures (WebDriverAgent's MJPEG), see phone_view.rs.
+zune-jpeg = "0.5.15"
+zune-core = "0.5.3"
 zip = { version = "7", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]

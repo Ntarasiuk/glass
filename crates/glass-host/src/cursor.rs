@@ -432,6 +432,7 @@ mod tests {
             points_height: 400.0,
             main: false,
             builtin: false,
+            phone: None,
         }
     }
 

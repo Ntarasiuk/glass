@@ -800,6 +800,7 @@ impl Video {
                 // The primary display has the desktop's origin.
                 main: r.x == 0.0 && r.y == 0.0,
                 builtin: false,
+                phone: None,
             }),
             device: device.clone(),
             present: AtomicBool::new(true),
@@ -878,6 +879,7 @@ fn window_stream(id: u32, [l, t, r, b]: [i32; 4]) -> DisplayInfo {
         points_height: (b - t) as f64,
         main: false,
         builtin: false,
+        phone: None,
     }
 }
 

@@ -1,7 +1,7 @@
 // Main thread: wires input, UI and the worker together. Video and networking live
 // in worker.js so the main thread only handles input and small DOM updates.
 
-import { Input, inputEvent } from './proto.js';
+import { Input, inputEvent, isPhoneDisplay, PhoneKey } from './proto.js';
 import { attachInput } from './input.js';
 import { attachGamepads } from './gamepad.js';
 import { createUI, positionNames } from './ui.js';
@@ -399,6 +399,7 @@ const ui = createUI({
     log('info', `swap cmd/option ${on ? 'on' : 'off'}`);
   },
   onShortcut: (sc) => input.sendCombo(sc.keys),
+  onPhoneKey: (name) => PhoneKey[name] && input.sendCombo([PhoneKey[name]]),
   resolution: resolutionMode,
   onResolution: (mode) => setResolution(mode),
   fitSizes: () => fitSizes(),
@@ -1351,6 +1352,7 @@ function fitSizes() {
 }
 
 function onLayout(streams) {
+  ui.setPhone(streams.length === 1 && isPhoneDisplay(streams[0].id));
   annotator.invalidate();
   input.setStreams(streams);
   input.refreshCursor();
@@ -1362,7 +1364,8 @@ function onLayout(streams) {
   showStreams(streams.length);
   ui.renderDisplays(displays, streams.map((d) => d.id));
   streamIds = streams.map((d) => d.id);
-  thumbs.setDisplays(displays.filter((d) => !streamedWindows.has(d.id)), streams.map((d) => d.id));
+  // Phones are picked from the machines menu, not previewed beside the computer's displays.
+  thumbs.setDisplays(displays.filter((d) => !streamedWindows.has(d.id) && !d.phone), streams.map((d) => d.id));
 }
 
 /** 'row' if the displays sit side by side in macOS, 'column' if stacked. */

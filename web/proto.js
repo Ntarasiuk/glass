@@ -23,6 +23,12 @@ export const VIDEO_HEADER_LEN = 20;
 export const INPUT_EVENT_LEN = 12;
 
 export const Input = { MOVE: 1, DOWN: 2, UP: 3, SCROLL: 4, KEY_DOWN: 5, KEY_UP: 6, PAD_BUTTON: 7, PAD_AXIS: 8, PAD_CONNECTED: 9, MOVE_BY: 10, PEN: 11, TEXT: 12 };
+
+/** Displays with ids from here on are phones connected to the host (glass_proto::PHONE_DISPLAY_BASE). */
+export const PHONE_DISPLAY_BASE = 0x7a000000;
+export const isPhoneDisplay = (id) => typeof id === 'number' && (id & 0xff000000) >>> 0 === PHONE_DISPLAY_BASE;
+/** A phone's buttons and system gestures, sent as key presses while a phone is shown (glass_proto::phone_keys). */
+export const PhoneKey = { HOME: 0xf100, APP_SWITCHER: 0xf101, CONTROL_CENTER: 0xf102, NOTIFICATIONS: 0xf103, SPOTLIGHT: 0xf104, VOLUME_UP: 0xf105, VOLUME_DOWN: 0xf106 };
 /** Text bytes in one TEXT event, and the most one piece of text may carry. */
 export const TEXT_CHUNK = INPUT_EVENT_LEN - 2;
 export const MAX_TEXT_BYTES = 4096;

@@ -2594,6 +2594,8 @@ dependencies = [
  "winresource",
  "wtransport",
  "zip",
+ "zune-core 0.5.3",
+ "zune-jpeg 0.5.15",
 ]
 
 [[package]]

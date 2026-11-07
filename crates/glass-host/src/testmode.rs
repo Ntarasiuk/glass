@@ -171,6 +171,7 @@ impl TestVideo {
                 points_height: height as f64,
                 main: i == 0,
                 builtin: false,
+                phone: None,
             })
             .chain(WINDOWS.iter().enumerate().map(|(i, &(id, _, _))| DisplayInfo {
                 id,
@@ -182,6 +183,7 @@ impl TestVideo {
                 points_height: WINDOW_HEIGHT as f64,
                 main: false,
                 builtin: false,
+                phone: None,
             }))
             .collect();
         let count = displays.len();
