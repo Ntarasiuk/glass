@@ -84,7 +84,8 @@ go back to its screen. A click is a tap, holding is a long press, a drag is a sw
 released: WebDriverAgent plays a gesture as one request), scrolling swipes, a trackpad pinch
 pinches, and ⌘V types what's on your clipboard. Home is the toolbar's button (Escape isn't
 Home: it's also how you leave fullscreen). The pointer is a fingertip, and a ripple shows
-where each click landed. Turned on its side, the picture and touches turn with it.
+where each click landed. Turned on its side, the picture turns upright in the viewer (Glass
+asks the phone which way it's held every second) and touches turn with it.
 
 Phones are the owner's: only viewers with full control of the computer see them listed or can
 show one. Everyone connected sees the same screen, so a phone can't be shown while a guest, a

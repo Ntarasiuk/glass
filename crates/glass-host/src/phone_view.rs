@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
@@ -60,6 +60,58 @@ struct Feed {
     latest: Mutex<Option<(Instant, Arc<RawFrame>)>>,
     /// Gone from the settings: its thread ends.
     stop: AtomicBool,
+    /// How far to turn its picture so it's upright (`Turn`): WebDriverAgent sends it the
+    /// way the screen is built, whichever way the phone is held.
+    turn: AtomicU8,
+}
+
+/// Quarter turns of the picture: none, left (anticlockwise), right, and upside down.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Turn {
+    None = 0,
+    Left = 1,
+    Right = 2,
+    Half = 3,
+}
+
+impl Turn {
+    fn of(orientation: &str) -> Turn {
+        match orientation {
+            // Turned left, its bottom on the right: what's drawn is a quarter turn clockwise
+            // of the screen's own up, so it's turned back anticlockwise.
+            "LANDSCAPE" => Turn::Left,
+            "UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT" => Turn::Right,
+            "UIA_DEVICE_ORIENTATION_PORTRAIT_UPSIDEDOWN" => Turn::Half,
+            _ => Turn::None,
+        }
+    }
+
+    fn from_u8(n: u8) -> Turn {
+        [Turn::None, Turn::Left, Turn::Right, Turn::Half][(n & 3) as usize]
+    }
+}
+
+/// `src` (BGRA, `w` × `h`) turned: its new pixels and size.
+fn turn_bgra(src: Vec<u8>, w: usize, h: usize, turn: Turn) -> (Vec<u8>, usize, usize) {
+    if turn == Turn::None {
+        return (src, w, h);
+    }
+    let (dw, dh) = if turn == Turn::Half { (w, h) } else { (h, w) };
+    let mut out = vec![0u8; src.len()];
+    let px = |b: &[u8], i: usize| -> [u8; 4] { b[i * 4..i * 4 + 4].try_into().unwrap() };
+    for y in 0..h {
+        for x in 0..w {
+            let (nx, ny) = match turn {
+                Turn::Left => (y, w - 1 - x),
+                Turn::Right => (h - 1 - y, x),
+                Turn::Half => (w - 1 - x, h - 1 - y),
+                Turn::None => (x, y),
+            };
+            let o = (ny * dw + nx) * 4;
+            out[o..o + 4].copy_from_slice(&px(&src, y * w + x));
+        }
+    }
+    (out, dw, dh)
 }
 
 impl Feed {
@@ -182,6 +234,7 @@ impl Phones {
                 width: AtomicUsize::new(0),
                 latest: Mutex::new(None),
                 stop: AtomicBool::new(false),
+                turn: AtomicU8::new(0),
             });
             feeds.push(feed.clone());
             let phones = self.clone();
@@ -455,6 +508,23 @@ impl VideoSource for PhoneVideo {
 // ---- The picture ----
 
 fn feed_loop(feed: Arc<Feed>, phones: Arc<Phones>) {
+    // Which way it's held, checked every second while its picture comes.
+    {
+        let feed = feed.clone();
+        let _ = std::thread::Builder::new().name(format!("phone turn {}", feed.phone.name)).spawn(move || {
+            while !feed.stop.load(Ordering::Relaxed) {
+                if feed.live.load(Ordering::Relaxed)
+                    && let Ok(o) = crate::phone::orientation(&feed.phone)
+                {
+                    let turn = Turn::of(&o) as u8;
+                    if feed.turn.swap(turn, Ordering::Relaxed) != turn {
+                        tracing::info!("phone {}: turned {o}", feed.phone.name);
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+    }
     let mut said = false;
     loop {
         let ended = stream(&feed, &phones);
@@ -662,7 +732,9 @@ fn stream(feed: &Arc<Feed>, phones: &Phones) -> Result<()> {
         if slot < 0 && !preview_due {
             continue;
         }
-        let same = std::mem::replace(&mut last_jpeg, hash(&jpeg)) == last_jpeg;
+        // A new turn is a new picture, even from the same JPEG.
+        let turn = Turn::from_u8(feed.turn.load(Ordering::Relaxed));
+        let same = std::mem::replace(&mut last_jpeg, hash(&jpeg) ^ turn as u64) == last_jpeg;
         // The viewer's last input, when this is the first new picture since: timed until
         // it's sent (debug log).
         if !same && slot >= 0 && let Some(at) = phones.input_at.lock().unwrap().take() {
@@ -676,6 +748,7 @@ fn stream(feed: &Arc<Feed>, phones: &Phones) -> Result<()> {
         }
         let started = Instant::now();
         let (bgra, w, h) = decode(&jpeg)?;
+        let (bgra, w, h) = turn_bgra(bgra, w, h, turn);
         stats.decoded += 1;
         stats.decode += started.elapsed();
         // Turned on its side: the picture turns, and touches go in the turned screen's
@@ -1276,6 +1349,7 @@ mod tests {
             width: AtomicUsize::new(0),
             latest: Mutex::new(None),
             stop: AtomicBool::new(false),
+            turn: AtomicU8::new(0),
         })
     }
 
@@ -1453,5 +1527,22 @@ mod tests {
         assert!(!g.admit(0, true, false));
         assert!(!g.admit(0, false, true));
         assert!(g.admit(0, true, true));
+    }
+
+    #[test]
+    fn a_turned_phone_is_shown_upright() {
+        // 2 × 3, pixels numbered across then down (first byte of each).
+        let src: Vec<u8> = (0..6u8).flat_map(|n| [n, 0, 0, 255]).collect();
+        let firsts = |(b, w, h): (Vec<u8>, usize, usize)| (b.chunks(4).map(|p| p[0]).collect::<Vec<_>>(), w, h);
+        // 0 1      left (anticlockwise):  1 3 5     right (clockwise):  4 2 0
+        // 2 3                             0 2 4                         5 3 1
+        // 4 5
+        assert_eq!(firsts(turn_bgra(src.clone(), 2, 3, Turn::Left)), (vec![1, 3, 5, 0, 2, 4], 3, 2));
+        assert_eq!(firsts(turn_bgra(src.clone(), 2, 3, Turn::Right)), (vec![4, 2, 0, 5, 3, 1], 3, 2));
+        assert_eq!(firsts(turn_bgra(src.clone(), 2, 3, Turn::Half)), (vec![5, 4, 3, 2, 1, 0], 2, 3));
+        assert_eq!(firsts(turn_bgra(src, 2, 3, Turn::None)), (vec![0, 1, 2, 3, 4, 5], 2, 3));
+        assert_eq!(Turn::of("LANDSCAPE"), Turn::Left);
+        assert_eq!(Turn::of("UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT"), Turn::Right);
+        assert_eq!(Turn::of("PORTRAIT"), Turn::None);
     }
 }

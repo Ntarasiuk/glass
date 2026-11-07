@@ -653,6 +653,14 @@ pub(crate) fn touch_then_rest(p: &Phone, path: &[(f64, f64, u64)], hold_ms: u64,
     in_session(p, "POST", "/actions", Some(&body)).map(|_| ())
 }
 
+/// Which way the phone's screen is turned, as WebDriverAgent says it: `PORTRAIT`,
+/// `LANDSCAPE` (turned left, the bottom on the right), `UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT`,
+/// `UIA_DEVICE_ORIENTATION_PORTRAIT_UPSIDEDOWN`.
+pub(crate) fn orientation(p: &Phone) -> Result<String, Refused> {
+    let v = in_session(p, "GET", "/orientation", None)?;
+    Ok(v["value"].as_str().unwrap_or("PORTRAIT").to_string())
+}
+
 /// Two fingers on either side of `at` (points), from `from` apart to `to` apart over `ms`.
 pub(crate) fn pinch(p: &Phone, at: (f64, f64), from: f64, to: f64, ms: u64) -> Result<(), Refused> {
     let finger = |id: &str, side: f64| {
