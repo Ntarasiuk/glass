@@ -233,6 +233,10 @@ async fn finish(id: u64) -> Result<Value, Refused> {
     if let Some(note) = x.note {
         v["note"] = json!(note);
     }
+    // Parts split by a phone being shown, not by the picture's size.
+    if made.phone {
+        v["phone_gap"] = json!(true);
+    }
     Ok(v)
 }
 

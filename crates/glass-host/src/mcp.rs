@@ -441,7 +441,12 @@ fn clip_content(v: &Value) -> Vec<Value> {
     let parts = v["parts"].as_array().map_or(0, Vec::len);
     let mut said = format!("Recorded {secs:.1} s{display} ({mb:.1} MB), saved on that computer at {}", v["path"].as_str().unwrap_or("?"));
     if parts > 1 {
-        said.push_str(&format!(" and {} more parts (the picture size changed)", parts - 1));
+        let why = if v["phone_gap"] == true {
+            "a viewer was shown a phone meanwhile, and that part isn't recorded"
+        } else {
+            "the picture size changed"
+        };
+        said.push_str(&format!(" and {} more parts ({why})", parts - 1));
     }
     if let Some(note) = v["note"].as_str() {
         said = format!("{note} {said}");
@@ -672,6 +677,8 @@ mod tests {
         let big = show(Show::Clip, &json!({ "duration_ms": 1, "path": "/x.mp4", "parts": [1, 2] }));
         assert_eq!(big.len(), 1);
         assert!(big[0]["text"].as_str().unwrap().contains("1 more parts"));
+        let gap = show(Show::Clip, &json!({ "duration_ms": 1, "path": "/x.mp4", "parts": [1, 2], "phone_gap": true }));
+        assert!(gap[0]["text"].as_str().unwrap().contains("shown a phone meanwhile"));
     }
 
     #[test]

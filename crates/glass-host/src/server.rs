@@ -1260,9 +1260,13 @@ async fn control(
             }
             // Nor the phones, without access to them.
             let msg = match msg {
-                ServerMsg::Layout { streams, displays: Some(mut displays) } if !phone_access(&perms) => {
-                    displays.retain(|d| !crate::phone_view::is_phone_display(d.id));
-                    ServerMsg::Layout { streams, displays: Some(displays) }
+                ServerMsg::PhoneError { .. } if !phone_access(&perms) => continue,
+                ServerMsg::Layout { mut streams, mut displays } if !phone_access(&perms) => {
+                    streams.retain(|d| !crate::phone_view::is_phone_display(d.id));
+                    if let Some(displays) = &mut displays {
+                        displays.retain(|d| !crate::phone_view::is_phone_display(d.id));
+                    }
+                    ServerMsg::Layout { streams, displays }
                 }
                 msg => msg,
             };
@@ -2180,7 +2184,7 @@ pub(crate) fn phone_hidden(why: &str) {
     shared.injector.lock().unwrap().set_displays(&ids);
     let displays = shared.video.displays().ok();
     let _ = shared.events.send(ServerMsg::Layout { streams, displays });
-    let _ = shared.events.send(ServerMsg::Error { msg: why.into() });
+    let _ = shared.events.send(ServerMsg::PhoneError { msg: why.into() });
 }
 
 fn phone_hidden_async(why: &'static str) {
@@ -2889,6 +2893,9 @@ mod tests {
         assert!(!phone_access(&control::Perms::guest(&view_only)));
         // The sign-in screen (owner taken away).
         assert!(!phone_access(&control::Perms { owner: false, ..control::Perms::owner() }));
+        // What's said about the phones reads as an ordinary error to those who get it.
+        let said = serde_json::to_value(ServerMsg::PhoneError { msg: "x".into() }).unwrap();
+        assert_eq!(said, serde_json::json!({ "t": "error", "msg": "x" }));
     }
 
     #[tokio::test]

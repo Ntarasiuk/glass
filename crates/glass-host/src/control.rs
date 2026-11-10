@@ -312,6 +312,12 @@ pub enum ServerMsg {
     Error {
         msg: String,
     },
+    /// An error about the phones, sent as one (`Error`) only to viewers who may use them
+    /// (server::phone_access): to others it would say there are phones.
+    #[serde(rename = "error")]
+    PhoneError {
+        msg: String,
+    },
 }
 
 /// What this session may do.

@@ -335,18 +335,102 @@ fn deep<T>(p: &Phone, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// Whether a password field has the phone's keyboard. An error when that can't be told:
-/// a shallow look finds no field, so it must be the deep one, and its answer must come.
-fn secure_field_focused(p: &Phone) -> Result<bool, Refused> {
-    let _reading = DEPTH.lock().unwrap();
-    let found = set_depth(p, DEEP).and_then(|_| focused_is_secure(p));
-    let _ = set_depth(p, SHALLOW);
-    found.map_err(|e| {
-        Refused(format!(
-            "Can't tell whether a password field has the keyboard on {} ({}), so agents don't tap or type there now. Try again in a moment.",
-            p.name, e.0
-        ))
-    })
+/// What has the phone's keyboard, looked up once for an action by an agent under a grant
+/// (one deep look: four or six requests). Its rules keep a password the person typed from
+/// the agent without stopping it from carrying on: it can't type there or touch the
+/// keyboard (a key, or the suggested password above it), but it can tap Sign in, scroll,
+/// or press return.
+struct Focus {
+    /// A password field has the keyboard (an error: that can't be told).
+    secure: Result<bool, Refused>,
+    /// Where the keyboard is (points: x, y, width, height); `None` when none is up; an
+    /// error when it can't be told. Only looked up when a password field may have it.
+    keyboard: Result<Option<[f64; 4]>, Refused>,
+}
+
+/// The suggestions bar above the keyboard (where a saved password is offered), in points:
+/// counted as the keyboard.
+const ABOVE_KEYBOARD: f64 = 56.0;
+/// Where the keyboard may be when it can't be told: the bottom of the screen, this much of it
+/// (a landscape keyboard with its suggestions takes about this).
+const KEYBOARD_GUESS: f64 = 0.6;
+
+impl Focus {
+    /// Nothing to keep from the owner's own tools.
+    fn clear() -> Focus {
+        Focus { secure: Ok(false), keyboard: Ok(None) }
+    }
+
+    fn of(p: &Phone) -> Focus {
+        if !matches!(crate::grants::current(), crate::grants::Actor::Agent(_)) {
+            return Focus::clear();
+        }
+        let _reading = DEPTH.lock().unwrap();
+        // A shallow look finds no field, so it must be the deep one, and its answer must come.
+        let secure = set_depth(p, DEEP).and_then(|_| focused_is_secure(p));
+        let keyboard = match secure {
+            Ok(false) => Ok(None),
+            _ => keyboard_frame(p),
+        };
+        let _ = set_depth(p, SHALLOW);
+        Focus { secure, keyboard }
+    }
+
+    /// Typing (and keys that type) into what has the keyboard.
+    fn may_type(&self, p: &Phone) -> Result<(), Refused> {
+        match &self.secure {
+            Ok(false) => Ok(()),
+            Ok(true) => Err(Refused(format!(
+                "A password field has the keyboard on {}, so agents don't type there. Ask the person to fill it in with request_help; then you can tap Sign in or press return.",
+                p.name
+            ))),
+            Err(e) => Err(cant_tell(p, e)),
+        }
+    }
+
+    /// A touch at these points (the phone's points); `screen` is its size, for when where
+    /// the keyboard is can't be told.
+    fn may_touch(&self, p: &Phone, points: &[(f64, f64)], screen: impl FnOnce() -> Result<(f64, f64), Refused>) -> Result<(), Refused> {
+        if matches!(self.secure, Ok(false)) {
+            return Ok(());
+        }
+        let (area, guessed) = match &self.keyboard {
+            Ok(None) => return Ok(()),
+            Ok(Some([x, y, w, h])) => ([*x, y - ABOVE_KEYBOARD, *w, h + ABOVE_KEYBOARD], false),
+            Err(_) => {
+                let (w, h) = screen()?;
+                ([0.0, h * (1.0 - KEYBOARD_GUESS), w, h * KEYBOARD_GUESS], true)
+            }
+        };
+        let [x, y, w, h] = area;
+        if !points.iter().any(|&(px, py)| px >= x && px < x + w && py >= y && py < y + h) {
+            return Ok(());
+        }
+        Err(Refused(if guessed {
+            format!(
+                "A password field may have the keyboard on {}, and Glass can't tell where the keyboard is, so agents don't touch the bottom {:.0}% of the screen. Tap above it, or ask the person with request_help.",
+                p.name,
+                KEYBOARD_GUESS * 100.0
+            )
+        } else {
+            format!(
+                "A password field has the keyboard on {}, so agents don't touch the keyboard (or the suggestions above it). Tap elsewhere (Sign in, say), press return, or ask the person with request_help.",
+                p.name
+            )
+        }))
+    }
+}
+
+fn cant_tell(p: &Phone, e: &Refused) -> Refused {
+    Refused(format!(
+        "Can't tell whether a password field has the keyboard on {} ({}), so agents don't type there now. Try again in a moment.",
+        p.name, e.0
+    ))
+}
+
+/// The id in an element WebDriverAgent returned.
+fn element_id(v: &Value) -> Option<&str> {
+    v["ELEMENT"].as_str().or(v["element-6066-11e4-a52e-4f735466cecf"].as_str())
 }
 
 fn focused_is_secure(p: &Phone) -> Result<bool, Refused> {
@@ -356,10 +440,7 @@ fn focused_is_secure(p: &Phone) -> Result<bool, Refused> {
         Err(Refused(e)) if e.contains("said no such element") => return Ok(false),
         Err(e) => return Err(e),
     };
-    let id = v["value"]["ELEMENT"]
-        .as_str()
-        .or(v["value"]["element-6066-11e4-a52e-4f735466cecf"].as_str())
-        .ok_or_else(|| Refused("it named no focused element".into()))?;
+    let id = element_id(&v["value"]).ok_or_else(|| Refused("it named no focused element".into()))?;
     let v = in_session(p, "GET", &format!("/element/{id}/attribute/type"), None)?;
     let kind = v["value"]
         .as_str()
@@ -367,23 +448,21 @@ fn focused_is_secure(p: &Phone) -> Result<bool, Refused> {
     Ok(kind.contains("SecureTextField"))
 }
 
-/// For an agent under a grant: refuses while a password field has the phone's keyboard.
-/// Typing is the person's then, and so is tapping: a tap could be a key of the keyboard,
-/// or the suggested password above it.
-fn no_password_field(p: &Phone) -> Result<(), Refused> {
-    if !matches!(crate::grants::current(), crate::grants::Actor::Agent(_)) {
-        return Ok(());
-    }
-    password_rule(p, secure_field_focused(p))
-}
-
-fn password_rule(p: &Phone, secure: Result<bool, Refused>) -> Result<(), Refused> {
-    match secure? {
-        true => Err(Refused(format!(
-            "A password field has the keyboard on {}, so agents don't tap or type there. Ask the person to fill it in with request_help (or press_keys home to leave).",
-            p.name
-        ))),
-        false => Ok(()),
+/// Where the on-screen keyboard is (points), if one is up.
+fn keyboard_frame(p: &Phone) -> Result<Option<[f64; 4]>, Refused> {
+    let found = in_session(p, "POST", "/element", Some(&json!({ "using": "class name", "value": "XCUIElementTypeKeyboard" })));
+    let v = match found {
+        Ok(v) => v,
+        Err(Refused(e)) if e.contains("said no such element") => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let id = element_id(&v["value"]).ok_or_else(|| Refused("it named no keyboard".into()))?;
+    let r = in_session(p, "GET", &format!("/element/{id}/rect"), None)?;
+    let n = |k: &str| r["value"][k].as_f64();
+    match (n("x"), n("y"), n("width"), n("height")) {
+        (Some(x), Some(y), Some(w), Some(h)) if w > 0.0 && h > 0.0 => Ok(Some([x, y, w, h])),
+        (Some(_), Some(_), Some(_), Some(_)) => Ok(None),
+        _ => Err(Refused("it didn't say where the keyboard is".into())),
     }
 }
 
@@ -567,6 +646,11 @@ const KEYS: &str = "home, return, backspace, tab, space, volume_up, volume_down"
 /// A key's name as `press_key` reads it.
 fn key_name(keys: &str) -> String {
     keys.trim().to_ascii_lowercase().replace([' ', '-'], "_")
+}
+
+/// Return (or enter): submits a field rather than typing into it.
+fn is_return(keys: &str) -> bool {
+    matches!(key_name(keys).as_str(), "return" | "enter")
 }
 
 /// One of the phone's buttons (home, volume), not a key of its keyboard.
@@ -863,8 +947,9 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
         let target = target.as_str();
         let (p, item) = lookup(target, Some(asker))?;
         guard(&p)?;
-        no_password_field(&p)?;
         let (x, y) = item.center;
+        // A ref may be a key of the keyboard.
+        Focus::of(&p).may_touch(&p, &[(x, y)], || window(&p))?;
         return match action {
             Action::Press { .. } => {
                 touch(&p, &[(x, y, 0)], 60)?;
@@ -877,14 +962,7 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
             Action::SetValue { text, .. } => {
                 touch(&p, &[(x, y, 0)], 60)?;
                 // The tap may have given a password field the keyboard.
-                if matches!(crate::grants::current(), crate::grants::Actor::Agent(_))
-                    && secure_field_focused(&p)?
-                {
-                    return Err(Refused(
-                        "That's a password field. Ask the person to type it with request_help."
-                            .into(),
-                    ));
-                }
+                Focus::of(&p).may_type(&p)?;
                 let erase: String = "\u{8}".repeat(item.value.chars().count());
                 type_keys(&p, &format!("{erase}{text}"))?;
                 let n = text.chars().count();
@@ -932,8 +1010,8 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
             ..
         } => {
             guard(&p)?;
-            no_password_field(&p)?;
             let (px, py) = to_points(&p, x, y)?;
+            Focus::of(&p).may_touch(&p, &[(px, py)], || window(&p))?;
             let long = button.as_deref() == Some("right");
             if button
                 .as_deref()
@@ -962,8 +1040,8 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
             ..
         } => {
             guard(&p)?;
-            no_password_field(&p)?;
             let (a, b) = (to_points(&p, from_x, from_y)?, to_points(&p, to_x, to_y)?);
+            Focus::of(&p).may_touch(&p, &[a, b], || window(&p))?;
             touch(&p, &[(a.0, a.1, 0), (b.0, b.1, 400)], 150)?;
             Ok((
                 json!({ "ok": true }),
@@ -975,10 +1053,10 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
         }
         Action::Scroll { x, y, dx, dy, .. } => {
             guard(&p)?;
-            no_password_field(&p)?;
             // Scrolling down moves the finger up.
             let (sx, sy) = to_points(&p, x, y)?;
             let (ex, ey) = to_points(&p, x - dx, y - dy)?;
+            Focus::of(&p).may_touch(&p, &[(sx, sy), (ex, ey)], || window(&p))?;
             touch(&p, &[(sx, sy, 0), (ex, ey, 250)], 0)?;
             Ok((
                 json!({ "ok": true }),
@@ -990,7 +1068,7 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
         )),
         Action::Type { text } => {
             guard(&p)?;
-            no_password_field(&p)?;
+            Focus::of(&p).may_type(&p)?;
             type_keys(&p, &text)?;
             Ok((
                 json!({ "ok": true }),
@@ -1002,9 +1080,10 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
         }
         Action::Key { keys } => {
             guard(&p)?;
-            // The buttons don't type (home leaves a password field); the rest are keys.
-            if !is_button(&keys) {
-                no_password_field(&p)?;
+            // The buttons don't type (home leaves a password field), nor does return (it
+            // submits what the person typed); the rest are keys that type.
+            if !is_button(&keys) && !is_return(&keys) {
+                Focus::of(&p).may_type(&p)?;
             }
             press_key(&p, &keys)?;
             Ok((
@@ -1235,16 +1314,43 @@ mod tests {
     }
 
     #[test]
-    fn password_fields_fail_closed() {
+    fn password_fields_keep_the_agent_off_the_keyboard_but_not_the_screen() {
         let p = Phone { name: "xr".into(), port: 1, video: 2, wifi: false };
-        assert!(password_rule(&p, Ok(false)).is_ok());
-        assert!(password_rule(&p, Ok(true)).unwrap_err().0.contains("request_help"));
-        assert!(password_rule(&p, Err(Refused("no answer".into()))).is_err(), "can't tell: refused");
-        // A phone that doesn't answer can't say, so it's refused (nothing listens on port 1).
-        assert!(secure_field_focused(&p).unwrap_err().0.contains("Can't tell"));
-        // Its buttons aren't keys of the keyboard.
+        let screen = || Ok((390.0, 844.0));
+        let no_screen = || -> Result<(f64, f64), Refused> { panic!("not needed") };
+        let focus = |secure: Result<bool, Refused>, keyboard: Result<Option<[f64; 4]>, Refused>| Focus { secure, keyboard };
+        let (above, key, bar) = ((200.0, 100.0), (200.0, 700.0), (200.0, 520.0));
+        // Nothing secure: anything goes.
+        let clear = Focus::clear();
+        assert!(clear.may_type(&p).is_ok() && clear.may_touch(&p, &[key], no_screen).is_ok());
+        // A password field has the keyboard (at 0, 550 + 294): no typing, nor touching the keyboard
+        // or the suggestions bar just above it; the rest of the screen is fine.
+        let secure = focus(Ok(true), Ok(Some([0.0, 550.0, 390.0, 294.0])));
+        assert!(secure.may_type(&p).unwrap_err().0.contains("return"));
+        assert!(secure.may_touch(&p, &[above], no_screen).is_ok(), "Sign in, above it");
+        assert!(secure.may_touch(&p, &[key], no_screen).unwrap_err().0.contains("keyboard"));
+        assert!(secure.may_touch(&p, &[bar], no_screen).is_err(), "the suggestions bar");
+        assert!(secure.may_touch(&p, &[above, key], no_screen).is_err(), "a swipe onto it");
+        // Focused but no keyboard up (a hardware keyboard): touches are fine.
+        assert!(focus(Ok(true), Ok(None)).may_touch(&p, &[key], no_screen).is_ok());
+        // Where the keyboard is can't be told: the bottom of the screen is off limits.
+        let unsure = focus(Ok(true), Err(Refused("no answer".into())));
+        assert!(unsure.may_touch(&p, &[above], screen).is_ok());
+        assert!(unsure.may_touch(&p, &[key], screen).unwrap_err().0.contains("can't tell where"));
+        // Whether a password field has it can't be told: no typing (fail closed); touches as
+        // for one that does.
+        let unknown = focus(Err(Refused("no answer".into())), Ok(Some([0.0, 550.0, 390.0, 294.0])));
+        assert!(unknown.may_type(&p).unwrap_err().0.contains("Can't tell"));
+        assert!(unknown.may_touch(&p, &[above], no_screen).is_ok() && unknown.may_touch(&p, &[key], no_screen).is_err());
+        // An agent's look at a phone that doesn't answer can't tell (nothing listens on port 1).
+        let g = crate::grants::Grant::for_test(None);
+        let looked = crate::grants::ACTOR.sync_scope(crate::grants::Actor::Agent(g), || Focus::of(&p));
+        assert!(looked.secure.is_err() && looked.may_type(&p).is_err());
+        assert!(matches!(Focus::of(&p).secure, Ok(false)), "the owner's own tools aren't limited");
+        // Its buttons and return aren't keys that type.
         assert!(is_button("Home") && is_button("volume-up") && is_button("volume_down"));
         assert!(!is_button("return") && !is_button("space") && !is_button("backspace"));
+        assert!(is_return("Return") && is_return("enter") && !is_return("space"));
     }
 
     #[test]

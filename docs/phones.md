@@ -99,8 +99,11 @@ for the phone to draw it and WebDriverAgent to screenshot it (about 26 a second)
   the computer always goes to the computer, even while a viewer is shown a phone.
 - For agents under a grant, Glass reads the app in front on the phone before every look or
   touch. Settings, Wallet and Passwords are off limits, an app-limited agent stays in its apps
-  (not the home screen), and while a password field has the keyboard the agent can't type or
-  tap at all (if Glass can't tell, it refuses too). As on the computer, these limits are for
+  (not the home screen), and while a password field has the keyboard the agent can't type
+  there or touch the keyboard and the suggestions above it, though it can tap elsewhere (Sign
+  in), scroll and press return. If Glass can't tell whether a password field has the keyboard,
+  it doesn't type; if it can't tell where the keyboard is, it doesn't touch the bottom of the
+  screen. As on the computer, these limits are for
   agents under a grant; agents you run yourself with `glass mcp`, which act as you, aren't
   limited.
 - Use a phone set aside for agents: one signed into your own Apple ID can reach your messages,
