@@ -17,17 +17,125 @@ async function openInput(page, options = {}) {
   await page.goto('https://input.test/');
   await page.evaluate(async (options) => {
     const { attachInput } = await import('/input.js');
+    const { inputEvent } = await import('/proto.js');
     window.events = [];
+    window.records = [];
     window.input = attachInput({
       screens: document.querySelector('#screens'), keySink: document.querySelector('#keys'),
-      send: (kind, fields) => window.events.push(kind === 12
-        ? { text: new TextDecoder().decode(fields.bytes.slice(2, 2 + (fields.bytes[1] & 127))) }
-        : { kind, ...fields }),
+      send: (kind, fields) => {
+        const bytes = fields?.bytes ?? inputEvent(kind, fields);
+        window.records.push([...bytes]);
+        events.push(kind === 12
+          ? { text: new TextDecoder().decode(bytes.slice(2, 2 + (bytes[1] & 127))) }
+          : { kind, ...fields });
+      },
       control() {}, nextClipboard: () => new Promise(() => {}), macViewer: true, ...options,
     });
     input.setHostOs(options.hostOs ?? 'windows');
+    input.setViewerTyping(options.typing ?? true);
   }, options);
 }
+
+test('viewer printable repeats are Unicode text without physical Shift', async ({ page }) => {
+  await openInput(page);
+  await keys(page, [
+    ['keydown', { code: 'ShiftLeft', key: 'Shift', shiftKey: true }],
+    ['keydown', { code: 'KeyA', key: 'A', shiftKey: true }],
+    ['keydown', { code: 'KeyA', key: 'A', shiftKey: true, repeat: true }],
+    ['keyup', { code: 'KeyA', key: 'A', shiftKey: true }],
+    ['keyup', { code: 'ShiftLeft', key: 'Shift' }],
+  ]);
+  expect(await page.evaluate(() => records)).toEqual([
+    [12, 129, 65, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [12, 129, 65, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  ]);
+});
+
+test('unsupported hosts keep physical hardware input', async ({ page }) => {
+  await openInput(page, { typing: false });
+  await page.keyboard.press('a');
+  expect(await page.evaluate(() => records.map(r => r[0]))).toEqual([5, 6]);
+});
+
+test('committed text keeps the existing Text protocol even without viewer typing capability', async ({ page }) => {
+  await openInput(page, { typing: false });
+  await page.locator('#keys').focus();
+  await page.keyboard.insertText('a!');
+  expect(await page.evaluate(() => events)).toEqual([{ text: 'a!' }]);
+  expect(await page.evaluate(() => records.map(r => r[0]))).toEqual([12]);
+});
+
+test('blur releases physical Space and ignores an orphan repeat', async ({ page }) => {
+  await openInput(page);
+  await keys(page, [['keydown', { code: 'Space', key: ' ' }]]);
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await keys(page, [['keydown', { code: 'Space', key: ' ', repeat: true }], ['keyup', { code: 'Space', key: ' ' }]]);
+  expect(await page.evaluate(() => records.map(r => r[0]))).toEqual([5, 6]);
+});
+
+test('mode changes release text routing without resurrecting held keys as physical repeats', async ({ page }) => {
+  await openInput(page);
+  await keys(page, [['keydown', { code: 'KeyA', key: 'a' }]]);
+  await page.evaluate(() => input.setPhysicalKeyboard(true));
+  await keys(page, [['keydown', { code: 'KeyA', key: 'a', repeat: true }], ['keyup', { code: 'KeyA', key: 'a' }]]);
+  expect(await page.evaluate(() => records.map(r => r[0]))).toEqual([12]);
+});
+
+test('composition ends earlier key routing and sends only the committed text', async ({ page }) => {
+  await openInput(page);
+  await keys(page, [['keydown', { code: 'KeyA', key: 'a' }]]);
+  await page.evaluate(() => {
+    const sink = document.querySelector('#keys');
+    sink.dispatchEvent(new CompositionEvent('compositionstart'));
+    sink.dispatchEvent(new CompositionEvent('compositionend', { data: 'č' }));
+  });
+  await keys(page, [['keyup', { code: 'KeyA', key: 'a' }]]);
+  expect(await page.evaluate(() => records.map(r => r[0]))).toEqual([12, 12]);
+});
+
+test('host changes discard the previous capability and release its physical hold', async ({ page }) => {
+  await openInput(page);
+  await keys(page, [['keydown', { code: 'Space', key: ' ' }]]);
+  await page.evaluate(() => input.setHostOs('windows'));
+  await keys(page, [['keyup', { code: 'Space', key: ' ' }]]);
+  await page.keyboard.press('a');
+  expect(await page.evaluate(() => records.map(r => r[0]))).toEqual([5, 6, 5, 6]);
+});
+
+test('physical Space holds receive modifier changes immediately, including between repeats', async ({ page }) => {
+  await openInput(page);
+  await page.keyboard.down('Space');
+  await page.keyboard.down('Control');
+  await page.keyboard.down('Shift');
+  await page.keyboard.up('Shift');
+  await page.keyboard.up('Control');
+  await page.keyboard.up('Space');
+  expect(await page.evaluate(() => events)).toEqual([
+    { kind: 5, keycode: 0x31 }, { kind: 5, keycode: 0x3b },
+    { kind: 5, keycode: 0x38 }, { kind: 6, keycode: 0x38 },
+    { kind: 6, keycode: 0x3b }, { kind: 6, keycode: 0x31 },
+  ]);
+});
+
+test('Option-as-Alt menu is independent from physical mode and hidden without viewer typing support', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { value: 'MacIntel' }));
+  await openInput(page, { fullUI: true });
+  await page.evaluate(async () => {
+    const { createUI } = await import('/ui.js');
+    window.ui = createUI({ shortcuts: [], onOptionAsAlt: on => input.setOptionAsAlt(on) });
+    ui.setHostOs('windows');
+    ui.setViewerTyping(true);
+    ui.setKeyboardProfile({ physical: false, optionAsAlt: false });
+  });
+  await page.locator('#btn-more').click();
+  const option = page.getByRole('menuitemradio', { name: /Option as Alt/ });
+  await option.click();
+  await expect(option).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByRole('menuitemradio', { name: /Physical keyboard/ })).toHaveAttribute('aria-checked', 'false');
+  await page.evaluate(() => ui.setViewerTyping(false));
+  await expect(option).toHaveCount(0);
+  await expect(page.getByRole('menuitemradio', { name: /Physical keyboard/ })).toHaveCount(0);
+});
 
 async function keys(page, sequence) {
   await page.evaluate((sequence) => {
@@ -46,6 +154,25 @@ test('German Mac Option+L sends the viewer character without Alt or physical L',
     ['keyup', { code: 'AltLeft', key: 'Alt' }],
   ]);
   expect(await page.evaluate(() => events)).toEqual([{ text: '@' }]);
+});
+
+test('Option-as-Alt sends Windows shortcuts and dead-key positions but keeps plain viewer text', async ({ page }) => {
+  await openInput(page, { optionAsAlt: true });
+  await keys(page, [
+    ['keydown', { code: 'AltLeft', key: 'Alt', altKey: true }],
+    ['keydown', { code: 'KeyD', key: '∂', altKey: true }],
+    ['keyup', { code: 'KeyD', key: '∂', altKey: true }],
+    ['keydown', { code: 'KeyE', key: 'Dead', altKey: true }],
+    ['keyup', { code: 'KeyE', key: 'Dead', altKey: true }],
+    ['keyup', { code: 'AltLeft', key: 'Alt' }],
+    ['keydown', { code: 'KeyY', key: 'z' }],
+    ['keyup', { code: 'KeyY', key: 'z' }],
+  ]);
+  expect(await page.evaluate(() => events)).toEqual([
+    { kind: 5, keycode: 0x3a }, { kind: 5, keycode: 0x02 },
+    { kind: 6, keycode: 0x02 }, { kind: 5, keycode: 0x0e },
+    { kind: 6, keycode: 0x0e }, { kind: 6, keycode: 0x3a }, { text: 'z' },
+  ]);
 });
 
 test('plain hardware typing and repeat send text; Ctrl shortcuts retain positions', async ({ page }) => {
@@ -167,6 +294,7 @@ test('the physical keyboard menu changes routing and is hidden for Linux', async
     const { createUI } = await import('/ui.js');
     window.ui = createUI({ shortcuts: [], onPhysicalKeyboard: on => input.setPhysicalKeyboard(on) });
     ui.setHostOs('windows');
+    ui.setViewerTyping(true);
     ui.setKeyboardProfile({ physical: false });
   });
   await page.locator('#btn-more').click();

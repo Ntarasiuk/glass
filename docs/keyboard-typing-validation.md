@@ -1,57 +1,90 @@
-# Character typing validation (#146)
+# Viewer typing: behavior and validation
 
-For Windows/macOS hosts, viewers send resolved printable characters through the existing
-Text input stream. Shortcuts and editing keys retain physical positions. More → Physical keyboard
-restores physical typing for games and applications that require held keys. The preference
-is saved per computer. Linux hosts retain their existing physical input behavior.
+Addresses #146: the viewer resolves printable characters; the host receives text
+instead of interpreting those keys through its own keyboard layout.
 
-## Automated coverage
+## Behavior
 
-- `node --test tests/unit/*.test.mjs`: classifier, profiles and existing protocol tests.
-- `cd tests/e2e && npx playwright test input.spec.mjs`: actual browser handlers and UI,
-  observed at their input-record boundary; no native host required.
-- `scripts/test.sh e2e`: existing native test-host suite, with updated text expectations.
-- Native Rust unit tests cover helper text packet reassembly and macOS UTF-16 chunk
-  boundaries. These are not tests of OS delivery.
+- Windows and macOS advertise `viewer_typing_v1`. Older/unsupported hosts retain
+  physical input. Linux retains its existing physical and limited text fallback.
+- Printable characters and committed IME/dead-key text use `InputEvent::Text`.
+  Ctrl/Cmd/remote-Alt shortcuts and editing keys remain physical.
+- Space and Shift+Space are deliberately physical for holds and panning. They follow
+  the target application's composition behavior, not a literal-space guarantee.
+- Physical keyboard override supports games and letter-based tools. On Mac viewers
+  connected to Windows, Option-as-Alt changes Option chords independently of typing.
+- Windows text uses UTF-16 Unicode packets, never layout-dependent punctuation taps.
+  Partial insertion receives key-up-only recovery, never a replay of attempted text.
 
-## Native release gate (not yet verified)
+## Release ordering and ownership
 
-1. Mac viewer with German input source, Windows host with Croatian layout: type
-   `@ [] {} \\ | ~ ^ € ä ö ü ß č ć š ž đ`, mixed case, spaces, emoji and repeated letters.
-   Confirm exact output in Notepad, a browser field and a terminal.
-2. Repeat with host Caps Lock both on and off and viewer Caps Lock both on and off.
-   Verify the viewer-resolved case wins and the host lock state is not changed by Text.
-3. Test Ctrl/Cmd shortcuts, copy/paste, Shift+arrows, Alt+Tab, modified clicks/drags,
-   an Option character after a modified click, and release after window/tab focus changes.
-4. Compose accents using real dead keys in Safari and Chrome. Test dead key + space,
-   cancelled composition, consecutive identical characters after composition, Japanese
-   IME and mobile keyboards. Synthetic CompositionEvents do not prove OS sequencing.
-5. On a PC viewer, test real AltGr and a separate Ctrl+Alt shortcut. On iPad, test
-   existing Command/Option swapping and Ctrl-as-Command app switching.
-6. Repeat text and shortcut tests in elevated Notepad, the lock screen and UAC with the
-   secure-desktop helper installed. Switch between ordinary/elevated windows while holding
-   modifiers or a mouse button. Without the helper, normal UIPI restrictions still apply.
-7. Check physical mode with a game/key-driven application: key holds, repeats, release,
-   pointer lock, and preference persistence after reconnecting or switching computers.
-8. Repeat ordinary typing and shortcuts against a macOS host. Verify an emoji spanning
-   a 16-unit text chunk is intact, and held modifiers do not transform committed text.
+One bounded scheduler serializes native input. Network readers keep accepting input
+while text executes one scalar at a time. Releases of already-active owned presses
+may overtake text; pending down/up pairs cannot invert. Local shortcut batches retain
+their own order. Later queued viewer chords use the current modifier state.
 
-## Known constraints
+Disconnect or overload cancels that owner's pending input. Already-inserted text
+remains. Shared keys/buttons are released only when the final owner lets go. Native
+uncertainty cancels affected work instead of replaying it on a different route.
+Unsupported text ends its request without making the viewer's input stream unusable.
 
-- Native injection compatibility varies by application; physical mode is the escape hatch.
-- Windows retains its 40 ms Unicode pacing. Case-sensitive characters use Unicode because
-  an injection worker cannot reliably read the foreground app's Caps Lock queue state.
-  Measure sustained typing/repeat latency before reducing the existing pacing.
-- Input arriving from another local/remote keyboard concurrently can still interfere.
-- Browser- or OS-reserved shortcuts cannot be recovered by the page.
+The Windows helper uses an independent, versioned request/ACK pipe with one native
+step outstanding. Existing client/owner/version checks remain enforced. Focus and
+desktop changes are best-effort boundaries: SendInput cannot pin input to an HWND.
 
-## Verified in this checkout (2026-11-06)
+## Completed verification
 
-The isolated Linux build passed all 307 Rust workspace tests (one pre-existing ignored 4K
-speed benchmark) and produced the host binary. All 49 JavaScript unit tests, 13 standalone
-Chrome input tests, and 19 host-backed tests for input, clipboard/files and machine
-switching passed. Astra reviewed two rounds; its two initial findings were reproduced and
-fixed, and the second review found no remaining blocking code defects.
+Final local verification after capability activation and removal of superseded unused
+ownership code: 344 host + 15 protocol tests passed (one existing ignore), workspace
+build passed, 51 JavaScript unit tests, 23 browser-input tests and 21 host-backed tests
+passed. Native evidence below precedes those final activation/unused-code changes.
 
-The native release checklist above is still pending. These results do not certify Windows
-or macOS compilation, Safari dead-key sequencing, or native elevated/secure-desktop input.
+- Linux workspace: 347 host tests and 15 protocol tests passed; one existing speed
+  test ignored. Workspace build passed before the final three review corrections;
+  the corrected full test suite passed afterward.
+- Browser input: 23 tests passed. Real host-backed input/clipboard/files: 21 passed,
+  including same-stream release during text and disconnect without draining text.
+- Corrected native Windows: normal build and 56 targeted Rust tests passed.
+- Corrected native ARM64 Mac: normal build and 55 targeted tests passed.
+- Windows production WebTransport/SendInput (no FakeInput): 50 checks passed against
+  an owned receiver with Croatian KLID 0000041A. Unicode/surrogates, shared ownership,
+  Shift/Ctrl transitions, held Enter, multiline input and EOF cancellation passed.
+- With 4096 ASCII characters pending, Space-up arrived in 40.781–57.969 ms across
+  three trials, before exact eventual text completion. These observations are not
+  hard latency guarantees. Previously the same payload delayed release about 5 s.
+- Existing Edge textarea: 16 checks passed, including trusted native events and
+  exact Unicode/multiline/long documents. Full 4096-character documents took about
+  12–13 s; responsive release is not a claim of fast bulk insertion.
+- Owned Edge panning fixture: nine checks passed for physical Space+drag and
+  Shift+Space+drag with trusted key/pointer events. This is not Figma/Photoshop testing.
+- Native Windows pipe tests passed for duplex requests, deadlines, cancellation and
+  EOF. These tests do not establish the real SYSTEM helper route.
+- Review found and corrected local chord ordering, Mac nonmodifier reset, and Linux
+  unsupported-text stream cancellation. Regression tests reproduced the defects;
+  a fresh focused recheck found no remaining concrete findings within that scope.
+
+Corrected native source identity: base `6864a78` plus frozen patch
+`66c40d3d6d8f7e83230f3f5e21e6ef717033550eda5849cb69966a912e3deaf1` and correction
+`659c78fed0b5640301e877d2080e1adce2fdeb87a00ae3bd4898beae766f123a`.
+Windows binary: `2cfa46303fa3b067488397d87b7dde186cff1adf93837936e56e9cb5b1fc2935`.
+Mac binary: `646a8697c55aaea9013087858b877a6b2f78930c80d2ba52c0eac3cfa09086e2`.
+
+## Remaining validation and limits
+
+Actual SYSTEM/elevated/secure-desktop routing remains unverified. Windows Sandbox
+has no console-user identity, which the unchanged production authentication requires.
+Guest service setup was removed, its firewall rules and SAS policy were restored,
+and no host service/security settings were changed. No additional VM is required for
+this PR; that validation limitation is explicit rather than reported as a pass.
+
+Real Mac-German keyboard → Croatian Windows end-to-end testing, physical AltGr with
+an existing hold, actual Caps-on combinations, and Figma/Photoshop remain manual
+follow-up cases. Native builds and synthetic browser events do not prove them.
+Windows Unicode packets do not guarantee acceptance in games or every application.
+Concurrent physical keyboard input outside Glass ownership remains interference.
+
+Suggested manual check: type `@ +!? čćžšđ Ł 😀`, dead-key/IME compositions and multiline
+text; exercise shortcuts, held Space/Shift+Space, Option/AltGr and physical override;
+repeat with Caps on each side, two viewers, reconnect and focus changes. Check
+ordinary, elevated and secure-desktop targets separately. Never infer a pass from a
+successful SendInput return alone; verify the resulting application text and holds.

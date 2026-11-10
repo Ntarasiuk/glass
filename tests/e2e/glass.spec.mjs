@@ -314,6 +314,33 @@ test.describe('displays', () => {
 });
 
 test.describe('input', () => {
+  it('one viewer cannot release another viewers held Shift; disconnect releases the final owner', async ({ page, host, browser }) => {
+    await open(page, host);
+    // Separate browser storage/locks: two tabs of one viewer deliberately exclude each other.
+    const other = await browser.newPage();
+    await open(other, host);
+    await host.clearInput();
+    const key = (target, type, code) => target.evaluate(({ type, code }) => {
+      document.querySelector('#keys').dispatchEvent(new KeyboardEvent(type, {
+        code, key: code === 'ShiftLeft' ? 'Shift' : code, bubbles: true, cancelable: true,
+      }));
+    }, { type, code });
+    await key(page, 'keydown', 'ShiftLeft');
+    await expect.poll(() => keys(host, 'keydown')).toEqual([K.Shift]);
+    await key(other, 'keydown', 'ShiftLeft');
+    await key(other, 'keydown', 'Tab');
+    await key(other, 'keyup', 'Tab');
+    await expect.poll(() => keys(host, 'keyup')).toEqual([K.Tab]);
+    await key(page, 'keyup', 'ShiftLeft');
+    // This same-stream barrier proves the earlier Shift release was processed.
+    await key(page, 'keydown', 'ArrowRight');
+    await key(page, 'keyup', 'ArrowRight');
+    await expect.poll(() => keys(host, 'keyup')).toEqual([K.Tab, 0x7c]);
+    await other.close();
+    await expect.poll(() => keys(host, 'keyup')).toEqual([K.Tab, 0x7c, K.Shift]);
+    expect(await keys(host, 'keydown')).toEqual([K.Shift, K.Tab, 0x7c]);
+  });
+
   it('maps mouse position and clicks onto the right display', async ({ page, host }) => {
     await open(page, host);
     await pickMenuItem(page, 'btn-displays', 'All displays');
@@ -352,9 +379,9 @@ test.describe('input', () => {
     expect((await host.input('scroll')).events.reduce((sum, e) => sum + e.dy, 0)).toBeCloseTo(120 * 640 / shown, 0);
   });
 
-  it('physical keyboard mode sends typed keys as Mac keycodes', async ({ page, host }) => {
+  it('a host without hybrid support receives physical Mac keycodes by default', async ({ page, host }) => {
     await open(page, host);
-    await pickMenuItem(page, 'btn-more', 'Physical keyboard');
+    await expect(page.getByRole('menuitemradio', { name: /Physical keyboard/ })).toHaveCount(0);
     await host.clearInput();
     // Like a real keyboard: Shift is its own key press.
     await page.keyboard.press('Shift+KeyH');
@@ -380,7 +407,7 @@ test.describe('input', () => {
     await expect.poll(() => keys(host, 'keyup')).toEqual([K.Tab]);
     const { events } = await host.input();
     const typed = events.filter((e) => e.t === 'text' || e.t === 'keydown').map((e) => e.text ?? e.keycode);
-    expect(typed).toEqual(['café 👍', '日本語', 'i', K.Tab]);
+    expect(typed).toEqual([...('café 👍日本語i'), K.Tab]);
   });
 
   it('PC keyboard mode turns Ctrl into ⌘ and Super into Ctrl', async ({ page, host }) => {
@@ -536,7 +563,7 @@ test.describe('input', () => {
       el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true }));
     });
     await expect.poll(() => keys(host, 'keydown')).toEqual([0x33]);
-    expect((await host.input('text')).events.map((e) => e.text)).toEqual(['a!']);
+    expect((await host.input('text')).events.map((e) => e.text).join('')).toBe('a!');
   });
 });
 
@@ -812,5 +839,59 @@ test.describe('updates', () => {
     } finally {
       await host.stop();
     }
+  });
+});
+
+test.describe('input scheduling', () => {
+  async function rawInput(page, host) {
+    await page.goto(`${host.base}/config.json`);
+    await page.evaluate(async ({ wt, token }) => {
+      const config = await fetch('/config.json').then(r => r.json());
+      const transport = new WebTransport(`https://localhost:${wt}/`, {
+        serverCertificateHashes: [{ algorithm: 'sha-256', value: new Uint8Array(config.certHash) }],
+      });
+      await transport.ready;
+      const ctl = await transport.createBidirectionalStream();
+      const body = new TextEncoder().encode(JSON.stringify({ t: 'hello', token }));
+      const frame = new Uint8Array(body.length + 4);
+      new DataView(frame.buffer).setUint32(0, body.length, true); frame.set(body, 4);
+      await ctl.writable.getWriter().write(frame);
+      const reader = ctl.readable.getReader();
+      await reader.read();
+      const writer = (await transport.createUnidirectionalStream()).getWriter();
+      await writer.write(new Uint8Array([0x49]));
+      const proto = await import('/proto.js');
+      window.raw = { transport, writer, reader, proto };
+    }, { wt: host.wt, token: host.token });
+  }
+  async function gate(host, blocked) {
+    const response = await fetch(`${host.base}/test/input-gate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ blocked }) });
+    expect(response.ok).toBeTruthy();
+  }
+  it('admits same-stream up while scalar is blocked and executes up before the suffix', async ({ page, host }) => {
+    await rawInput(page, host);
+    await page.evaluate(() => raw.writer.write(raw.proto.inputEvent(5, { keycode: 49 })));
+    await expect.poll(() => keys(host, 'keydown')).toEqual([49]);
+    await gate(host, true);
+    await page.evaluate(async () => { for (const ev of raw.proto.textEvents('abc')) await raw.writer.write(ev); });
+    await expect.poll(async () => (await fetch(`${host.base}/test/input-gate`).then(r => r.json())).entered).toBe(1);
+    await page.evaluate(() => raw.writer.write(raw.proto.inputEvent(6, { keycode: 49 })));
+    await expect.poll(async () => (await host.get('/test/input')).pending).toBe(2);
+    await gate(host, false);
+    await expect.poll(async () => (await host.input()).events.map(e => e.t === 'text' ? e.text : e.t)).toEqual(['keydown', 'a', 'keyup', 'b', 'c']);
+    await page.evaluate(() => raw.transport.close());
+  });
+  it('EOF cancels the blocked scalar suffix without draining text', async ({ page, host }) => {
+    await rawInput(page, host);
+    await gate(host, true);
+    await page.evaluate(async () => { for (const ev of raw.proto.textEvents('abcdef')) await raw.writer.write(ev); });
+    await expect.poll(async () => (await fetch(`${host.base}/test/input-gate`).then(r => r.json())).entered).toBe(1);
+    await page.evaluate(() => raw.writer.close());
+    // An ordinary queued command is cancelled by EOF even while native input is blocked.
+    await page.evaluate(() => raw.transport.close());
+    await expect.poll(async () => (await host.get('/test/input')).owners).toBe(0);
+    await gate(host, false);
+    await expect.poll(async () => (await host.get('/test/input')).pending).toBe(0);
+    expect((await host.input('text')).events.map(e => e.text).join('')).toBe('a');
   });
 });

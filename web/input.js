@@ -41,7 +41,7 @@ const MODIFIER_KEYCODES = new Set(MODIFIER_CODES.map((c) => MAC_KEYCODES[c]));
 export function attachInput({
   screens, keySink, send: sendNow, control, nextClipboard, onMacCopy = () => {}, onPaste, onLocalShortcut, swapCmdOption = false,
   ctrlAsCmd = true, pcKeyboard = false, onZoom, onResize = () => {},
-  macViewer = /Mac|iPhone|iPad/.test(navigator.platform), physicalKeyboard = false,
+  macViewer = /Mac|iPhone|iPad/.test(navigator.platform), physicalKeyboard = false, optionAsAlt = false,
 }) {
   // With iPadOS set to turn the physical ⌘ key into ⌥ (so it can't claim ⌘Tab etc.),
   // swap them back here so the Mac gets the keys the user actually pressed.
@@ -70,7 +70,9 @@ export function attachInput({
   let macHost = true;
   let textHost = true;
   let physical = physicalKeyboard;
-  const characterMode = () => textHost && !physical;
+  let optionAlt = optionAsAlt;
+  let viewerTyping = false;
+  const characterMode = () => textHost && viewerTyping && !physical;
   const touchKeyboard = /iPhone|iPad|Android/.test(navigator.userAgent) ||
     (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
   const codeOf = (e) => (!macHost ? undefined : pc ? PC[e.code] : swap ? SWAPPED[e.code] : undefined) ?? e.code;
@@ -598,7 +600,7 @@ export function attachInput({
   function prepareText() {
     for (const keycode of typingModifiers.keys()) typingModifiers.set(keycode, true);
     // A modifier already used by a physical action remains held until its real keyup.
-    // Native text injection neutralizes it atomically; releasing Alt here can open menus.
+    // Native text injection suspends Glass-owned modifiers; releasing Alt here can open menus.
   }
   function resetKeyboard() {
     releaseKeys();
@@ -635,12 +637,12 @@ export function attachInput({
   }
 
   /**
-   * Committed characters are sent verbatim on text-capable hosts. Physical mode and
-   * Linux retain the legacy US-key fallback for on-screen keyboards.
+   * Committed characters (IME/on-screen keyboard) are already text, independent of
+   * hardware-key routing or viewerTyping support. Linux retains its legacy US-key fallback.
    */
   function typeText(text) {
     if (!text) return;
-    if (characterMode()) {
+    if (textHost) {
       prepareText();
       for (const bytes of textEvents(text)) send(Input.TEXT, { bytes });
       return;
@@ -668,7 +670,7 @@ export function attachInput({
       return;
     }
     // Do not cancel the browser's dead-key/IME processing. Only its commit is transmitted.
-    if (composing || e.isComposing || e.keyCode === 229 || (characterMode() && e.key === 'Dead')) {
+    if (composing || e.isComposing || e.keyCode === 229 || (characterMode() && e.key === 'Dead' && !(!macHost && macViewer && optionAlt && e.altKey))) {
       if (characterMode()) prepareText();
       return;
     }
@@ -678,13 +680,19 @@ export function attachInput({
       if (MODIFIER_KEYCODES.has(keycode)) {
         if (!typingModifiers.has(keycode)) typingModifiers.set(keycode, false);
         // A modifier pressed after mouse-down must affect the ongoing drag immediately.
-        if (pointerButtons.size) flushModifiers();
+        const physicalHold = [...heldKeys].some(k => !MODIFIER_KEYCODES.has(k));
+        const characterAlt = (e.code === 'AltLeft' || e.code === 'AltRight') &&
+          !(optionAlt && !macHost) && (macViewer || e.getModifierState?.('AltGraph'));
+        if (pointerButtons.size || (physicalHold && !characterAlt)) flushModifiers();
         return;
       }
       // An already transmitted physical key keeps its route for the entire hold.
-      const text = !heldKeys.has(keycode) && typedKey(e, { macViewer, commandHeld: cmdHeld(e) });
-      if (text) {
+      const text = !heldKeys.has(keycode) && typedKey(e, { macViewer, commandHeld: cmdHeld(e), optionAsAlt: !macHost && optionAlt });
+      const physicalSpace = code === 'Space' && text === ' ' && !e.altKey && !e.getModifierState?.('AltGraph');
+      if (text && !physicalSpace) {
         e.preventDefault();
+        if (e.repeat && !textKeys.has(e.code)) return;
+        if (!e.repeat && textKeys.has(e.code)) return;
         textKeys.add(e.code);
         typeText(text);
         return;
@@ -692,7 +700,7 @@ export function attachInput({
       if (textKeys.has(e.code)) { e.preventDefault(); return; }
     }
     // On-screen keyboards often report no code; their text arrives via beforeinput.
-    if (keycode === undefined) return;
+    if (keycode === undefined || (e.repeat && !heldKeys.has(keycode))) return;
 
     flushModifiers();
 
@@ -746,7 +754,7 @@ export function attachInput({
     if (localField(e.target)) return;
     // macOS can swallow character keyups while physical Command is held. Clear their
     // text ownership even if Command itself was deferred and has no transmitted keyup.
-    if (e.code === 'MetaLeft' || e.code === 'MetaRight') textKeys.clear();
+    if (e.code === 'MetaLeft' || e.code === 'MetaRight') { textKeys.clear(); }
     if (!e.metaKey) unfocusAfterPaste();
     const code = codeOf(e);
     const keycode = MAC_KEYCODES[code];
@@ -792,6 +800,8 @@ export function attachInput({
   // key sink, which can't be stopped; what it settles on is typed, and the field emptied.
   let composed; // { text, at }: Safari can follow compositionend with the same insertText
   keySink.addEventListener('compositionstart', () => {
+    releaseKeys(k => !MODIFIER_KEYCODES.has(k));
+    textKeys.clear();
     composing = true;
     if (characterMode()) prepareText();
   });
@@ -870,10 +880,19 @@ export function attachInput({
       resetKeyboard();
       remapCtrl = on;
     },
+    setViewerTyping(on) {
+      resetKeyboard();
+      viewerTyping = on === true;
+    },
     setHostOs(os) {
       resetKeyboard();
+      viewerTyping = false;
       macHost = os === 'macos';
       textHost = os === 'macos' || os === 'windows';
+    },
+    setOptionAsAlt(on) {
+      resetKeyboard();
+      optionAlt = on;
     },
     setPhysicalKeyboard(on) {
       resetKeyboard();
