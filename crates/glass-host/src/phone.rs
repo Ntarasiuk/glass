@@ -74,8 +74,26 @@ fn port_number(s: &str) -> anyhow::Result<u16> {
         .ok_or_else(|| anyhow::anyhow!("{s} isn't a port"))
 }
 
-/// `name=port[:video][/wifi][@udid]` entries, as `glass config phones` takes them.
+/// `name=port[:video][/wifi][@udid]` entries, as `glass config phones` takes them. Each
+/// phone has its own port (Glass keeps its WebDriverAgent session by it) and its own UDID
+/// (two entries for one phone would each start WebDriverAgent on it and stop the other's).
 pub fn parse(entries: &[String]) -> anyhow::Result<Vec<Phone>> {
+    let phones = parse_each(entries)?;
+    for (i, p) in phones.iter().enumerate() {
+        for q in &phones[..i] {
+            anyhow::ensure!(q.port != p.port, "{} and {} both have port {}: give each phone its own", q.name, p.name, p.port);
+            anyhow::ensure!(
+                p.udid.is_none() || q.udid.as_deref().map(|u| u.replace('-', "").to_ascii_lowercase()) != p.udid.as_deref().map(|u| u.replace('-', "").to_ascii_lowercase()),
+                "{} and {} are the same phone (its UDID): keep one entry for it",
+                q.name,
+                p.name
+            );
+        }
+    }
+    Ok(phones)
+}
+
+fn parse_each(entries: &[String]) -> anyhow::Result<Vec<Phone>> {
     entries
         .iter()
         .map(|e| {
@@ -330,9 +348,13 @@ pub(crate) fn keep_quick(p: &Phone) {
     }
     // Not while something reads the app deeply (`deep`): it would make that read shallow,
     // and it puts the quick settings back itself when it's done. Then again next time.
-    let Ok(_reading) = DEPTH.try_lock() else {
-        QUICK_AT.lock().unwrap().get_or_insert_with(HashMap::new).remove(&p.port);
-        return;
+    let _reading = match DEPTH.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            QUICK_AT.lock().unwrap().get_or_insert_with(HashMap::new).remove(&p.port);
+            return;
+        }
     };
     let quick = json!({ "settings": { "waitForIdleTimeout": 0, "animationCoolOffTimeout": 0, "snapshotMaxDepth": SHALLOW } });
     let _ = in_session(p, "POST", "/appium/settings", Some(&quick));
@@ -346,6 +368,11 @@ const DEEP: u32 = 50;
 /// (`keep_quick`, another deep read finishing first).
 static DEPTH: Mutex<()> = Mutex::new(());
 
+/// Holds DEPTH. It guards no data, so one a panic left poisoned still works.
+fn depth_lock() -> std::sync::MutexGuard<'static, ()> {
+    DEPTH.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn set_depth(p: &Phone, d: u32) -> Result<Value, Refused> {
     in_session(p, "POST", "/appium/settings", Some(&json!({ "settings": { "snapshotMaxDepth": d } })))
 }
@@ -353,7 +380,7 @@ fn set_depth(p: &Phone, d: u32) -> Result<Value, Refused> {
 /// Runs `f` with WebDriverAgent looking all the way into the app (reading the screen as
 /// text), then makes gestures quick again.
 fn deep<T>(p: &Phone, f: impl FnOnce() -> T) -> T {
-    let _reading = DEPTH.lock().unwrap();
+    let _reading = depth_lock();
     let _ = set_depth(p, DEEP);
     let out = f();
     let _ = set_depth(p, SHALLOW);
@@ -390,7 +417,7 @@ impl Focus {
         if !matches!(crate::grants::current(), crate::grants::Actor::Agent(_)) {
             return Focus::clear();
         }
-        let _reading = DEPTH.lock().unwrap();
+        let _reading = depth_lock();
         // A shallow look finds no field, so it must be the deep one, and its answer must come.
         let secure = set_depth(p, DEEP).and_then(|_| focused_is_secure(p));
         let keyboard = match secure {
@@ -1295,6 +1322,11 @@ mod tests {
         assert_eq!(kept[1].entry(), "pro=8200/wifi@00008120-00040D520C38C01E", "9200 is 8200's usual video port");
         assert!(parse(&["xr=8100@nope".into()]).is_err());
         assert!(parse(&["xr=8100@../../etc".into()]).is_err());
+        // One entry per phone, and a port each.
+        let same = parse(&["xr=8100@00008020-000649323451002E".into(), "xrw=8200/wifi@00008020000649323451002e".into()]);
+        assert!(same.unwrap_err().to_string().contains("same phone"));
+        assert!(parse(&["xr=8100".into(), "se=8100:9300".into()]).unwrap_err().to_string().contains("port 8100"));
+        assert!(parse(&["xr=8100".into(), "se=8101".into()]).is_ok());
         assert!(parse(&["xr=8100:8100".into()]).is_err(), "command and video ports differ");
         assert!(parse(&["xr=65000".into()]).is_err(), "no room for the usual video port");
         assert!(parse(&["xr".into()]).is_err());

@@ -53,7 +53,8 @@ With a UDID in its entry, Glass looks after the phone itself; nothing else needs
   the picture), each time it needs one: over USB through usbmuxd, over Wi-Fi through Apple's
   device tunnel (whose address it looks up again when the phone reconnects). Nothing listens
   on this computer for it, so other programs here and web pages can't reach the phone through
-  Glass; the port in its entry just names it.
+  Glass. The port in its entry then only tells phones apart (each needs its own, and each
+  phone one entry).
 - It doesn't try to start anything on a phone that isn't there: unplugged, or out of range,
   it's *offline* and says so until it's back.
 - It starts WebDriverAgent when it isn't answering, and again whenever it stops (after 5 s,

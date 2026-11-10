@@ -290,6 +290,7 @@ pub(crate) fn open(phone: &Phone, port: u16, timeout: Duration) -> Result<Box<dy
 }
 
 /// What WebDriverAgent answered.
+#[derive(Debug)]
 pub(crate) struct Reply {
     pub status: u16,
     pub body: Vec<u8>,
@@ -311,21 +312,39 @@ pub(crate) fn request(phone: &Phone, method: &str, path: &str, body: Option<&[u8
     read_reply(&mut BufReader::new(pipe))
 }
 
+/// The longest line of a reply's head (its status, a header, a chunk's size), and the most
+/// headers: a reply past them is refused rather than read without end.
+const LINE_MOST: u64 = 8 << 10;
+const HEADERS_MOST: usize = 100;
+
+/// One line, at most LINE_MOST long.
+fn read_line(r: &mut impl BufRead, line: &mut String) -> Result<usize, String> {
+    line.clear();
+    let n = r.take(LINE_MOST).read_line(line).map_err(|e| format!("its reply broke off ({e})"))?;
+    if n as u64 == LINE_MOST && !line.ends_with('\n') {
+        return Err("a line of its reply was too long".into());
+    }
+    Ok(n)
+}
+
 /// An HTTP/1.1 response: its status and body (by its length, in chunks, or to the end).
 fn read_reply(r: &mut impl BufRead) -> Result<Reply, String> {
     let bad = |e: std::io::Error| format!("its reply broke off ({e})");
+    let too_big = || "its reply was too big".to_string();
     let mut line = String::new();
-    r.read_line(&mut line).map_err(bad)?;
+    read_line(r, &mut line)?;
     let status: u16 = line
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| format!("an odd reply: {:?}", line.trim()))?;
     let (mut length, mut chunked) = (None, false);
-    loop {
-        line.clear();
-        if r.read_line(&mut line).map_err(bad)? == 0 || line.trim().is_empty() {
+    for n in 0.. {
+        if read_line(r, &mut line)? == 0 || line.trim().is_empty() {
             break;
+        }
+        if n >= HEADERS_MOST {
+            return Err("its reply had too many headers".into());
         }
         if let Some((k, v)) = line.split_once(':') {
             let (k, v) = (k.trim(), v.trim());
@@ -339,31 +358,27 @@ fn read_reply(r: &mut impl BufRead) -> Result<Reply, String> {
     let mut body = Vec::new();
     if chunked {
         loop {
-            line.clear();
-            r.read_line(&mut line).map_err(bad)?;
+            read_line(r, &mut line)?;
             let n = usize::from_str_radix(line.trim().split(';').next().unwrap_or(""), 16).map_err(|_| "an odd chunk".to_string())?;
             if n == 0 {
                 break;
             }
-            if body.len() + n > REPLY_MOST {
-                return Err("its reply was too big".into());
-            }
+            let end = body.len().checked_add(n).filter(|&e| e <= REPLY_MOST).ok_or_else(too_big)?;
             let at = body.len();
-            body.resize(at + n, 0);
+            body.resize(end, 0);
             r.read_exact(&mut body[at..]).map_err(bad)?;
-            line.clear();
-            r.read_line(&mut line).map_err(bad)?;
+            read_line(r, &mut line)?;
         }
     } else if let Some(n) = length {
         if n > REPLY_MOST {
-            return Err("its reply was too big".into());
+            return Err(too_big());
         }
         body.resize(n, 0);
         r.read_exact(&mut body).map_err(bad)?;
     } else {
         r.take(REPLY_MOST as u64 + 1).read_to_end(&mut body).map_err(bad)?;
         if body.len() > REPLY_MOST {
-            return Err("its reply was too big".into());
+            return Err(too_big());
         }
     }
     Ok(Reply { status, body })
@@ -574,7 +589,7 @@ impl Runner {
     fn start(phone: &Phone, build: Option<std::path::PathBuf>) -> Result<Runner, String> {
         let udid = phone.udid.as_deref().unwrap_or_default();
         let pid_file = wda_dir(udid).join("runner.pid");
-        stop_left_over(&pid_file);
+        stop_left_over(&pid_file, udid);
         let mut cmd = if let Some(xctestrun) = build {
             let mut c = Command::new("xcrun");
             c.args(["xcodebuild", "test-without-building", "-xctestrun"]).arg(xctestrun).args(["-destination", &format!("id={udid}")]);
@@ -628,28 +643,35 @@ impl Drop for Runner {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_file(&self.pid_file);
+        // Only its own: another runner's may be there now.
+        if std::fs::read_to_string(&self.pid_file).is_ok_and(|s| s.trim() == self.child.id().to_string()) {
+            let _ = std::fs::remove_file(&self.pid_file);
+        }
     }
 }
 
 /// Stops the xcodebuild or go-ios an earlier Glass started for this phone and left running
 /// (it ended without stopping it), so two don't fight over the phone.
-fn stop_left_over(pid_file: &std::path::Path) {
+fn stop_left_over(pid_file: &std::path::Path, udid: &str) {
     let Some(pid) = std::fs::read_to_string(pid_file).ok().and_then(|s| s.trim().parse::<u32>().ok()) else { return };
     let _ = std::fs::remove_file(pid_file);
-    // Only if that process is still one of those (its id may have been reused since).
-    let comm = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok();
-    let comm = comm.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-    if is_runner(&comm) {
+    // Only if that process is still one running WebDriverAgent on this phone: its id may
+    // have been reused since, by anything (a developer's own xcodebuild, say).
+    let args = Command::new("ps").args(["-ww", "-o", "args=", "-p", &pid.to_string()]).output().ok();
+    let args = args.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    if is_runner_for(&args, udid) {
         tracing::info!("stopping WebDriverAgent's runner left over from before (process {pid})");
         let _ = Command::new("kill").arg(pid.to_string()).status();
     }
 }
 
-/// Whether a process's command is one that runs WebDriverAgent.
-fn is_runner(comm: &str) -> bool {
-    let name = comm.rsplit('/').next().unwrap_or(comm);
-    matches!(name, "xcodebuild" | "xcrun" | "ios")
+/// Whether a process's command line is the one Glass starts WebDriverAgent on this phone with.
+fn is_runner_for(args: &str, udid: &str) -> bool {
+    let program = args.split_whitespace().next().unwrap_or("");
+    let program = program.rsplit('/').next().unwrap_or(program);
+    let xcode = matches!(program, "xcodebuild" | "xcrun") && args.contains("test-without-building") && args.contains(".xctestrun");
+    let go_ios = program == "ios" && args.contains(" runwda ") && args.contains("WebDriverAgentRunner.xctest");
+    !udid.is_empty() && args.contains(udid) && (xcode || go_ios)
 }
 
 /// What a line from xcodebuild or go-ios means for the person, if anything.
@@ -757,9 +779,25 @@ mod tests {
     #[test]
     fn temp_files_differ_and_left_over_runners_are_told_apart() {
         assert_ne!(temp_json("details", "u"), temp_json("details", "u"));
-        assert!(is_runner("/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"));
-        assert!(is_runner("/opt/homebrew/bin/ios") && is_runner("xcrun"));
-        assert!(!is_runner("/usr/bin/login") && !is_runner("Safari") && !is_runner(""));
+        let u = "00008020-000649323451002E";
+        let xcode = format!("/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test-without-building -xctestrun /x/wda/{u}/WDA.xctestrun -destination id={u}");
+        assert!(is_runner_for(&xcode, u));
+        let ios = format!("/opt/homebrew/bin/ios runwda --bundleid a.WebDriverAgentRunner.xctrunner --testrunnerbundleid a.WebDriverAgentRunner.xctrunner --xctestconfig WebDriverAgentRunner.xctest --udid {u}");
+        assert!(is_runner_for(&ios, u));
+        // Another phone's, or a developer's own build: left alone.
+        assert!(!is_runner_for(&xcode, "00008120-00040D520C38C01E"));
+        assert!(!is_runner_for(&format!("xcodebuild build -scheme App -destination id={u}"), u));
+        assert!(!is_runner_for("/usr/bin/login", u) && !is_runner_for("", u) && !is_runner_for(&xcode, ""));
+    }
+
+    #[test]
+    fn odd_replies_are_refused_not_read_without_end() {
+        let read = |raw: String| read_reply(&mut BufReader::new(std::io::Cursor::new(raw.into_bytes())));
+        // A chunk's size that would wrap round: refused, not a panic.
+        assert!(read("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\nffffffffffffffff\r\n".into()).unwrap_err().contains("too big"));
+        assert!(read(format!("HTTP/1.1 200 OK\r\nX: {}\r\n\r\n", "a".repeat(LINE_MOST as usize))).unwrap_err().contains("too long"));
+        assert!(read(format!("HTTP/1.1 200 OK\r\n{}\r\n", "X: y\r\n".repeat(HEADERS_MOST + 1))).unwrap_err().contains("too many"));
+        assert!(read(format!("HTTP/1.1 200 OK\r\n{}Content-Length: 2\r\n\r\nok", "X: y\r\n".repeat(HEADERS_MOST - 1))).is_ok());
     }
 
     #[test]
