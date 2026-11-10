@@ -8,9 +8,13 @@
 //!
 //! Input: WebDriverAgent plays a gesture as one request, so a press is held here until it's
 //! released and then played back, with its own timing, as a tap, a long press or a swipe.
-//! Scrolling is a swipe; keys type; Escape is the Home button.
+//! Scrolling is a swipe; keys type. Home is the toolbar's button (not Escape: that's also
+//! how a viewer leaves fullscreen).
+//!
+//! Only the viewer's input goes to a shown phone: agents' input is always the computer's
+//! (`InputSink::computer`), and agents use phones through crate::phone, with its checks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
@@ -80,6 +84,10 @@ impl Feed {
 pub struct Phones {
     feeds: Mutex<Vec<Arc<Feed>>>,
     shown: Mutex<Option<Arc<Feed>>>,
+    /// The computer's own video, and whether its frames reach viewers (not while a phone is
+    /// shown).
+    computer: Arc<dyn VideoSource>,
+    computer_on: AtomicBool,
     frames: broadcast::Sender<Arc<EncodedFrame>>,
     bitrate: AtomicU32,
     fps: AtomicU32,
@@ -91,6 +99,33 @@ pub struct Phones {
 impl Phones {
     fn shown(&self) -> Option<Arc<Feed>> {
         self.shown.lock().unwrap().clone()
+    }
+
+    /// Back to the computer's own picture, if a phone is shown (`only`: if it's that one):
+    /// the phone's picture stops and the computer's goes on from a keyframe. Whether one was.
+    fn unshow(&self, only: Option<&Arc<Feed>>) -> bool {
+        let old = {
+            let mut shown = self.shown.lock().unwrap();
+            if shown.is_none() || only.is_some_and(|f| !shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, f))) {
+                return false;
+            }
+            let old = shown.take().unwrap();
+            old.slot.store(-1, Ordering::Relaxed);
+            old
+        };
+        self.computer_on.store(true, Ordering::Relaxed);
+        self.computer.request_keyframe(None);
+        tracing::info!("phone {}: no longer shown; back to the computer", old.phone.name);
+        true
+    }
+
+    /// The shown phone's picture ended (unplugged, WebDriverAgent stopped, taken out of the
+    /// settings): viewers go back to the computer rather than a frozen phone.
+    fn lost(&self, feed: &Arc<Feed>, why: &str) {
+        if self.unshow(Some(feed)) {
+            tracing::warn!("phone {}: its picture stopped ({why}); viewers are back on the computer", feed.phone.name);
+            crate::server::phone_hidden(&format!("{} stopped sending its picture, so here's the computer again.", feed.phone.name));
+        }
     }
 
     /// Starts a feed for each phone newly in the settings, and ends those taken out.
@@ -142,35 +177,79 @@ pub fn wrap(
     let phones = Arc::new(Phones {
         feeds: Mutex::new(Vec::new()),
         shown: Mutex::new(None),
+        computer: inner.clone(),
+        computer_on: AtomicBool::new(true),
         frames: frames.clone(),
         bitrate: AtomicU32::new(bitrate),
         fps: AtomicU32::new(fps.clamp(1, 30)),
         input_at: Mutex::new(None),
     });
-    let inner_on = Arc::new(AtomicBool::new(true));
     {
-        let (mut rx, on) = (inner_frames.subscribe(), inner_on.clone());
+        let (mut rx, phones) = (inner_frames.subscribe(), phones.clone());
         let _ = std::thread::Builder::new().name("computer frames".into()).spawn(move || {
+            let mut gate = Gate::default();
             loop {
                 match rx.blocking_recv() {
-                    Ok(f) if on.load(Ordering::Relaxed) => {
-                        let _ = frames.send(f);
+                    Ok(f) => {
+                        if gate.admit(f.stream, f.keyframe, phones.computer_on.load(Ordering::Relaxed)) {
+                            let _ = frames.send(f);
+                        }
                     }
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::debug!("computer frames: {n} dropped here (fell behind); waiting for keyframes");
+                        gate.lagged();
+                        phones.computer.request_keyframe(None);
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
     }
     phones.sync();
-    (Arc::new(PhoneVideo { inner, phones: phones.clone(), inner_on }), phones)
+    (Arc::new(PhoneVideo { inner, phones: phones.clone() }), phones)
+}
+
+/// Which of the computer's frames go on to viewers. None while a phone is shown; and after
+/// frames were dropped on the way (falling behind) or held back (a phone was shown), a
+/// stream's next frames wait for its keyframe: a delta would decode against a picture the
+/// viewer never got, and the viewer can't tell a frame went missing here.
+struct Gate {
+    need_key: [bool; 256],
+    was_on: bool,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Gate { need_key: [false; 256], was_on: true }
+    }
+}
+
+impl Gate {
+    fn admit(&mut self, stream: u8, keyframe: bool, on: bool) -> bool {
+        if !on {
+            self.was_on = false;
+            return false;
+        }
+        if !self.was_on {
+            self.was_on = true;
+            self.need_key = [true; 256];
+        }
+        let need = &mut self.need_key[stream as usize];
+        if *need && !keyframe {
+            return false;
+        }
+        *need = false;
+        true
+    }
+
+    fn lagged(&mut self) {
+        self.need_key = [true; 256];
+    }
 }
 
 pub struct PhoneVideo {
     inner: Arc<dyn VideoSource>,
     phones: Arc<Phones>,
-    /// The computer's frames reach viewers (false while a phone is shown).
-    inner_on: Arc<AtomicBool>,
 }
 
 impl PhoneVideo {
@@ -229,7 +308,7 @@ impl VideoSource for PhoneVideo {
             if let Some(old) = shown.take() {
                 old.slot.store(-1, Ordering::Relaxed);
             }
-            self.inner_on.store(false, Ordering::Relaxed);
+            self.phones.computer_on.store(false, Ordering::Relaxed);
             feed.width.store(0, Ordering::Relaxed);
             feed.keyframe.store(true, Ordering::Relaxed);
             feed.slot.store(0, Ordering::Relaxed);
@@ -238,11 +317,9 @@ impl VideoSource for PhoneVideo {
             return self.shown_info().map(|d| vec![d]).context("that phone stopped sending its picture");
         }
         let streams = self.inner.set_layout(layout)?;
-        if let Some(old) = self.phones.shown.lock().unwrap().take() {
-            old.slot.store(-1, Ordering::Relaxed);
+        if !self.phones.unshow(None) {
+            self.inner.request_keyframe(None);
         }
-        self.inner_on.store(true, Ordering::Relaxed);
-        self.inner.request_keyframe(None);
         Ok(streams)
     }
 
@@ -341,22 +418,37 @@ impl VideoSource for PhoneVideo {
     fn supports_hevc(&self) -> bool {
         self.inner.supports_hevc()
     }
+
+    fn showing_phone(&self) -> bool {
+        self.phone_shown()
+    }
+
+    fn hide_phone(&self) -> bool {
+        self.phones.unshow(None)
+    }
 }
 
 // ---- The picture ----
 
 fn feed_loop(feed: Arc<Feed>, phones: Arc<Phones>) {
     let mut said = false;
-    while !feed.stop.load(Ordering::Relaxed) {
-        match stream(&feed, &phones) {
-            Ok(()) => {}
-            Err(e) if !said => {
-                tracing::info!("phone {}: no picture yet ({e:#}); trying again every few seconds", feed.phone.name);
-                said = true;
-            }
-            Err(_) => {}
-        }
+    loop {
+        let ended = stream(&feed, &phones);
         feed.live.store(false, Ordering::Relaxed);
+        let why = match &ended {
+            Ok(()) => "taken out of the settings".to_string(),
+            Err(e) => format!("{e:#}"),
+        };
+        phones.lost(&feed, &why);
+        if feed.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Err(e) = ended
+            && !said
+        {
+            tracing::info!("phone {}: no picture yet ({e:#}); trying again every few seconds", feed.phone.name);
+            said = true;
+        }
         std::thread::sleep(Duration::from_secs(3));
     }
 }
@@ -373,7 +465,7 @@ fn deliver(feed: &Feed, frames: &broadcast::Sender<Arc<EncodedFrame>>, probe: &P
     if let Some(at) = probe.lock().unwrap().take() {
         tracing::debug!("phone {}: input to picture sent {} ms", feed.phone.name, at.elapsed().as_millis());
     }
-    let _ = frames.send(Arc::new(EncodedFrame { stream: slot as u8, hevc: false, ..frame }));
+    let _ = frames.send(Arc::new(EncodedFrame { stream: slot as u8, hevc: false, phone: true, ..frame }));
 }
 
 /// An encoder for one size and frame rate: the Mac's hardware encoder where there is one
@@ -470,7 +562,7 @@ impl Encoding {
                 let frame = crate::soft_encode::Frame { width: w, height: h, stride: w * 4, format: crate::soft_encode::PixelFormat::Bgrx, data: bgra };
                 Ok(match encoder.encode(&frame, force)? {
                     Some((data, keyframe)) => {
-                        deliver(feed, frames, probe, EncodedFrame { stream: 0, data, keyframe, capture_us, hevc: false, refresh: false });
+                        deliver(feed, frames, probe, EncodedFrame { stream: 0, data, keyframe, capture_us, hevc: false, refresh: false, phone: true });
                         true
                     }
                     None => false,
@@ -726,7 +818,6 @@ fn scale_bgra(src: &[u8], w: usize, h: usize, dw: usize, dh: usize) -> Vec<u8> {
 enum Cmd {
     Touch { phone: Phone, path: Vec<(f64, f64, u64)>, hold: u64 },
     Keys { phone: Phone, text: String },
-    Home { phone: Phone },
     /// One of the phone's buttons or system gestures (glass_proto::phone_keys).
     System { phone: Phone, key: u16, size: (f64, f64) },
     /// Scrolling at a point (points), by `dx`, `dy` (points, content moving up/left).
@@ -749,13 +840,28 @@ pub struct PhoneInput {
     text: glass_proto::TextReader,
     shift: bool,
     command: bool,
+    /// Keys and buttons a viewer has down on the computer: they're let go there, even if a
+    /// phone was shown meanwhile (else the computer would keep them held).
+    keys_down: HashSet<u16>,
+    buttons_down: HashSet<u8>,
     tx: mpsc::Sender<Cmd>,
 }
 
 pub fn wrap_input(inner: Box<dyn InputSink>, phones: Arc<Phones>) -> Box<dyn InputSink> {
     let (tx, rx) = mpsc::channel();
     let _ = std::thread::Builder::new().name("phone input".into()).spawn(move || input_worker(rx));
-    Box::new(PhoneInput { inner, phones, at: (0.5, 0.5), press: None, text: Default::default(), shift: false, command: false, tx })
+    Box::new(PhoneInput {
+        inner,
+        phones,
+        at: (0.5, 0.5),
+        press: None,
+        text: Default::default(),
+        shift: false,
+        command: false,
+        keys_down: HashSet::new(),
+        buttons_down: HashSet::new(),
+        tx,
+    })
 }
 
 impl PhoneInput {
@@ -780,7 +886,6 @@ impl PhoneInput {
             OPTION | 0x3D | CONTROL | 0x3E | 0x39 | 0x3F => return,
             // Shortcuts are the computer's; a phone has none.
             _ if self.command => return,
-            0x35 => Cmd::Home { phone: phone.clone() },
             0x24 | 0x4C => cmd("\n"),
             0x33 => cmd("\u{8}"),
             0x30 => cmd("\t"),
@@ -807,12 +912,25 @@ fn typed(keycode: u16, shift: bool) -> Option<char> {
 
 impl InputSink for PhoneInput {
     fn handle(&mut self, ev: InputEvent) {
+        // Let go where it went down.
+        match ev {
+            InputEvent::KeyUp { keycode } if self.keys_down.remove(&keycode) => return self.inner.handle(ev),
+            InputEvent::MouseUp { button } if self.buttons_down.remove(&button) => return self.inner.handle(ev),
+            _ => {}
+        }
         let Some(feed) = self.phones.shown() else {
             if let InputEvent::KeyDown { keycode } | InputEvent::KeyUp { keycode } = ev
                 && glass_proto::phone_keys::is_phone_key(keycode)
             {
                 return;
             }
+            match ev {
+                InputEvent::KeyDown { keycode } => _ = self.keys_down.insert(keycode),
+                InputEvent::MouseDown { button } => _ = self.buttons_down.insert(button),
+                _ => {}
+            }
+            // A press begun on a phone that's no longer shown: it's over.
+            self.press = None;
             return self.inner.handle(ev);
         };
         let Some((_, points)) = *feed.size.lock().unwrap() else {
@@ -872,6 +990,8 @@ impl InputSink for PhoneInput {
         self.press = None;
         self.shift = false;
         self.command = false;
+        self.keys_down.clear();
+        self.buttons_down.clear();
         self.inner.release_all();
     }
 
@@ -892,8 +1012,19 @@ impl InputSink for PhoneInput {
         }
     }
 
+    /// A viewer's text (accents, emoji, an IME, a phone's keyboard): the shown phone's.
     fn type_text(&mut self, text: &str) -> bool {
-        self.inner.type_text(text)
+        let Some(feed) = self.phones.shown() else { return self.inner.type_text(text) };
+        if feed.size.lock().unwrap().is_none() {
+            tracing::debug!("phone {}: text before its picture, dropped", feed.phone.name);
+        } else if !text.is_empty() {
+            self.send(Cmd::Keys { phone: feed.phone.clone(), text: text.into() });
+        }
+        true
+    }
+
+    fn computer(&mut self) -> Option<&mut dyn InputSink> {
+        Some(&mut *self.inner)
     }
 }
 
@@ -962,16 +1093,14 @@ fn input_worker(rx: mpsc::Receiver<Cmd>) {
         let what = match &cmd {
             Cmd::Touch { .. } => "touch",
             Cmd::Keys { .. } => "keys",
-            Cmd::Home { .. } => "home",
             Cmd::System { .. } => "system",
             Cmd::Scroll { .. } => "scroll",
         };
         let phone = match &cmd {
-            Cmd::Touch { phone, .. } | Cmd::Keys { phone, .. } | Cmd::Home { phone } | Cmd::System { phone, .. } | Cmd::Scroll { phone, .. } => phone.clone(),
+            Cmd::Touch { phone, .. } | Cmd::Keys { phone, .. } | Cmd::System { phone, .. } | Cmd::Scroll { phone, .. } => phone.clone(),
         };
         let done = match cmd {
             Cmd::Touch { phone, path, hold } => crate::phone::touch(&phone, &path, hold),
-            Cmd::Home { phone } => crate::phone::press_key(&phone, "home"),
             Cmd::System { phone, key, size } => system(&phone, key, size),
             Cmd::Keys { phone, mut text } => {
                 // Typing outruns the phone: send what's queued together.
@@ -1060,7 +1189,7 @@ mod tests {
     }
 
     /// A computer's input sink that records what reaches it.
-    struct Recorder(Arc<Mutex<Vec<InputEvent>>>);
+    struct Recorder(Arc<Mutex<Vec<InputEvent>>>, Arc<Mutex<Vec<String>>>);
 
     impl InputSink for Recorder {
         fn handle(&mut self, ev: InputEvent) {
@@ -1070,14 +1199,101 @@ mod tests {
         fn release_all(&mut self) {}
         fn set_displays(&mut self, _: &[u32]) {}
         fn move_on_display(&mut self, _: u32, _: f32, _: f32) {}
+        fn type_text(&mut self, text: &str) -> bool {
+            self.1.lock().unwrap().push(text.into());
+            true
+        }
+    }
+
+    fn test_phones() -> Arc<Phones> {
+        let (tx, _) = broadcast::channel(8);
+        Arc::new(Phones {
+            feeds: Mutex::new(Vec::new()),
+            shown: Mutex::new(None),
+            computer: Arc::new(Fake { layouts: Mutex::new(Vec::new()) }),
+            computer_on: AtomicBool::new(true),
+            frames: tx,
+            bitrate: AtomicU32::new(0),
+            fps: AtomicU32::new(30),
+            input_at: Mutex::new(None),
+        })
+    }
+
+    /// A phone sending its picture (on a port nothing answers on: what's sent to it fails).
+    fn test_feed() -> Arc<Feed> {
+        Arc::new(Feed {
+            phone: Phone { name: "xr".into(), port: 1, video: 2, wifi: false },
+            id: ID_BASE | 7,
+            size: Mutex::new(Some(((828, 1792), (414.0, 896.0)))),
+            live: AtomicBool::new(true),
+            slot: AtomicI32::new(-1),
+            keyframe: AtomicBool::new(false),
+            width: AtomicUsize::new(0),
+            latest: Mutex::new(None),
+            stop: AtomicBool::new(false),
+        })
+    }
+
+    #[test]
+    fn agents_input_reaches_the_computer_while_a_phone_is_shown() {
+        let phones = test_phones();
+        let (seen, typed) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
+        let mut input = wrap_input(Box::new(Recorder(seen.clone(), typed.clone())), phones.clone());
+        // A viewer holds Shift on the computer, then shows a phone.
+        input.handle(InputEvent::KeyDown { keycode: crate::keys::SHIFT });
+        *phones.shown.lock().unwrap() = Some(test_feed());
+        // The viewer's input is the phone's, text included.
+        input.handle(InputEvent::MouseDown { button: 0 });
+        input.handle(InputEvent::MouseUp { button: 0 });
+        input.handle(InputEvent::KeyDown { keycode: 0x00 });
+        assert!(input.type_text("é"), "the phone took it");
+        assert!(typed.lock().unwrap().is_empty());
+        assert_eq!(*seen.lock().unwrap(), vec![InputEvent::KeyDown { keycode: crate::keys::SHIFT }]);
+        // Shift comes up where it went down.
+        input.handle(InputEvent::KeyUp { keycode: crate::keys::SHIFT });
+        assert_eq!(seen.lock().unwrap().last(), Some(&InputEvent::KeyUp { keycode: crate::keys::SHIFT }));
+        // An agent's input (computer.rs goes through computer_input) is the computer's.
+        seen.lock().unwrap().clear();
+        let sink = crate::media::computer_input(&mut input);
+        sink.handle(InputEvent::MouseDown { button: 0 });
+        sink.handle(InputEvent::MouseUp { button: 0 });
+        assert!(sink.type_text("hi"));
+        assert_eq!(*seen.lock().unwrap(), vec![InputEvent::MouseDown { button: 0 }, InputEvent::MouseUp { button: 0 }]);
+        assert_eq!(*typed.lock().unwrap(), vec!["hi".to_string()]);
+        // With no phone shown, the viewer's is the computer's again.
+        phones.unshow(None);
+        assert!(input.type_text("ok"));
+        assert_eq!(typed.lock().unwrap().last().map(String::as_str), Some("ok"));
+    }
+
+    #[test]
+    fn escape_stays_off_the_phone() {
+        let phones = test_phones();
+        let (tx, rx) = mpsc::channel();
+        let mut input = PhoneInput {
+            inner: Box::new(Recorder(Default::default(), Default::default())),
+            phones: phones.clone(),
+            at: (0.5, 0.5),
+            press: None,
+            text: Default::default(),
+            shift: false,
+            command: false,
+            keys_down: HashSet::new(),
+            buttons_down: HashSet::new(),
+            tx,
+        };
+        *phones.shown.lock().unwrap() = Some(test_feed());
+        input.handle(InputEvent::KeyDown { keycode: 0x35 });
+        assert!(rx.try_recv().is_err(), "Escape (leaving fullscreen) doesn't send the phone home");
+        input.handle(InputEvent::KeyDown { keycode: glass_proto::phone_keys::HOME });
+        assert!(matches!(rx.try_recv(), Ok(Cmd::System { key: glass_proto::phone_keys::HOME, .. })));
     }
 
     #[test]
     fn phone_keys_never_reach_the_computer() {
-        let (tx, _) = broadcast::channel(8);
-        let phones = Arc::new(Phones { feeds: Mutex::new(Vec::new()), shown: Mutex::new(None), frames: tx, bitrate: AtomicU32::new(0), fps: AtomicU32::new(30), input_at: Mutex::new(None) });
+        let phones = test_phones();
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut input = wrap_input(Box::new(Recorder(seen.clone())), phones);
+        let mut input = wrap_input(Box::new(Recorder(seen.clone(), Default::default())), phones);
         // No phone shown: a phone's Home goes nowhere, an ordinary key goes to the computer.
         input.handle(InputEvent::KeyDown { keycode: glass_proto::phone_keys::HOME });
         input.handle(InputEvent::KeyUp { keycode: glass_proto::phone_keys::HOME });
@@ -1139,17 +1355,7 @@ mod tests {
         let (tx, _) = broadcast::channel(8);
         let fake = Arc::new(Fake { layouts: Mutex::new(Vec::new()) });
         let (video, phones) = wrap(fake.clone(), inner_tx, tx, 1_000_000, 30);
-        let feed = Arc::new(Feed {
-            phone: Phone { name: "xr".into(), port: 8100, video: 9100, wifi: false },
-            id: ID_BASE | 7,
-            size: Mutex::new(Some(((828, 1792), (414.0, 896.0)))),
-            live: AtomicBool::new(true),
-            slot: AtomicI32::new(-1),
-            keyframe: AtomicBool::new(false),
-            width: AtomicUsize::new(0),
-            latest: Mutex::new(None),
-            stop: AtomicBool::new(false),
-        });
+        let feed = test_feed();
         phones.feeds.lock().unwrap().push(feed.clone());
         let all = video.displays().unwrap();
         assert_eq!(all.len(), 2);
@@ -1157,20 +1363,47 @@ mod tests {
 
         let streams = video.set_layout(Layout::Single(Some(ID_BASE | 7))).unwrap();
         assert_eq!((streams[0].id, streams[0].width), (ID_BASE | 7, 828));
-        assert!(!video.inner_on.load(Ordering::Relaxed));
+        assert!(!phones.computer_on.load(Ordering::Relaxed));
+        assert!(video.showing_phone());
         assert_eq!(feed.slot.load(Ordering::Relaxed), 0);
         assert!(feed.keyframe.load(Ordering::Relaxed));
         assert_eq!(video.streams()[0].id, ID_BASE | 7);
         assert!(fake.layouts.lock().unwrap().is_empty(), "the computer's capture is left alone");
 
         video.set_layout(Layout::Single(None)).unwrap();
-        assert!(video.inner_on.load(Ordering::Relaxed));
+        assert!(phones.computer_on.load(Ordering::Relaxed));
         assert_eq!(feed.slot.load(Ordering::Relaxed), -1);
         assert_eq!(video.streams()[0].id, 1);
+        assert!(!video.showing_phone() && !video.hide_phone());
+
+        // Its picture stopping (unplugged) puts viewers back on the computer; another
+        // phone's stopping doesn't.
+        video.set_layout(Layout::Single(Some(ID_BASE | 7))).unwrap();
+        phones.lost(&test_feed(), "another phone");
+        assert!(video.showing_phone());
+        phones.lost(&feed, "unplugged");
+        assert!(!video.showing_phone() && phones.computer_on.load(Ordering::Relaxed));
+        assert_eq!((video.streams()[0].id, feed.slot.load(Ordering::Relaxed)), (1, -1));
+        assert!(fake.layouts.lock().unwrap().len() == 1, "the computer's capture went on as it was");
 
         // A phone not sending its picture can't be shown.
         feed.live.store(false, Ordering::Relaxed);
         assert!(video.set_layout(Layout::Single(Some(ID_BASE | 7))).is_err());
         assert!(video.displays().unwrap().iter().all(|d| !is_phone_display(d.id)));
+    }
+
+    #[test]
+    fn the_computers_frames_restart_on_keyframes_after_a_gap() {
+        let mut g = Gate::default();
+        assert!(g.admit(0, false, true), "nothing missed: as they come");
+        // Fell behind: each stream waits for its keyframe.
+        g.lagged();
+        assert!(!g.admit(0, false, true) && !g.admit(1, false, true));
+        assert!(g.admit(0, true, true) && g.admit(0, false, true));
+        assert!(!g.admit(1, false, true) && g.admit(1, true, true));
+        // Held back while a phone is shown, then from a keyframe.
+        assert!(!g.admit(0, true, false));
+        assert!(!g.admit(0, false, true));
+        assert!(g.admit(0, true, true));
     }
 }

@@ -284,7 +284,6 @@ fn front_app_of(p: &Phone) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether a password field has the phone's keyboard.
 /// When each phone's quick settings were last made sure of (by port).
 static QUICK_AT: Mutex<Option<HashMap<u16, Instant>>> = Mutex::new(None);
 
@@ -301,44 +300,91 @@ pub(crate) fn keep_quick(p: &Phone) {
         }
         due
     };
-    if due {
-        let quick = json!({ "settings": { "waitForIdleTimeout": 0, "animationCoolOffTimeout": 0, "snapshotMaxDepth": SHALLOW } });
-        let _ = in_session(p, "POST", "/appium/settings", Some(&quick));
+    if !due {
+        return;
     }
+    // Not while something reads the app deeply (`deep`): it would make that read shallow,
+    // and it puts the quick settings back itself when it's done. Then again next time.
+    let Ok(_reading) = DEPTH.try_lock() else {
+        QUICK_AT.lock().unwrap().get_or_insert_with(HashMap::new).remove(&p.port);
+        return;
+    };
+    let quick = json!({ "settings": { "waitForIdleTimeout": 0, "animationCoolOffTimeout": 0, "snapshotMaxDepth": SHALLOW } });
+    let _ = in_session(p, "POST", "/appium/settings", Some(&quick));
 }
 
 /// How deep WebDriverAgent looks into the app before a gesture, and when reading it.
 const SHALLOW: u32 = 0;
 const DEEP: u32 = 50;
 
+/// Held while WebDriverAgent looks deep into the app, so nothing makes it shallow meanwhile
+/// (`keep_quick`, another deep read finishing first).
+static DEPTH: Mutex<()> = Mutex::new(());
+
+fn set_depth(p: &Phone, d: u32) -> Result<Value, Refused> {
+    in_session(p, "POST", "/appium/settings", Some(&json!({ "settings": { "snapshotMaxDepth": d } })))
+}
+
 /// Runs `f` with WebDriverAgent looking all the way into the app (reading the screen as
-/// text, finding the focused field), then makes gestures quick again.
+/// text), then makes gestures quick again.
 fn deep<T>(p: &Phone, f: impl FnOnce() -> T) -> T {
-    let depth = |d: u32| in_session(p, "POST", "/appium/settings", Some(&json!({ "settings": { "snapshotMaxDepth": d } })));
-    let _ = depth(DEEP);
+    let _reading = DEPTH.lock().unwrap();
+    let _ = set_depth(p, DEEP);
     let out = f();
-    let _ = depth(SHALLOW);
+    let _ = set_depth(p, SHALLOW);
     out
 }
 
-fn secure_field_focused(p: &Phone) -> bool {
-    deep(p, || focused_is_secure(p))
+/// Whether a password field has the phone's keyboard. An error when that can't be told:
+/// a shallow look finds no field, so it must be the deep one, and its answer must come.
+fn secure_field_focused(p: &Phone) -> Result<bool, Refused> {
+    let _reading = DEPTH.lock().unwrap();
+    let found = set_depth(p, DEEP).and_then(|_| focused_is_secure(p));
+    let _ = set_depth(p, SHALLOW);
+    found.map_err(|e| {
+        Refused(format!(
+            "Can't tell whether a password field has the keyboard on {} ({}), so agents don't tap or type there now. Try again in a moment.",
+            p.name, e.0
+        ))
+    })
 }
 
-fn focused_is_secure(p: &Phone) -> bool {
-    let Ok(v) = in_session(p, "GET", "/element/active", None) else {
-        return false;
+fn focused_is_secure(p: &Phone) -> Result<bool, Refused> {
+    let v = match in_session(p, "GET", "/element/active", None) {
+        Ok(v) => v,
+        // Nothing has the keyboard.
+        Err(Refused(e)) if e.contains("said no such element") => return Ok(false),
+        Err(e) => return Err(e),
     };
-    let Some(id) = v["value"]["ELEMENT"]
+    let id = v["value"]["ELEMENT"]
         .as_str()
         .or(v["value"]["element-6066-11e4-a52e-4f735466cecf"].as_str())
-    else {
-        return false;
-    };
-    in_session(p, "GET", &format!("/element/{id}/attribute/type"), None)
-        .ok()
-        .and_then(|v| v["value"].as_str().map(|t| t.contains("SecureTextField")))
-        .unwrap_or(false)
+        .ok_or_else(|| Refused("it named no focused element".into()))?;
+    let v = in_session(p, "GET", &format!("/element/{id}/attribute/type"), None)?;
+    let kind = v["value"]
+        .as_str()
+        .ok_or_else(|| Refused("it didn't say what the focused element is".into()))?;
+    Ok(kind.contains("SecureTextField"))
+}
+
+/// For an agent under a grant: refuses while a password field has the phone's keyboard.
+/// Typing is the person's then, and so is tapping: a tap could be a key of the keyboard,
+/// or the suggested password above it.
+fn no_password_field(p: &Phone) -> Result<(), Refused> {
+    if !matches!(crate::grants::current(), crate::grants::Actor::Agent(_)) {
+        return Ok(());
+    }
+    password_rule(p, secure_field_focused(p))
+}
+
+fn password_rule(p: &Phone, secure: Result<bool, Refused>) -> Result<(), Refused> {
+    match secure? {
+        true => Err(Refused(format!(
+            "A password field has the keyboard on {}, so agents don't tap or type there. Ask the person to fill it in with request_help (or press_keys home to leave).",
+            p.name
+        ))),
+        false => Ok(()),
+    }
 }
 
 // ---- Rules (agents under a grant) ----
@@ -518,13 +564,18 @@ pub(crate) fn type_keys(p: &Phone, text: &str) -> Result<(), Refused> {
 /// What `press_keys` can do on a phone.
 const KEYS: &str = "home, return, backspace, tab, space, volume_up, volume_down";
 
+/// A key's name as `press_key` reads it.
+fn key_name(keys: &str) -> String {
+    keys.trim().to_ascii_lowercase().replace([' ', '-'], "_")
+}
+
+/// One of the phone's buttons (home, volume), not a key of its keyboard.
+fn is_button(keys: &str) -> bool {
+    matches!(key_name(keys).as_str(), "home" | "volume_up" | "volumeup" | "volume_down" | "volumedown")
+}
+
 pub(crate) fn press_key(p: &Phone, keys: &str) -> Result<(), Refused> {
-    match keys
-        .trim()
-        .to_ascii_lowercase()
-        .replace([' ', '-'], "_")
-        .as_str()
-    {
+    match key_name(keys).as_str() {
         // The button itself: `/wda/homescreen` also waits to see the home screen, and times
         // out over Spotlight (its own app on older iOS).
         "home" => button(p, "home").or_else(|_| call(p, "POST", "/wda/homescreen", None).map(|_| ())),
@@ -558,9 +609,18 @@ struct Item {
     value: String,
 }
 
-/// Recent snapshots by id, with the phone they came from.
-type Snapshots = HashMap<String, (String, Vec<Item>)>;
-static SNAPSHOTS: Mutex<Option<Snapshots>> = Mutex::new(None);
+/// A snapshot an agent took: who took it, of which phone, and what its refs point at.
+struct Snap {
+    asker: String,
+    phone: String,
+    items: Vec<Item>,
+    at: Instant,
+}
+
+/// Recent snapshots by id.
+static SNAPSHOTS: Mutex<Option<HashMap<String, Snap>>> = Mutex::new(None);
+/// How many are kept (the oldest goes first).
+const KEEP_SNAPSHOTS: usize = 64;
 
 /// Element types worth a ref: the ones a person taps or types into.
 const ACTIONABLE: &[&str] = &[
@@ -681,11 +741,23 @@ fn flag(v: &Value) -> Option<bool> {
     }
 }
 
+/// A snapshot's id: random and long enough that two never meet, so a ref always means the
+/// element of the snapshot it came from.
 fn new_snap_id() -> String {
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
-    format!("{PHONE_SNAP}{:03x}", n % 0xfff)
+    let mut b = [0u8; 6];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b).expect("random");
+    format!("{PHONE_SNAP}{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>())
+}
+
+/// Keeps a snapshot's refs for the agent that took it.
+fn keep_snapshot(id: &str, snap: Snap) {
+    let mut all = SNAPSHOTS.lock().unwrap();
+    let all = all.get_or_insert_with(HashMap::new);
+    while all.len() >= KEEP_SNAPSHOTS {
+        let Some(oldest) = all.iter().min_by_key(|(_, s)| s.at).map(|(k, _)| k.clone()) else { break };
+        all.remove(&oldest);
+    }
+    all.insert(id.to_string(), snap);
 }
 
 /// Starts a phone snapshot's id. Computer snapshot ids (`elements::new_id`) can start with
@@ -700,7 +772,15 @@ pub fn is_phone_ref(target: &str) -> bool {
         .is_some_and(|r| r.starts_with(PHONE_SNAP) && r.contains(":e"))
 }
 
-fn lookup(target: &str) -> Result<(Phone, Item), Refused> {
+/// The phone and element a ref points at: from a snapshot `asker` took (any, for the audit
+/// log, which runs before the action).
+fn lookup(target: &str, asker: Option<&str>) -> Result<(Phone, Item), Refused> {
+    let (phone, item) = ref_item(target, asker)?;
+    Ok((find(Some(&phone))?, item))
+}
+
+/// The phone's name and the element a ref points at.
+fn ref_item(target: &str, asker: Option<&str>) -> Result<(String, Item), Refused> {
     let r = target.trim().trim_start_matches('@');
     let (snap, n) = r
         .split_once(":e")
@@ -713,13 +793,14 @@ fn lookup(target: &str) -> Result<(Phone, Item), Refused> {
         .unwrap()
         .get_or_insert_with(HashMap::new)
         .get(snap)
-        .cloned()
+        .filter(|s| asker.is_none_or(|a| s.asker == a))
+        .map(|s| (s.phone.clone(), s.items.clone()))
         .ok_or_else(|| Refused(format!("{target} is from an old snapshot; take a new one.")))?;
     let item = items
         .get(n.wrapping_sub(1))
         .cloned()
         .ok_or_else(|| Refused(format!("{target} isn't in that snapshot.")))?;
-    Ok((find(Some(&phone))?, item))
+    Ok((phone, item))
 }
 
 // ---- Actions ----
@@ -735,7 +816,7 @@ pub fn routes(phone: Option<&str>, action: &Action) -> bool {
 pub async fn front_app(phone: Option<String>, action: &Action) -> Option<String> {
     let p = match action {
         Action::Press { target } | Action::SetValue { target, .. } if is_phone_ref(target) => {
-            lookup(target).ok()?.0
+            lookup(target, None).ok()?.0
         }
         _ => find(phone.as_deref()).ok()?,
     };
@@ -748,7 +829,9 @@ pub async fn front_app(phone: Option<String>, action: &Action) -> Option<String>
 /// One action on a phone.
 pub async fn act(phone: Option<String>, action: Action) -> Result<Value, Refused> {
     let look = action.describe().1 || matches!(action, Action::Phones);
-    crate::computer::may_act(true).await?;
+    // Touching or typing waits while the person is using the computer or a phone from a
+    // viewer, as on the computer; looking doesn't.
+    crate::computer::may_act(look).await?;
     if matches!(action, Action::Phones) {
         return tokio::task::spawn_blocking(list)
             .await
@@ -778,8 +861,9 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
     };
     if let Some(target) = phone_ref {
         let target = target.as_str();
-        let (p, item) = lookup(target)?;
+        let (p, item) = lookup(target, Some(asker))?;
         guard(&p)?;
+        no_password_field(&p)?;
         let (x, y) = item.center;
         return match action {
             Action::Press { .. } => {
@@ -792,8 +876,9 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
             }
             Action::SetValue { text, .. } => {
                 touch(&p, &[(x, y, 0)], 60)?;
-                if secure_field_focused(&p)
-                    && matches!(crate::grants::current(), crate::grants::Actor::Agent(_))
+                // The tap may have given a password field the keyboard.
+                if matches!(crate::grants::current(), crate::grants::Actor::Agent(_))
+                    && secure_field_focused(&p)?
                 {
                     return Err(Refused(
                         "That's a password field. Ask the person to type it with request_help."
@@ -847,6 +932,7 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
             ..
         } => {
             guard(&p)?;
+            no_password_field(&p)?;
             let (px, py) = to_points(&p, x, y)?;
             let long = button.as_deref() == Some("right");
             if button
@@ -876,6 +962,7 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
             ..
         } => {
             guard(&p)?;
+            no_password_field(&p)?;
             let (a, b) = (to_points(&p, from_x, from_y)?, to_points(&p, to_x, to_y)?);
             touch(&p, &[(a.0, a.1, 0), (b.0, b.1, 400)], 150)?;
             Ok((
@@ -888,6 +975,7 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
         }
         Action::Scroll { x, y, dx, dy, .. } => {
             guard(&p)?;
+            no_password_field(&p)?;
             // Scrolling down moves the finger up.
             let (sx, sy) = to_points(&p, x, y)?;
             let (ex, ey) = to_points(&p, x - dx, y - dy)?;
@@ -902,11 +990,7 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
         )),
         Action::Type { text } => {
             guard(&p)?;
-            if matches!(crate::grants::current(), crate::grants::Actor::Agent(_))
-                && secure_field_focused(&p)
-            {
-                return Err(Refused("A password field has the keyboard. Ask the person to type it with request_help.".into()));
-            }
+            no_password_field(&p)?;
             type_keys(&p, &text)?;
             Ok((
                 json!({ "ok": true }),
@@ -918,6 +1002,10 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
         }
         Action::Key { keys } => {
             guard(&p)?;
+            // The buttons don't type (home leaves a password field); the rest are keys.
+            if !is_button(&keys) {
+                no_password_field(&p)?;
+            }
             press_key(&p, &keys)?;
             Ok((
                 json!({ "ok": true }),
@@ -931,12 +1019,7 @@ fn run(phone: Option<String>, action: Action, asker: &str) -> Result<(Value, Sai
             let (text, items, hidden) =
                 render(&v["value"], &snap, max_lines.unwrap_or(400).clamp(20, 2000));
             let refs = items.len();
-            let mut all = SNAPSHOTS.lock().unwrap();
-            let all = all.get_or_insert_with(HashMap::new);
-            if all.len() >= 16 {
-                all.clear();
-            }
-            all.insert(snap.clone(), (p.name.clone(), items));
+            keep_snapshot(&snap, Snap { asker: asker.to_string(), phone: p.name.clone(), items, at: Instant::now() });
             let more = if hidden > 0 {
                 format!("\n… {hidden} more (raise max_lines)")
             } else {
@@ -1149,6 +1232,40 @@ mod tests {
         assert_eq!((sw, sh), (20, 40));
         let (back, _, _) = fit_png(&out, [1000, 1000]).unwrap();
         assert_eq!(back, out);
+    }
+
+    #[test]
+    fn password_fields_fail_closed() {
+        let p = Phone { name: "xr".into(), port: 1, video: 2, wifi: false };
+        assert!(password_rule(&p, Ok(false)).is_ok());
+        assert!(password_rule(&p, Ok(true)).unwrap_err().0.contains("request_help"));
+        assert!(password_rule(&p, Err(Refused("no answer".into()))).is_err(), "can't tell: refused");
+        // A phone that doesn't answer can't say, so it's refused (nothing listens on port 1).
+        assert!(secure_field_focused(&p).unwrap_err().0.contains("Can't tell"));
+        // Its buttons aren't keys of the keyboard.
+        assert!(is_button("Home") && is_button("volume-up") && is_button("volume_down"));
+        assert!(!is_button("return") && !is_button("space") && !is_button("backspace"));
+    }
+
+    #[test]
+    fn snapshot_refs_point_into_their_own_snapshot() {
+        let (a, b) = (new_snap_id(), new_snap_id());
+        assert_ne!(a, b);
+        assert_eq!(a.len(), PHONE_SNAP.len() + 12, "48 random bits: {a}");
+        let item = |x: f64| Item { center: (x, x), value: String::new() };
+        keep_snapshot(&a, Snap { asker: "g1".into(), phone: "xr".into(), items: vec![item(1.0), item(2.0)], at: Instant::now() });
+        keep_snapshot(&b, Snap { asker: "g2".into(), phone: "se".into(), items: vec![item(3.0)], at: Instant::now() });
+        let (phone, it) = ref_item(&format!("@{a}:e2"), Some("g1")).unwrap();
+        assert_eq!((phone.as_str(), it.center), ("xr", (2.0, 2.0)));
+        assert!(ref_item(&format!("@{a}:e2"), Some("g2")).is_err(), "another agent's snapshot");
+        assert!(ref_item(&format!("@{b}:e2"), Some("g2")).is_err(), "not in it");
+        assert_eq!(ref_item(&format!("@{b}:e1"), None).unwrap().0, "se", "the audit log reads any");
+        // Many more: the oldest go, a few at a time, not everything at once.
+        for _ in 0..KEEP_SNAPSHOTS {
+            keep_snapshot(&new_snap_id(), Snap { asker: "g3".into(), phone: "xr".into(), items: vec![], at: Instant::now() });
+        }
+        assert!(SNAPSHOTS.lock().unwrap().as_ref().unwrap().len() <= KEEP_SNAPSHOTS);
+        assert!(ref_item(&format!("@{a}:e1"), Some("g1")).is_err());
     }
 
     #[test]

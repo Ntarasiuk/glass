@@ -348,7 +348,9 @@ fn inject(events: impl IntoIterator<Item = InputEvent>) -> Result<(), Refused> {
         crate::cursor::moved_by(crate::cursor::AGENT);
     }
     let shared = shared()?;
+    // The computer's own input, even while a viewer is shown a phone (phone_view).
     let mut sink = shared.injector.lock().unwrap();
+    let sink = crate::media::computer_input(&mut sink);
     for ev in events {
         sink.handle(ev);
     }
@@ -360,7 +362,7 @@ fn move_to(d: &DisplayInfo, x: f32, y: f32) -> Result<(), Refused> {
     crate::grants::check_input(crate::grants::Target::Point(at.0, at.1)).map_err(Refused)?;
     *POINTER.lock().unwrap() = Some(at);
     crate::cursor::moved_by(crate::cursor::AGENT);
-    shared()?.injector.lock().unwrap().move_on_display(d.id, x, y);
+    crate::media::computer_input(&mut shared()?.injector.lock().unwrap()).move_on_display(d.id, x, y);
     Ok(())
 }
 
@@ -498,7 +500,7 @@ pub async fn type_text(text: &str) -> Result<Value, Refused> {
         return Err(Refused("too much text at once (10,000 characters at most)".into()));
     }
     crate::grants::check_input(crate::grants::Target::Keys).map_err(Refused)?;
-    let typed = shared()?.injector.lock().unwrap().type_text(text);
+    let typed = crate::media::computer_input(&mut shared()?.injector.lock().unwrap()).type_text(text);
     if !typed {
         // Key by key on a US layout.
         let mut events = Vec::new();

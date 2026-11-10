@@ -375,6 +375,8 @@ pub struct Viewer {
     /// Video is sent only once the viewer has signed in, and only while it's watching.
     pub authed: tokio::sync::watch::Receiver<bool>,
     pub watching: tokio::sync::watch::Receiver<bool>,
+    /// It may see the phones (phone_view): a phone's screen goes to no one else.
+    pub phones: Arc<std::sync::atomic::AtomicBool>,
     /// Identifies this viewer's bitrate cap among all remote viewers.
     pub id: u64,
 }
@@ -433,6 +435,10 @@ pub async fn pump(outs: Vec<VideoOut>, target: Arc<AtomicU64>, mut viewer: Viewe
                 };
                 let s = frame.stream as usize;
                 let Some((out, pt)) = tracks.get(s) else { continue };
+                if frame.phone && !viewer.phones.load(Ordering::SeqCst) {
+                    started[s] = false;
+                    continue;
+                }
                 if !*viewer.watching.borrow() {
                     started[s] = false;
                     continue;

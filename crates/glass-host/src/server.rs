@@ -479,6 +479,12 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                         continue;
                     }
                     let Some(next_id) = next_frame_id.get_mut(frame.stream as usize) else { continue };
+                    // A phone's screen only reaches viewers who may use the phones. (The gap
+                    // has the viewer ask for a keyframe once the computer's is back.)
+                    if frame.phone && !perms.get().is_some_and(phone_access) {
+                        *next_id = next_id.wrapping_add(1);
+                        continue;
+                    }
                     if authed.load(Ordering::Relaxed) && video_on.load(Ordering::Relaxed) {
                         let bit = 1u8 << (frame.stream as usize).min(7);
                         if keyed.load(Ordering::Relaxed) & bit == 0 {
@@ -1003,9 +1009,12 @@ async fn control(
     }
 
     let _ = ctx.perms.set(perms);
+    // Someone who may not use the phones: none is shown while they're here (before they
+    // get any picture).
+    let _no_phones = (!phone_access(&perms)).then(|| NoPhones::join(&shared));
     ctx.authed.store(true, Ordering::Relaxed);
     if let Some(r) = &ctx.relayed {
-        crate::remote::bridge_authed(r.bridge);
+        crate::remote::bridge_authed(r.bridge, phone_access(&perms));
     }
     // A viewer far away may be on a slow link: size the first keyframe for one.
     if ctx.relayed.is_none() && ctx.conn.rtt() > FAR_RTT {
@@ -1131,9 +1140,13 @@ async fn control(
 
     let displays = {
         let shared = shared.clone();
-        tokio::task::spawn_blocking(move || shared.video.displays())
+        let mut all = tokio::task::spawn_blocking(move || shared.video.displays())
             .await?
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if !phone_access(&perms) {
+            all.retain(|d| !crate::phone_view::is_phone_display(d.id));
+        }
+        all
     };
     let features = control::Features {
         privacy: crate::privacy::supported(),
@@ -1245,6 +1258,14 @@ async fn control(
             if matches!(msg, ServerMsg::Clipboard { .. }) && !perms.clipboard {
                 continue;
             }
+            // Nor the phones, without access to them.
+            let msg = match msg {
+                ServerMsg::Layout { streams, displays: Some(mut displays) } if !phone_access(&perms) => {
+                    displays.retain(|d| !crate::phone_view::is_phone_display(d.id));
+                    ServerMsg::Layout { streams, displays: Some(displays) }
+                }
+                msg => msg,
+            };
             // Pointer images only to viewers that draw it (they're up to 350 KB of JSON).
             if matches!(msg, ServerMsg::Cursor { .. }) && !local_cursor.load(Ordering::Relaxed) {
                 continue;
@@ -1282,6 +1303,7 @@ async fn control(
                     let _ = ctx.ctl_tx.send(shape);
                 }
             }
+            ClientMsg::SelectDisplay { id } if crate::phone_view::is_phone_display(id) => show_phone(&ctx, id, &perms).await?,
             ClientMsg::SelectDisplay { id } => set_layout(&ctx, Layout::Single(Some(id))).await?,
             ClientMsg::ShowAll => set_layout(&ctx, Layout::All).await?,
             ClientMsg::Clipboard { .. } if !perms.clipboard => {
@@ -1579,10 +1601,12 @@ async fn control(
                     let busy = thumbs_busy.clone();
                     let sent = thumbs_sent.clone();
                     tokio::spawn(async move {
+                        let phones = phone_access(&perms);
                         let pictures = tokio::task::spawn_blocking(move || {
                             let displays = shared.video.displays().unwrap_or_default();
                             displays
                                 .iter()
+                                .filter(|d| phones || !crate::phone_view::is_phone_display(d.id))
                                 .filter_map(|d| {
                                     let frame = shared.video.picture(d.id, crate::thumbs::MAX)?;
                                     Some((d.id, crate::thumbs::png(&frame).ok()?))
@@ -1664,7 +1688,9 @@ async fn control(
             }
             ClientMsg::Record { .. } if guest => refuse(OWNER_ONLY),
             ClientMsg::Record { on } => {
-                if on && recording.is_none() {
+                if on && recording.is_none() && shared.video.showing_phone() {
+                    refuse("Recordings never include a phone's screen: switch back to the computer to record.");
+                } else if on && recording.is_none() {
                     match crate::recording::start(&device) {
                         Ok(r) => {
                             let path = Some(r.path.display().to_string());
@@ -2092,6 +2118,75 @@ async fn watch_window(shared: Arc<Shared>, id: u32, generation: u64) {
     }
 }
 
+/// Who may see and use the phones (phone_view): the computer's owner, with full control.
+/// Guests, view-only and limited links, and the sign-in screen may not.
+fn phone_access(perms: &control::Perms) -> bool {
+    perms.owner && perms.input
+}
+
+/// Viewers connected now who may not use the phones.
+static NO_PHONES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One such viewer, for as long as its session lasts. Every viewer is shown the same
+/// picture, so no phone is shown while one is here: a phone shown when they join is put
+/// away first, and none can be shown until they've gone.
+struct NoPhones;
+
+impl NoPhones {
+    fn join(shared: &Arc<Shared>) -> NoPhones {
+        NO_PHONES.fetch_add(1, Ordering::SeqCst);
+        if shared.video.hide_phone() {
+            info!("a viewer without access to the phones joined; back on the computer");
+            phone_hidden_async("Someone who can't use the phones joined, so here's the computer again.");
+        }
+        NoPhones
+    }
+}
+
+impl Drop for NoPhones {
+    fn drop(&mut self) {
+        NO_PHONES.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A viewer picked a phone.
+async fn show_phone(ctx: &SessionCtx, id: u32, perms: &control::Perms) -> Result<()> {
+    let refuse = |msg: &str| {
+        let _ = ctx.ctl_tx.send(ServerMsg::Error { msg: msg.into() });
+    };
+    if !phone_access(perms) {
+        warn!("{}: asked to show a phone without access to them; refused", ctx.conn.remote_address());
+        refuse("Only this computer's owner can use its phones.");
+        return Ok(());
+    }
+    if NO_PHONES.load(Ordering::SeqCst) > 0 {
+        refuse("Someone who can't use the phones is connected, and everyone sees the same screen, so the phone can't be shown until they leave.");
+        return Ok(());
+    }
+    set_layout(ctx, Layout::Single(Some(id))).await?;
+    // They joined meanwhile (and found no phone shown yet to put away).
+    if NO_PHONES.load(Ordering::SeqCst) > 0 && ctx.shared.video.hide_phone() {
+        phone_hidden_async("Someone who can't use the phones joined, so here's the computer again.");
+    }
+    Ok(())
+}
+
+/// Viewers were switched from a phone back to the computer (phone_view, or above): they're
+/// told the layout and why, and the computer's input follows its displays again. May block.
+pub(crate) fn phone_hidden(why: &str) {
+    let Some(shared) = shared() else { return };
+    let streams = shared.video.streams();
+    let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
+    shared.injector.lock().unwrap().set_displays(&ids);
+    let displays = shared.video.displays().ok();
+    let _ = shared.events.send(ServerMsg::Layout { streams, displays });
+    let _ = shared.events.send(ServerMsg::Error { msg: why.into() });
+}
+
+fn phone_hidden_async(why: &'static str) {
+    tokio::task::spawn_blocking(move || phone_hidden(why));
+}
+
 async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
     let worker = ctx.shared.clone();
     let peer = ctx.conn.remote_address();
@@ -2259,7 +2354,16 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
                 if !perms.input {
                     continue;
                 }
-                match InputEvent::read(&buf) {
+                let ev = InputEvent::read(&buf);
+                // So is input meant for a phone from someone who may not use the phones
+                // (letting go of what they hold on the computer still counts).
+                if !phone_access(&perms)
+                    && !matches!(ev, Some(InputEvent::KeyUp { .. } | InputEvent::MouseUp { .. }))
+                    && ctx.shared.video.showing_phone()
+                {
+                    continue;
+                }
+                match ev {
                     Some(ev @ InputEvent::Gamepad { .. }) if !crate::testmode::enabled() => {
                         crate::gamepad::handle(ev)
                     }
@@ -2774,6 +2878,17 @@ mod tests {
     fn identity() -> Identity {
         let _ = rustls::crypto::ring::default_provider().install_default();
         Identity::self_signed(["localhost"]).unwrap()
+    }
+
+    #[test]
+    fn phones_are_the_owners_alone() {
+        assert!(phone_access(&control::Perms::owner()));
+        // Any guest, even one with full input.
+        assert!(!phone_access(&control::Perms::guest(&crate::access::Scope::default())));
+        let view_only = crate::access::Scope { view_only: true, ..Default::default() };
+        assert!(!phone_access(&control::Perms::guest(&view_only)));
+        // The sign-in screen (owner taken away).
+        assert!(!phone_access(&control::Perms { owner: false, ..control::Perms::owner() }));
     }
 
     #[tokio::test]

@@ -430,6 +430,7 @@ fn encode_loop(
                     capture_us,
                     hevc: false,
                     refresh: false,
+                    phone: false,
                 }));
             }
             Ok(None) => {}

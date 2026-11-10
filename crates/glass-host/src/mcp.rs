@@ -443,6 +443,9 @@ fn clip_content(v: &Value) -> Vec<Value> {
     if parts > 1 {
         said.push_str(&format!(" and {} more parts (the picture size changed)", parts - 1));
     }
+    if let Some(note) = v["note"].as_str() {
+        said = format!("{note} {said}");
+    }
     let mut out = vec![];
     match v["mp4"].as_str() {
         Some(data) => {

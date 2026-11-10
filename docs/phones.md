@@ -59,7 +59,19 @@ same network can drive the phone while it runs. Keep such a phone on a network y
 Phones are listed in the Machines menu, under the computer they're plugged into: pick one to
 see its live picture and use it with the pointer and keyboard, and pick the computer again to
 go back to its screen. A click is a tap, holding is a long press, a drag is a swipe (played back when it's
-released: WebDriverAgent plays a gesture as one request), scrolling swipes, and Escape is Home.
+released: WebDriverAgent plays a gesture as one request), and scrolling swipes. Home is the
+toolbar's button (Escape isn't Home: it's also how you leave fullscreen).
+
+Phones are the owner's: only viewers with full control of the computer see them listed or can
+show one. Everyone connected sees the same screen, so a phone can't be shown while a guest, a
+view-only or limited link, or another viewer without that access is connected, and a phone
+that's shown when one joins is put away first: they keep seeing the computer, never the phone.
+If a phone's picture stops (unplugged, WebDriverAgent stopped), viewers are put back on the
+computer.
+
+Recordings never include a phone's screen. A recording can't be started while a phone is
+shown; one running for a viewer pauses while a phone is shown (its file ends there and the
+recording carries on in a new part), and an agent's ends.
 
 While a phone is shown the toolbar is the phone's: Home, App Switcher, Control Center,
 Notification Center, Search (Spotlight) and the volume buttons, next to Machines, Keyboard and
@@ -75,11 +87,21 @@ for the phone to draw it and WebDriverAgent to screenshot it (about 26 a second)
 ## Safety
 
 - Glass only talks to phones on loopback ports. WebDriverAgent has no sign-in, so never expose
-  it on a network.
-- Phone actions go through the same checks as the computer's: stop and pause, an agent's grant
-  and hourly budget, the audit log, and the viewer's activity line.
+  it on a network. Even set up over USB, WebDriverAgent also listens on the phone's own Wi-Fi
+  address, where anyone on the same network can drive it: keep the phone on a network you
+  trust, or off Wi-Fi. And while `ios forward` (or the Wi-Fi tunnel) runs, any program on this
+  computer can reach WebDriverAgent on 127.0.0.1, and a web page open in one of its browsers
+  may be able to send it requests too (pages can send to local ports even when they can't
+  read the answers). Forward only while you're using the phone.
+- Phone actions go through the same checks as the computer's: stop and pause, waiting while
+  the person uses the computer or a phone from a viewer (looking doesn't wait), an agent's
+  grant and hourly budget, the audit log, and the viewer's activity line. An agent's input on
+  the computer always goes to the computer, even while a viewer is shown a phone.
 - For agents under a grant, Glass reads the app in front on the phone before every look or
   touch. Settings, Wallet and Passwords are off limits, an app-limited agent stays in its apps
-  (not the home screen), and nothing is typed into a password field.
+  (not the home screen), and while a password field has the keyboard the agent can't type or
+  tap at all (if Glass can't tell, it refuses too). As on the computer, these limits are for
+  agents under a grant; agents you run yourself with `glass mcp`, which act as you, aren't
+  limited.
 - Use a phone set aside for agents: one signed into your own Apple ID can reach your messages,
   photos and accounts.

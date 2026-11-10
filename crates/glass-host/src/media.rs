@@ -42,6 +42,9 @@ pub struct EncodedFrame {
     pub hevc: bool,
     /// Re-encodes a picture that hasn't changed (see `glass_proto::FLAG_REFRESH`).
     pub refresh: bool,
+    /// A phone's screen (phone_view), not the computer's: never recorded, and never sent
+    /// to a viewer who may not use the phones.
+    pub phone: bool,
 }
 
 /// A window that can be streamed on its own (single-app streaming).
@@ -151,6 +154,14 @@ pub trait VideoSource: Send + Sync {
     fn supports_hevc(&self) -> bool {
         false
     }
+    /// A phone is shown instead of the computer (phone_view).
+    fn showing_phone(&self) -> bool {
+        false
+    }
+    /// Goes back to the computer's own picture if a phone is shown; whether one was.
+    fn hide_phone(&self) -> bool {
+        false
+    }
 }
 
 /// Where client input goes (the platform injector, or a recorder in tests).
@@ -175,6 +186,20 @@ pub trait InputSink: Send {
     fn type_text(&mut self, _text: &str) -> bool {
         false
     }
+    /// The computer's own input under this sink, when it wraps it (phone_view's, which sends
+    /// a viewer's input to a shown phone). `None`: this is the computer's.
+    fn computer(&mut self) -> Option<&mut dyn InputSink> {
+        None
+    }
+}
+
+/// The computer's own input, whatever a viewer is shown: agents' input is always for the
+/// computer (their phone actions go through crate::phone, with its own checks).
+pub fn computer_input(sink: &mut Box<dyn InputSink>) -> &mut dyn InputSink {
+    if sink.computer().is_some() {
+        return sink.computer().unwrap();
+    }
+    &mut **sink
 }
 
 /// The host clipboard: text, and where the platform allows, rich text and images.

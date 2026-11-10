@@ -361,6 +361,8 @@ pub fn relayed_peer(path: &str) -> Option<Relay> {
 struct BridgeSignals {
     authed: tokio::sync::watch::Sender<bool>,
     watching: tokio::sync::watch::Sender<bool>,
+    /// It may see the phones (set before it's signed in).
+    phones: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 static BRIDGES: std::sync::Mutex<Option<std::collections::HashMap<u64, BridgeSignals>>> =
@@ -372,8 +374,9 @@ fn with_bridge(id: u64, f: impl FnOnce(&BridgeSignals)) {
     }
 }
 
-pub fn bridge_authed(id: u64) {
+pub fn bridge_authed(id: u64, phones: bool) {
     with_bridge(id, |b| {
+        b.phones.store(phones, std::sync::atomic::Ordering::SeqCst);
         let _ = b.authed.send(true);
     });
 }
@@ -390,6 +393,7 @@ fn register_bridge() -> (u64, crate::rtp::Viewer, BridgeGuard) {
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (authed_tx, authed) = tokio::sync::watch::channel(false);
     let (watching_tx, watching) = tokio::sync::watch::channel(true);
+    let phones = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     BRIDGES
         .lock()
         .unwrap()
@@ -399,6 +403,7 @@ fn register_bridge() -> (u64, crate::rtp::Viewer, BridgeGuard) {
             BridgeSignals {
                 authed: authed_tx,
                 watching: watching_tx,
+                phones: phones.clone(),
             },
         );
     (
@@ -406,6 +411,7 @@ fn register_bridge() -> (u64, crate::rtp::Viewer, BridgeGuard) {
         crate::rtp::Viewer {
             authed,
             watching,
+            phones,
             id,
         },
         BridgeGuard(id),

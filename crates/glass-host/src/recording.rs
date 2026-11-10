@@ -11,6 +11,10 @@
 //! changes (dynamic resolution, a new display), the encoder starts over with a new SPS;
 //! that file is finished and the recording continues in a new one ("… part 2.mp4").
 //! HEVC frames aren't recorded (H.264 only); they're skipped with a warning.
+//!
+//! A phone's screen (phone_view) is never recorded: while a viewer is shown one, the
+//! recording pauses (that part is finished) and goes on in a new part once the computer's
+//! picture is back.
 
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -43,6 +47,8 @@ pub struct Made {
     pub files: Vec<PathBuf>,
     /// HEVC frames came, and were left out.
     pub hevc: bool,
+    /// A phone was shown meanwhile, and its screen was left out.
+    pub phone: bool,
 }
 
 impl Recording {
@@ -120,6 +126,8 @@ struct Recorder {
     part: u32,
     file: Option<Mp4Writer>,
     warned_hevc: bool,
+    /// A phone is shown: nothing is recorded until the computer's picture is back.
+    paused: bool,
     made: Arc<Mutex<Made>>,
 }
 
@@ -128,11 +136,30 @@ impl Recorder {
         let base = format!("Glass {} {}", local_stamp(), sanitize(who));
         let first = crate::control::unique_path(dir, &format!("{base}.mp4"));
         let made = Arc::new(Mutex::new(Made::default()));
-        let r = Recorder { dir: dir.to_path_buf(), base, first, part: 1, file: None, warned_hevc: false, made: made.clone() };
+        let r = Recorder { dir: dir.to_path_buf(), base, first, part: 1, file: None, warned_hevc: false, paused: false, made: made.clone() };
         (r, made)
     }
 
     fn frame(&mut self, frame: &EncodedFrame) -> Result<()> {
+        if frame.phone {
+            if !self.paused {
+                self.paused = true;
+                self.made.lock().unwrap().phone = true;
+                tracing::info!("recording paused: a phone is shown, and recordings never include a phone's screen");
+            }
+            // This part ends here; the next starts at the computer's next keyframe.
+            if let Some(w) = self.file.take() {
+                let path = w.path.clone();
+                w.finish()?;
+                tracing::info!("recording saved: {}", path.display());
+                self.part += 1;
+            }
+            return Ok(());
+        }
+        if self.paused {
+            self.paused = false;
+            tracing::info!("recording resumed: back on the computer");
+        }
         if frame.stream != 0 {
             return Ok(());
         }
@@ -712,10 +739,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let (mut r, made) = Recorder::new(&dir, "an agent");
         // HEVC is left out, and said so; then H.264 makes one file.
-        let hevc = EncodedFrame { stream: 0, data: vec![0, 0, 1, 0x40], keyframe: true, capture_us: 0, hevc: true, refresh: false };
+        let hevc = EncodedFrame { stream: 0, data: vec![0, 0, 1, 0x40], keyframe: true, capture_us: 0, hevc: true, refresh: false, phone: false };
         r.frame(&hevc).unwrap();
         for (n, (data, keyframe)) in frames(10).into_iter().enumerate() {
-            let f = EncodedFrame { stream: 0, data, keyframe, capture_us: n as u64 * 33_333, hevc: false, refresh: false };
+            let f = EncodedFrame { stream: 0, data, keyframe, capture_us: n as u64 * 33_333, hevc: false, refresh: false, phone: false };
             r.frame(&f).unwrap();
         }
         r.finish();
@@ -723,6 +750,38 @@ mod tests {
         assert!(made.hevc);
         assert_eq!(made.files.len(), 1);
         assert!(std::fs::metadata(&made.files[0]).unwrap().len() > 1000);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_shown_phone_is_never_recorded() {
+        let dir = std::env::temp_dir().join(format!("glass-rec-phone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut r, made) = Recorder::new(&dir, "an agent");
+        let at = |n: usize| n as u64 * 33_333;
+        let computer = frames(6);
+        for (n, (data, keyframe)) in computer.iter().cloned().enumerate() {
+            r.frame(&EncodedFrame { stream: 0, data, keyframe, capture_us: at(n), hevc: false, refresh: false, phone: false }).unwrap();
+        }
+        let first = std::fs::metadata(&made.lock().unwrap().files[0]).ok().map(|m| m.len());
+        // A phone is shown: its frames end this part, and none is written.
+        for (n, (data, keyframe)) in frames(6).into_iter().enumerate() {
+            r.frame(&EncodedFrame { stream: 0, data, keyframe, capture_us: at(10 + n), hevc: false, refresh: false, phone: true }).unwrap();
+        }
+        assert!(r.file.is_none() && r.paused);
+        // Back on the computer: a delta waits; its keyframe starts part 2.
+        let (delta, _) = computer[1].clone();
+        r.frame(&EncodedFrame { stream: 0, data: delta, keyframe: false, capture_us: at(20), hevc: false, refresh: false, phone: false }).unwrap();
+        assert!(r.file.is_none());
+        let (key, _) = computer[0].clone();
+        r.frame(&EncodedFrame { stream: 0, data: key, keyframe: true, capture_us: at(21), hevc: false, refresh: false, phone: false }).unwrap();
+        assert!(r.file.is_some() && !r.paused);
+        r.finish();
+        let made = made.lock().unwrap().clone();
+        assert!(made.phone);
+        assert_eq!(made.files.len(), 2, "{:?}", made.files);
+        assert!(made.files[1].to_string_lossy().contains("part 2"));
+        assert!(first.is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

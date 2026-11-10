@@ -157,6 +157,7 @@ fn read_frames(pipe: Arc<Pipe>, frames: broadcast::Sender<Arc<EncodedFrame>>) {
                 capture_us,
                 hevc: false,
                 refresh: false,
+                phone: false,
             }));
         }
     }

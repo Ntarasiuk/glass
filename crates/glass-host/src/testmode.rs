@@ -438,6 +438,7 @@ fn pattern_loop(
                 capture_us,
                 hevc: false,
                 refresh,
+                phone: false,
             }));
         }
     }

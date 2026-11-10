@@ -10,6 +10,10 @@
 //!
 //! Like screenshots, an agent under a grant doesn't see protected apps: the recording ends
 //! and is deleted if one comes to the front.
+//!
+//! A phone a viewer is shown (phone_view) is never recorded: no recording starts while one
+//! is, and one running ends when one is (what it had is kept; crate::recording leaves the
+//! phone's frames out).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -48,6 +52,8 @@ struct Active {
     /// How long it ran, once it ended by itself.
     ran: Option<Duration>,
     made: Option<crate::recording::Made>,
+    /// Why it ended by itself before it was stopped, when that's worth saying.
+    note: Option<String>,
 }
 
 static ACTIVE: Mutex<Option<HashMap<u64, Active>>> = Mutex::new(None);
@@ -105,9 +111,17 @@ pub async fn stop(id: u64) -> Result<Value, Refused> {
     finish(id).await
 }
 
+/// A viewer is shown a phone instead of the computer.
+fn phone_shown() -> bool {
+    crate::server::shared().is_some_and(|s| s.video.showing_phone())
+}
+
 async fn begin() -> Result<u64, Refused> {
     crate::computer::may_act(true).await?;
     crate::computer::screen_visible()?;
+    if phone_shown() {
+        return Err(Refused("A viewer is showing a phone, and recordings never include a phone's screen. Try again once they're back on the computer.".into()));
+    }
     let who = crate::computer::asker();
     let (all, mine) = active(|a| (a.values().filter(|x| x.recording.is_some()).count(), a.values().filter(|x| x.recording.is_some() && x.asker == who).count()));
     if mine >= MAX_ACTIVE_EACH {
@@ -131,7 +145,7 @@ async fn begin() -> Result<u64, Refused> {
     let display = crate::server::shared().and_then(|s| s.video.streams().first().map(|d| d.id));
     let id = new_id();
     active(|a| {
-        a.insert(id, Active { asker: who, started: Instant::now(), display, recording: Some(rec), ended: None, ran: None, made: None })
+        a.insert(id, Active { asker: who, started: Instant::now(), display, recording: Some(rec), ended: None, ran: None, made: None, note: None })
     });
     crate::computer::announce("record", format!("started recording {}", display.map(|d| format!("display {d}")).unwrap_or_default()), None);
     crate::testmode::record("agent", json!({ "record": "start", "id": id }));
@@ -172,7 +186,14 @@ async fn watch(id: u64, actor: crate::grants::Actor) {
             }
             break;
         }
-        if started.elapsed() >= MAX_LENGTH {
+        let note = if started.elapsed() >= MAX_LENGTH {
+            Some((format!("reached {} s", MAX_LENGTH.as_secs()), None))
+        } else if phone_shown() {
+            Some(("a phone is shown".to_string(), Some("It ended early: a viewer was shown a phone, and recordings never include a phone's screen.".to_string())))
+        } else {
+            None
+        };
+        if let Some((why, note)) = note {
             let rec = active(|a| a.get_mut(&id).and_then(|x| x.recording.take()));
             if let Some(rec) = rec {
                 let made = tokio::task::spawn_blocking(move || rec.finish()).await.unwrap_or_default();
@@ -180,9 +201,10 @@ async fn watch(id: u64, actor: crate::grants::Actor) {
                     if let Some(x) = a.get_mut(&id) {
                         x.made = Some(made);
                         x.ran = Some(started.elapsed());
+                        x.note = note;
                     }
                 });
-                tracing::info!("agent recording {id} reached {} s; ended", MAX_LENGTH.as_secs());
+                tracing::info!("agent recording {id} {why}; ended");
             }
             break;
         }
@@ -207,13 +229,19 @@ async fn finish(id: u64) -> Result<Value, Refused> {
     };
     crate::computer::announce("record", format!("stopped recording after {:.0} s", ran.as_secs_f64()), None);
     crate::testmode::record("agent", json!({ "record": "stop", "id": id, "files": made.files.len() }));
-    clip(id, x.display, ran, &made)
+    let mut v = clip(id, x.display, ran, &made)?;
+    if let Some(note) = x.note {
+        v["note"] = json!(note);
+    }
+    Ok(v)
 }
 
 /// A finished recording as agents get it: where it is, and the MP4 itself when it's small.
 fn clip(id: u64, display: Option<u32>, ran: Duration, made: &crate::recording::Made) -> Result<Value, Refused> {
     if made.files.is_empty() {
-        return Err(Refused(if made.hevc {
+        return Err(Refused(if made.phone {
+            "Nothing was recorded: a viewer was shown a phone, and recordings never include a phone's screen.".into()
+        } else if made.hevc {
             "Nothing was recorded: the screen is being sent in HEVC, which recordings don't keep. Try again when no viewer is using HEVC.".into()
         } else {
             "Nothing was recorded: no picture came in time. Try a longer recording.".into()
@@ -256,15 +284,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a.mp4");
         std::fs::write(&file, b"not really an mp4").unwrap();
-        let made = crate::recording::Made { files: vec![file.clone()], hevc: false };
+        let made = crate::recording::Made { files: vec![file.clone()], hevc: false, phone: false };
         let v = clip(7, Some(1), Duration::from_millis(1500), &made).unwrap();
         assert_eq!((v["id"].as_u64(), v["duration_ms"].as_u64(), v["bytes"].as_u64()), (Some(7), Some(1500), Some(17)));
         assert_eq!(base64::engine::general_purpose::STANDARD.decode(v["mp4"].as_str().unwrap()).unwrap(), b"not really an mp4");
         // Two parts: paths only.
-        let made = crate::recording::Made { files: vec![file.clone(), file.clone()], hevc: false };
+        let made = crate::recording::Made { files: vec![file.clone(), file.clone()], hevc: false, phone: false };
         assert!(clip(7, None, Duration::ZERO, &made).unwrap().get("mp4").is_none());
         // Nothing made: why.
-        let hevc = crate::recording::Made { files: vec![], hevc: true };
+        let hevc = crate::recording::Made { files: vec![], hevc: true, phone: false };
         assert!(clip(7, None, Duration::ZERO, &hevc).unwrap_err().0.contains("HEVC"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
