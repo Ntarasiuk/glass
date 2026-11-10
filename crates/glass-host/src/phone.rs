@@ -182,30 +182,37 @@ fn agent() -> &'static ureq::Agent {
 static SESSIONS: Mutex<Option<HashMap<u16, String>>> = Mutex::new(None);
 
 fn call(p: &Phone, method: &str, path: &str, body: Option<&Value>) -> Result<Value, Refused> {
-    let url = format!("http://127.0.0.1:{}{path}", p.port);
-    let sent = if method == "GET" {
-        agent().get(&url).call()
+    let body = (method != "GET").then(|| body.cloned().unwrap_or(json!({})));
+    let (status, text) = if p.udid.is_some() {
+        // A phone Glass manages: straight to it, nothing listening on this computer.
+        let bytes = body.map(|b| serde_json::to_vec(&b).unwrap_or_default());
+        let reply = crate::phone_link::request(p, method, path, bytes.as_deref(), Duration::from_secs(30))
+            .map_err(|e| Refused(format!("Can't reach {}: {e}. Is it plugged in (or on this network), and WebDriverAgent running on it?", p.name)))?;
+        (reply.status, String::from_utf8_lossy(&reply.body).into_owned())
     } else {
-        agent()
-            .post(&url)
-            .send_json(body.cloned().unwrap_or(json!({})))
+        let url = format!("http://127.0.0.1:{}{path}", p.port);
+        let sent = match body {
+            None => agent().get(&url).call(),
+            Some(b) => agent().post(&url).send_json(b),
+        };
+        let resp = sent.map_err(|e| {
+            Refused(format!(
+                "Can't reach {}: {e}. Is WebDriverAgent running and forwarded to port {}?",
+                p.name, p.port
+            ))
+        })?;
+        let status = resp.status().as_u16();
+        let text = resp
+            .into_body()
+            .with_config()
+            .limit(64 * 1024 * 1024)
+            .read_to_string()
+            .map_err(|e| Refused(format!("bad reply from {}: {e}", p.name)))?;
+        (status, text)
     };
-    let resp = sent.map_err(|e| {
-        Refused(format!(
-            "Can't reach {}: {e}. Is WebDriverAgent running and forwarded to port {}?",
-            p.name, p.port
-        ))
-    })?;
-    let status = resp.status();
-    let text = resp
-        .into_body()
-        .with_config()
-        .limit(64 * 1024 * 1024)
-        .read_to_string()
-        .map_err(|e| Refused(format!("bad reply from {}: {e}", p.name)))?;
     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     let error = v["value"]["error"].as_str();
-    if status.is_success() && error.is_none() {
+    if (200..300).contains(&status) && error.is_none() {
         return Ok(v);
     }
     Err(Refused(match error {

@@ -708,9 +708,15 @@ fn stream(feed: &Arc<Feed>, phones: &Phones) -> Result<()> {
     if let Err(e) = crate::phone::start_video(p) {
         tracing::debug!("phone {}: couldn't raise its frame rate: {}", p.name, e.0);
     }
-    let mut socket = TcpStream::connect_timeout(&([127, 0, 0, 1], p.video).into(), Duration::from_secs(2))
-        .with_context(|| format!("nothing on port {} (forward WebDriverAgent's video there)", p.video))?;
-    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+    // A phone Glass manages: straight to it. Else the port the person forwards it to.
+    let mut socket: Box<dyn crate::phone_link::Pipe> = if p.udid.is_some() {
+        crate::phone_link::open(p, crate::phone_link::PICTURE, Duration::from_secs(5)).map_err(|e| anyhow::anyhow!("can't reach its picture: {e}"))?
+    } else {
+        let s = TcpStream::connect_timeout(&([127, 0, 0, 1], p.video).into(), Duration::from_secs(2))
+            .with_context(|| format!("nothing on port {} (forward WebDriverAgent's video there)", p.video))?;
+        Box::new(s)
+    };
+    socket.set_timeout(Some(Duration::from_secs(5)));
     socket.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")?;
     let mut r = BufReader::new(socket);
     skip_headers(&mut r)?;
@@ -1090,7 +1096,8 @@ impl InputSink for PhoneInput {
         }
     }
 
-    /// ⌘V on a phone types what was pasted (WebDriverAgent can't reach its clipboard).
+    /// ⌘V on a phone types what was pasted (WebDriverAgent can't reach its clipboard; the
+    /// caller cuts it to `paste_cap`).
     fn paste_text(&mut self, text: &str) -> bool {
         let Some(feed) = self.phones.shown() else {
             return self.inner.paste_text(text);
@@ -1141,6 +1148,23 @@ impl InputSink for PhoneInput {
     fn computer(&mut self) -> Option<&mut dyn InputSink> {
         Some(&mut *self.inner)
     }
+}
+
+/// The most of a paste typed on a phone: it types a few characters at a time, and one
+/// request types it all, holding up every touch behind it.
+pub const PASTE_MOST: usize = glass_proto::MAX_TEXT_BYTES;
+
+/// What of a paste is typed on a phone (at most `PASTE_MOST` bytes, whole characters), and
+/// whether that's less than all of it.
+pub fn paste_cap(text: &str) -> (&str, bool) {
+    if text.len() <= PASTE_MOST {
+        return (text, false);
+    }
+    let mut end = PASTE_MOST;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
 }
 
 /// Distance (points) a press may wander and still be a tap.
@@ -1384,6 +1408,17 @@ mod tests {
         phones.unshow(None);
         assert!(input.type_text("ok"));
         assert_eq!(typed.lock().unwrap().last().map(String::as_str), Some("ok"));
+    }
+
+    #[test]
+    fn pastes_on_a_phone_are_cut_to_whole_characters() {
+        assert_eq!(paste_cap("hello"), ("hello", false));
+        let long = "é".repeat(PASTE_MOST); // two bytes each
+        let (typed, cut) = paste_cap(&long);
+        assert!(cut && typed.len() <= PASTE_MOST && typed.len() > PASTE_MOST - 2);
+        assert!(typed.chars().all(|c| c == 'é'));
+        let exact = "a".repeat(PASTE_MOST);
+        assert_eq!(paste_cap(&exact), (exact.as_str(), false));
     }
 
     #[test]

@@ -1,14 +1,19 @@
 //! Keeps the link to each phone Glass manages (a `@udid` in its settings entry) up, so
-//! nobody has to: forwards its WebDriverAgent ports to this computer's loopback (over USB
-//! through usbmuxd, or over Wi-Fi through Apple's paired, encrypted device tunnel), and
-//! starts WebDriverAgent on it whenever it isn't answering, again after it stops.
+//! nobody has to: reaches WebDriverAgent on it (over USB through usbmuxd, or over Wi-Fi
+//! through Apple's paired, encrypted device tunnel), and starts WebDriverAgent on it
+//! whenever it isn't answering, again after it stops.
+//!
+//! Glass opens each connection to the phone itself (`open`, `request`) rather than
+//! forwarding its ports to this computer's loopback: WebDriverAgent has no sign-in, so a
+//! port listening here would let any program on this computer, or a web page in one of its
+//! browsers, drive the phone and see its screen without Glass's grants, checks and audit.
 //!
 //! What it finds is the phone's state (`state`), which the viewer shows: starting, locked,
 //! waiting for the phone to be unlocked or for automation to be allowed on it, offline.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -60,8 +65,14 @@ pub fn generation() -> u64 {
     GENERATION.load(Ordering::Relaxed)
 }
 
-fn set_state(name: &str, state: State) {
+/// Sets a phone's state, unless its supervisor was told to stop (the phone was taken out of
+/// the settings): a check still running then mustn't bring back a state that was forgotten.
+/// `stop` is read under the lock `forget` takes, after it's set, so one or the other wins.
+fn set_state(name: &str, state: State, stop: &AtomicBool) {
     let mut states = STATES.lock().unwrap();
+    if stop.load(Ordering::SeqCst) {
+        return;
+    }
     let states = states.get_or_insert_with(HashMap::new);
     if states.get(name) != Some(&state) {
         tracing::info!("phone {name}: {}", match &state {
@@ -73,7 +84,9 @@ fn set_state(name: &str, state: State) {
     }
 }
 
-fn forget(name: &str) {
+/// Stops a phone's supervisor and forgets its state, for good.
+fn retire(name: &str, stop: &AtomicBool) {
+    stop.store(true, Ordering::SeqCst);
     if let Some(states) = STATES.lock().unwrap().as_mut()
         && states.remove(name).is_some()
     {
@@ -90,8 +103,7 @@ pub fn start() {
             running.retain(|name, (phone, stop)| {
                 let keep = wanted.contains(phone);
                 if !keep {
-                    stop.store(true, Ordering::Relaxed);
-                    forget(name);
+                    retire(name, stop);
                 }
                 keep
             });
@@ -120,9 +132,20 @@ const RETRY_MOST: Duration = Duration::from_secs(60);
 /// is picked up (locked, then unlocked) first.
 const ASK_AGAIN: Duration = Duration::from_secs(300);
 
+/// How long WebDriverAgent may take to answer after it's started before it's started again
+/// (xcodebuild can hang, and would say "starting" for ever).
+const START_LIMIT: Duration = Duration::from_secs(180);
+
+/// A file of its own for devicectl to write into: two threads may ask about one phone at once.
+fn temp_json(what: &str, udid: &str) -> std::path::PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("glass-phone-{what}-{udid}-{}-{n}.json", std::process::id()))
+}
+
 /// Whether the phone is locked, from Xcode (None: it can't tell).
 fn passcode_required(udid: &str) -> Option<bool> {
-    let out = std::env::temp_dir().join(format!("glass-phone-lock-{udid}.json"));
+    let out = temp_json("lock", udid);
     let ok = Command::new("xcrun")
         .args(["devicectl", "device", "info", "lockState", "--quiet", "--device", udid, "--json-output"])
         .arg(&out)
@@ -139,14 +162,10 @@ fn passcode_required(udid: &str) -> Option<bool> {
 
 fn supervise(phone: Phone, stop: Arc<AtomicBool>) {
     let name = phone.name.clone();
-    set_state(&name, State::Starting);
-    let route = Arc::new(Route::new(&phone));
-    for port in [(phone.port, 8100u16), (phone.video, 9100u16)] {
-        let (route, stop, name) = (route.clone(), stop.clone(), name.clone());
-        let _ = std::thread::Builder::new()
-            .name(format!("phone forward {}", port.0))
-            .spawn(move || forward(&name, port, route, stop));
-    }
+    let set = |state: State| set_state(&name, state, &stop);
+    set(State::Starting);
+    let udid = phone.udid.clone().unwrap_or_default();
+    let route = route(&phone);
     let mut runner: Option<Runner> = None;
     let mut retry = RETRY_FIRST;
     let mut next_start = Instant::now();
@@ -155,56 +174,77 @@ fn supervise(phone: Phone, stop: Arc<AtomicBool>) {
     // locked and unlocked (someone picked it up) or a few minutes have passed, so a phone
     // nobody's using isn't nagged.
     let mut asked: Option<(Instant, bool)> = None;
-    let xcode = xctestrun(phone.udid.as_deref().unwrap_or_default()).is_some();
     while !stop.load(Ordering::Relaxed) {
         match probe(&phone) {
             Some(locked) => {
                 retry = RETRY_FIRST;
-                set_state(&name, if locked { State::Locked } else { State::Ready });
+                if let Some(r) = runner.as_mut() {
+                    r.answered = true;
+                }
+                set(if locked { State::Locked } else { State::Ready });
             }
             None => {
                 let ended = runner.as_mut().is_some_and(|r| !r.running());
-                if let Some(r) = runner.as_ref().filter(|_| ended) {
-                    // What it said last, when that's something the person can fix.
+                let stuck = runner.as_ref().is_some_and(|r| !r.answered && r.started.elapsed() >= START_LIMIT);
+                if let Some(r) = runner.as_ref().filter(|_| ended || stuck) {
+                    // What it said last, when that's something the person can fix; or
+                    // that the phone's gone.
                     let said = r.said();
-                    tracing::info!("phone {name}: WebDriverAgent stopped; starting it again in {} s", retry.as_secs());
                     if said == Some(State::Approve) {
                         asked = Some((Instant::now(), false));
                     }
-                    set_state(&name, said.unwrap_or_else(|| State::Offline("WebDriverAgent stopped; starting it again".into())));
+                    let state = match route.present() {
+                        Err(gone) => State::Offline(gone),
+                        Ok(()) if stuck => State::Offline(format!("WebDriverAgent didn't answer within {} minutes of starting; starting it again", START_LIMIT.as_secs() / 60)),
+                        Ok(()) => said.unwrap_or_else(|| State::Offline("WebDriverAgent stopped; starting it again".into())),
+                    };
+                    tracing::info!("phone {name}: WebDriverAgent {}; starting it again in {} s", if stuck { "didn't answer in time" } else { "stopped" }, retry.as_secs());
+                    set(state);
                     runner = None;
                     next_start = Instant::now() + retry;
                     retry = (retry * 2).min(RETRY_MOST);
                 } else if let Some(r) = runner.as_ref() {
                     if let Some(s) = r.said() {
-                        set_state(&name, s);
+                        set(s);
                     }
                 } else if Instant::now() >= next_start {
-                    // Xcode can't start it on a locked phone (and asks to allow automation
-                    // when it's unlocked): wait for that rather than trying.
-                    let locked = if xcode { passcode_required(phone.udid.as_deref().unwrap_or_default()) } else { None };
-                    if let Some((at, seen_locked)) = asked.as_mut() {
-                        *seen_locked |= locked == Some(true);
-                        let picked_up = *seen_locked && locked == Some(false);
-                        if !picked_up && at.elapsed() < ASK_AGAIN {
-                            std::thread::sleep(Duration::from_secs(3));
-                            continue;
+                    match route.present() {
+                        // Unplugged or out of range: nothing to start until it's back.
+                        Err(gone) => {
+                            set(State::Offline(gone));
+                            next_start = Instant::now() + RETRY_FIRST;
                         }
-                        asked = None;
-                    }
-                    if locked == Some(true) {
-                        set_state(&name, State::Unlock);
-                        std::thread::sleep(Duration::from_secs(3));
-                        continue;
-                    }
-                    match Runner::start(&phone) {
-                        Ok(r) => {
-                            set_state(&name, State::Starting);
-                            runner = Some(r);
-                        }
-                        Err(why) => {
-                            set_state(&name, State::Offline(why));
-                            next_start = Instant::now() + RETRY_MOST;
+                        Ok(()) => {
+                            // The build is looked for each time (one may be added later),
+                            // and the same one is checked and started.
+                            let build = xctestrun(&udid);
+                            // Xcode can't start it on a locked phone (and asks to allow
+                            // automation when it's unlocked): wait for that rather than trying.
+                            let locked = if build.is_some() { passcode_required(&udid) } else { None };
+                            if let Some((at, seen_locked)) = asked.as_mut() {
+                                *seen_locked |= locked == Some(true);
+                                let picked_up = *seen_locked && locked == Some(false);
+                                if !picked_up && at.elapsed() < ASK_AGAIN {
+                                    std::thread::sleep(Duration::from_secs(3));
+                                    continue;
+                                }
+                                asked = None;
+                            }
+                            if locked == Some(true) {
+                                set(State::Unlock);
+                                std::thread::sleep(Duration::from_secs(3));
+                                continue;
+                            }
+                            match Runner::start(&phone, build) {
+                                Ok(r) => {
+                                    set(State::Starting);
+                                    runner = Some(r);
+                                }
+                                Err(why) => {
+                                    set(State::Offline(why));
+                                    next_start = Instant::now() + RETRY_MOST;
+                                }
+                            }
                         }
                     }
                 }
@@ -215,34 +255,119 @@ fn supervise(phone: Phone, stop: Arc<AtomicBool>) {
     drop(runner);
 }
 
-/// Whether WebDriverAgent answers through the forward, and then whether the phone is
-/// locked (None: not answering).
+/// Whether WebDriverAgent answers, and then whether the phone is locked (None: not
+/// answering).
 fn probe(phone: &Phone) -> Option<bool> {
-    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
-    let agent = AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_connect(Some(Duration::from_secs(2)))
-            .timeout_global(Some(Duration::from_secs(6)))
-            .build()
-            .into()
-    });
-    let url = |path: &str| format!("http://127.0.0.1:{}{path}", phone.port);
-    let ok = agent.get(url("/status")).call().ok()?.status().is_success();
-    if !ok {
-        return None;
-    }
-    let locked = agent
-        .get(url("/wda/locked"))
-        .call()
-        .ok()
-        .and_then(|r| r.into_body().read_json::<serde_json::Value>().ok())
+    let get = |path: &str| request(phone, "GET", path, None, Duration::from_secs(6)).ok().filter(|r| (200..300).contains(&r.status));
+    get("/status")?;
+    let locked = get("/wda/locked")
+        .and_then(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())
         .and_then(|v| v["value"].as_bool())
         .unwrap_or(false);
     Some(locked)
 }
 
-// ---- Forwarding ----
+// ---- Reaching the phone ----
+
+/// WebDriverAgent's ports on the phone itself: commands, and its live picture (MJPEG).
+pub(crate) const COMMANDS: u16 = 8100;
+pub(crate) const PICTURE: u16 = 9100;
+
+/// The way to each managed phone, kept for the tunnel address it remembers.
+static ROUTES: Mutex<Option<HashMap<(String, bool), Arc<Route>>>> = Mutex::new(None);
+
+fn route(phone: &Phone) -> Arc<Route> {
+    let key = (phone.udid.clone().unwrap_or_default(), phone.wifi);
+    ROUTES.lock().unwrap().get_or_insert_with(HashMap::new).entry(key).or_insert_with(|| Arc::new(Route::new(phone))).clone()
+}
+
+/// A connection straight to one of a managed phone's ports (`COMMANDS`, `PICTURE`), timing
+/// out reads and writes after `timeout`.
+pub(crate) fn open(phone: &Phone, port: u16, timeout: Duration) -> Result<Box<dyn Pipe>, String> {
+    let pipe = route(phone).connect(port)?;
+    pipe.set_timeout(Some(timeout));
+    Ok(pipe)
+}
+
+/// What WebDriverAgent answered.
+pub(crate) struct Reply {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+/// The most a reply may be (a screenshot of a big screen as base64, a deep tree).
+const REPLY_MOST: usize = 64 << 20;
+
+/// One HTTP request to WebDriverAgent on a managed phone, on a connection of its own.
+pub(crate) fn request(phone: &Phone, method: &str, path: &str, body: Option<&[u8]>, timeout: Duration) -> Result<Reply, String> {
+    let mut pipe = open(phone, COMMANDS, timeout)?;
+    let body = body.unwrap_or_default();
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{COMMANDS}\r\nConnection: close\r\n");
+    if method != "GET" {
+        req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
+    }
+    req.push_str("\r\n");
+    pipe.write_all(req.as_bytes()).and_then(|_| pipe.write_all(body)).map_err(|e| format!("couldn't send to it ({e})"))?;
+    read_reply(&mut BufReader::new(pipe))
+}
+
+/// An HTTP/1.1 response: its status and body (by its length, in chunks, or to the end).
+fn read_reply(r: &mut impl BufRead) -> Result<Reply, String> {
+    let bad = |e: std::io::Error| format!("its reply broke off ({e})");
+    let mut line = String::new();
+    r.read_line(&mut line).map_err(bad)?;
+    let status: u16 = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("an odd reply: {:?}", line.trim()))?;
+    let (mut length, mut chunked) = (None, false);
+    loop {
+        line.clear();
+        if r.read_line(&mut line).map_err(bad)? == 0 || line.trim().is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let (k, v) = (k.trim(), v.trim());
+            if k.eq_ignore_ascii_case("content-length") {
+                length = v.parse::<usize>().ok();
+            } else if k.eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked") {
+                chunked = true;
+            }
+        }
+    }
+    let mut body = Vec::new();
+    if chunked {
+        loop {
+            line.clear();
+            r.read_line(&mut line).map_err(bad)?;
+            let n = usize::from_str_radix(line.trim().split(';').next().unwrap_or(""), 16).map_err(|_| "an odd chunk".to_string())?;
+            if n == 0 {
+                break;
+            }
+            if body.len() + n > REPLY_MOST {
+                return Err("its reply was too big".into());
+            }
+            let at = body.len();
+            body.resize(at + n, 0);
+            r.read_exact(&mut body[at..]).map_err(bad)?;
+            line.clear();
+            r.read_line(&mut line).map_err(bad)?;
+        }
+    } else if let Some(n) = length {
+        if n > REPLY_MOST {
+            return Err("its reply was too big".into());
+        }
+        body.resize(n, 0);
+        r.read_exact(&mut body).map_err(bad)?;
+    } else {
+        r.take(REPLY_MOST as u64 + 1).read_to_end(&mut body).map_err(bad)?;
+        if body.len() > REPLY_MOST {
+            return Err("its reply was too big".into());
+        }
+    }
+    Ok(Reply { status, body })
+}
 
 /// How to reach a port on the phone: usbmuxd over USB, or the device tunnel's address over
 /// Wi-Fi (looked up again when it stops working: it changes when the phone reconnects).
@@ -255,6 +380,17 @@ struct Route {
 impl Route {
     fn new(phone: &Phone) -> Self {
         Route { udid: phone.udid.clone().unwrap_or_default(), wifi: phone.wifi, tunnel: Mutex::new(None) }
+    }
+
+    /// Whether the phone is there to be reached: plugged in (usbmuxd lists it), or on the
+    /// network with its tunnel up. Why not, when it isn't.
+    fn present(&self) -> Result<(), String> {
+        if !self.wifi {
+            return usbmux::device(&self.udid).map(|_| ());
+        }
+        let address = tunnel_address(&self.udid).map_err(|_| "It isn't on this network (or isn't paired with this Mac).".to_string())?;
+        *self.tunnel.lock().unwrap() = Some(address);
+        Ok(())
     }
 
     fn connect(&self, port: u16) -> Result<Box<dyn Pipe>, String> {
@@ -282,87 +418,30 @@ impl Route {
     }
 }
 
-/// A connection to the phone, readable and writable from two threads.
-trait Pipe: Read + Write + Send {
-    fn split(&self) -> std::io::Result<Box<dyn Pipe>>;
-    fn close(&self);
+/// A connection to the phone (or, for one Glass doesn't manage, to the port it's forwarded
+/// to).
+pub(crate) trait Pipe: Read + Write + Send {
+    fn set_timeout(&self, t: Option<Duration>);
 }
 
 impl Pipe for TcpStream {
-    fn split(&self) -> std::io::Result<Box<dyn Pipe>> {
-        Ok(Box::new(self.try_clone()?))
-    }
-    fn close(&self) {
-        let _ = self.shutdown(Shutdown::Both);
+    fn set_timeout(&self, t: Option<Duration>) {
+        let _ = self.set_read_timeout(t);
+        let _ = self.set_write_timeout(t);
     }
 }
 
 #[cfg(unix)]
 impl Pipe for std::os::unix::net::UnixStream {
-    fn split(&self) -> std::io::Result<Box<dyn Pipe>> {
-        Ok(Box::new(self.try_clone()?))
+    fn set_timeout(&self, t: Option<Duration>) {
+        let _ = self.set_read_timeout(t);
+        let _ = self.set_write_timeout(t);
     }
-    fn close(&self) {
-        let _ = self.shutdown(Shutdown::Both);
-    }
-}
-
-/// Listens on loopback `local` and carries each connection to the phone's `remote` port.
-fn forward(name: &str, (local, remote): (u16, u16), route: Arc<Route>, stop: Arc<AtomicBool>) {
-    let mut said = false;
-    let listener = loop {
-        if stop.load(Ordering::Relaxed) {
-            return;
-        }
-        match TcpListener::bind(("127.0.0.1", local)) {
-            Ok(l) => break l,
-            Err(e) => {
-                if !said {
-                    tracing::warn!("phone {name}: can't listen on port {local} ({e}); is something else forwarding it? Trying again.");
-                    said = true;
-                }
-                std::thread::sleep(Duration::from_secs(5));
-            }
-        }
-    };
-    let _ = listener.set_nonblocking(true);
-    while !stop.load(Ordering::Relaxed) {
-        match listener.accept() {
-            Ok((client, _)) => {
-                let _ = client.set_nonblocking(false);
-                let route = route.clone();
-                let _ = std::thread::Builder::new().name(format!("phone pipe {local}")).spawn(move || {
-                    if let Ok(phone) = route.connect(remote) {
-                        join(client, phone);
-                    }
-                });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => std::thread::sleep(Duration::from_millis(200)),
-        }
-    }
-}
-
-/// Copies both ways until either side closes.
-fn join(client: TcpStream, phone: Box<dyn Pipe>) {
-    let _ = client.set_nodelay(true);
-    let (Ok(mut client_read), Ok(mut phone_write)) = (client.try_clone(), phone.split()) else {
-        return;
-    };
-    let mut phone_read = phone;
-    let mut client_write = client;
-    let up = std::thread::spawn(move || {
-        let _ = std::io::copy(&mut client_read, &mut phone_write);
-        phone_write.close();
-    });
-    let _ = std::io::copy(&mut phone_read, &mut client_write);
-    let _ = client_write.shutdown(Shutdown::Both);
-    let _ = up.join();
 }
 
 /// The device tunnel's address for a phone paired over the network (Xcode's CoreDevice).
 fn tunnel_address(udid: &str) -> Result<String, String> {
-    let out = std::env::temp_dir().join(format!("glass-phone-{udid}.json"));
+    let out = temp_json("details", udid);
     let ran = Command::new("xcrun")
         .args(["devicectl", "device", "info", "details", "--quiet", "--device", udid, "--json-output"])
         .arg(&out)
@@ -441,10 +520,21 @@ mod usbmux {
         None
     }
 
+    /// The usbmuxd id of the phone, when it's plugged in.
+    #[cfg(unix)]
+    pub(super) fn device(udid: &str) -> Result<u64, String> {
+        let (_, list) = request("<key>MessageType</key><string>ListDevices</string>")?;
+        device_id(&list, udid).ok_or_else(|| "It isn't plugged in by USB (or isn't trusted on this Mac).".into())
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn device(_udid: &str) -> Result<u64, String> {
+        Err("phones over USB are only looked after on a Mac".into())
+    }
+
     #[cfg(unix)]
     pub(super) fn connect(udid: &str, port: u16) -> Result<UnixStream, String> {
-        let (_, list) = request("<key>MessageType</key><string>ListDevices</string>")?;
-        let id = device_id(&list, udid).ok_or("it isn't plugged in by USB")?;
+        let id = device(udid)?;
         let (s, reply) = request(&format!(
             "<key>MessageType</key><string>Connect</string><key>DeviceID</key><integer>{id}</integer><key>PortNumber</key><integer>{}</integer>",
             port.to_be()
@@ -469,15 +559,23 @@ struct Runner {
     child: Child,
     /// The last thing it said that the person can fix.
     said: Arc<Mutex<Option<State>>>,
+    started: Instant,
+    /// WebDriverAgent has answered since.
+    answered: bool,
+    /// Where its process id is kept, so one left running by an earlier Glass (one that
+    /// crashed or was killed) is stopped before another starts.
+    pid_file: std::path::PathBuf,
 }
 
 impl Runner {
-    /// Starts WebDriverAgent: with Xcode when there's a build for this phone in
-    /// `<config>/wda/<udid>/` (iOS 15 and later, USB or Wi-Fi), else with go-ios (`ios` on
+    /// Starts WebDriverAgent: with Xcode when there's a build for this phone (`build`, from
+    /// `<config>/wda/<udid>/`; iOS 15 and later, USB or Wi-Fi), else with go-ios (`ios` on
     /// the PATH; older iOS, over USB).
-    fn start(phone: &Phone) -> Result<Runner, String> {
+    fn start(phone: &Phone, build: Option<std::path::PathBuf>) -> Result<Runner, String> {
         let udid = phone.udid.as_deref().unwrap_or_default();
-        let mut cmd = if let Some(xctestrun) = xctestrun(udid) {
+        let pid_file = wda_dir(udid).join("runner.pid");
+        stop_left_over(&pid_file);
+        let mut cmd = if let Some(xctestrun) = build {
             let mut c = Command::new("xcrun");
             c.args(["xcodebuild", "test-without-building", "-xctestrun"]).arg(xctestrun).args(["-destination", &format!("id={udid}")]);
             c
@@ -499,6 +597,9 @@ impl Runner {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("couldn't start WebDriverAgent ({e})"))?;
+        if std::fs::create_dir_all(wda_dir(udid)).is_ok() {
+            let _ = std::fs::write(&pid_file, child.id().to_string());
+        }
         let said = Arc::new(Mutex::new(None));
         for out in [child.stdout.take().map(|o| Box::new(o) as Box<dyn Read + Send>), child.stderr.take().map(|e| Box::new(e) as Box<dyn Read + Send>)].into_iter().flatten() {
             let (said, name) = (said.clone(), phone.name.clone());
@@ -511,7 +612,7 @@ impl Runner {
                 }
             });
         }
-        Ok(Runner { child, said })
+        Ok(Runner { child, said, started: Instant::now(), answered: false, pid_file })
     }
 
     fn running(&mut self) -> bool {
@@ -527,7 +628,28 @@ impl Drop for Runner {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.pid_file);
     }
+}
+
+/// Stops the xcodebuild or go-ios an earlier Glass started for this phone and left running
+/// (it ended without stopping it), so two don't fight over the phone.
+fn stop_left_over(pid_file: &std::path::Path) {
+    let Some(pid) = std::fs::read_to_string(pid_file).ok().and_then(|s| s.trim().parse::<u32>().ok()) else { return };
+    let _ = std::fs::remove_file(pid_file);
+    // Only if that process is still one of those (its id may have been reused since).
+    let comm = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok();
+    let comm = comm.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    if is_runner(&comm) {
+        tracing::info!("stopping WebDriverAgent's runner left over from before (process {pid})");
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+}
+
+/// Whether a process's command is one that runs WebDriverAgent.
+fn is_runner(comm: &str) -> bool {
+    let name = comm.rsplit('/').next().unwrap_or(comm);
+    matches!(name, "xcodebuild" | "xcrun" | "ios")
 }
 
 /// What a line from xcodebuild or go-ios means for the person, if anything.
@@ -598,6 +720,46 @@ mod tests {
         assert_eq!(heard("The test runner failed to initialize for UI testing. (Underlying Error: Timed out while enabling automation mode.)"), Some(State::Approve));
         assert_eq!(heard("(Underlying Error: Authentication canceled.)"), Some(State::Approve));
         assert_eq!(heard("Testing started"), None);
+    }
+
+    #[test]
+    fn a_phone_taken_out_of_the_settings_stays_forgotten() {
+        let stop = AtomicBool::new(false);
+        set_state("gone-xr", State::Ready, &stop);
+        assert_eq!(state("gone-xr"), Some(State::Ready));
+        retire("gone-xr", &stop);
+        assert_eq!(state("gone-xr"), None);
+        // A check that was still running finishes after: it doesn't bring the phone back.
+        set_state("gone-xr", State::Offline("WebDriverAgent stopped".into()), &stop);
+        set_state("gone-xr", State::Starting, &stop);
+        assert_eq!(state("gone-xr"), None);
+        // Put back in the settings, its new supervisor's state is shown.
+        let again = AtomicBool::new(false);
+        set_state("gone-xr", State::Starting, &again);
+        assert_eq!(state("gone-xr"), Some(State::Starting));
+        retire("gone-xr", &again);
+    }
+
+    #[test]
+    fn replies_are_read_by_length_in_chunks_or_to_the_end() {
+        let read = |raw: &str| read_reply(&mut BufReader::new(raw.as_bytes()));
+        let r = read("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nServer: WDA\r\n\r\nhello and more").unwrap();
+        assert_eq!((r.status, r.body.as_slice()), (200, &b"hello"[..]));
+        let r = read("HTTP/1.1 404 Not Found\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2;x=1\r\nde\r\n0\r\n\r\n").unwrap();
+        assert_eq!((r.status, r.body.as_slice()), (404, &b"abcde"[..]));
+        let r = read("HTTP/1.0 200 OK\r\n\r\n{\"value\":1}").unwrap();
+        assert_eq!(r.body, b"{\"value\":1}");
+        assert!(read("garbage").is_err());
+        assert!(read("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort").is_err(), "cut short");
+        assert!(read(&format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", REPLY_MOST + 1)).is_err());
+    }
+
+    #[test]
+    fn temp_files_differ_and_left_over_runners_are_told_apart() {
+        assert_ne!(temp_json("details", "u"), temp_json("details", "u"));
+        assert!(is_runner("/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"));
+        assert!(is_runner("/opt/homebrew/bin/ios") && is_runner("xcrun"));
+        assert!(!is_runner("/usr/bin/login") && !is_runner("Safari") && !is_runner(""));
     }
 
     #[test]

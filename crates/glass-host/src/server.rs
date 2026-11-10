@@ -1329,8 +1329,15 @@ async fn control(
                 if let Some(text) = pasted.filter(|_| perms.input) {
                     let mut injector = shared.injector.lock().unwrap();
                     // Typed on a phone only by those who may use the phones (else the
-                    // computer's paste, which a shown phone ignores).
-                    if !(phone_access(&perms) && injector.paste_text(&text)) {
+                    // computer's paste, which a shown phone ignores), and only so much: a
+                    // phone types a few characters at a time, and nothing else reaches it
+                    // until it's done.
+                    let (typed, cut) = crate::phone_view::paste_cap(&text);
+                    if phone_access(&perms) && injector.paste_text(typed) {
+                        if cut {
+                            refuse(&format!("Only the first {} characters were typed on the phone.", typed.chars().count()));
+                        }
+                    } else {
                         injector.paste();
                     }
                 }

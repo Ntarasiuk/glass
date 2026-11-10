@@ -13,8 +13,8 @@ On a phone:
 - There's no pointer (`move_pointer`) and no recording yet.
 
 Glass reaches each phone through [WebDriverAgent](https://github.com/appium/appium-ios/tree/main/packages/webdriveragent)
-(Appium's XCTest server) running on it, on a port of this computer: over USB, or over Wi-Fi
-through Apple's device tunnel.
+(Appium's XCTest server) running on it: over USB, or over Wi-Fi through Apple's device
+tunnel.
 
 ## Set up a phone
 
@@ -29,6 +29,9 @@ through Apple's device tunnel.
    ios forward 8100 8100   # commands
    ios forward 9100 9100   # its live picture, for the viewer
    ```
+
+   That's to try it by hand. With the phone's UDID in step 3, Glass starts WebDriverAgent
+   itself and needs no `ios forward`, which opens ports anything on this computer can use.
 
    Don't pass `-XCTDisableSnapshottingForEventsOnApplication YES` to make touches about 20 ms
    faster: WebDriverAgent then can't say which app is in front, and Glass keeps agents off
@@ -46,10 +49,16 @@ through Apple's device tunnel.
 
 With a UDID in its entry, Glass looks after the phone itself; nothing else needs to run:
 
-- It forwards the two ports to this computer's loopback: over USB through usbmuxd, over Wi-Fi
-  through Apple's device tunnel (whose address it looks up again when the phone reconnects).
+- It connects to WebDriverAgent's two ports on the phone itself (8100 for commands, 9100 for
+  the picture), each time it needs one: over USB through usbmuxd, over Wi-Fi through Apple's
+  device tunnel (whose address it looks up again when the phone reconnects). Nothing listens
+  on this computer for it, so other programs here and web pages can't reach the phone through
+  Glass; the port in its entry just names it.
+- It doesn't try to start anything on a phone that isn't there: unplugged, or out of range,
+  it's *offline* and says so until it's back.
 - It starts WebDriverAgent when it isn't answering, and again whenever it stops (after 5 s,
-  doubling to a minute while it keeps failing). With an Xcode build of WebDriverAgent for that
+  doubling to a minute while it keeps failing, and when it hasn't answered 3 minutes after
+  starting). With an Xcode build of WebDriverAgent for that
   phone in `<config>/wda/<udid>/` (the `Build/Products` folder of `xcodebuild
   build-for-testing`) it uses Xcode; otherwise go-ios (`ios` on the PATH, or `GLASS_GO_IOS`)
   and the WebDriverAgent installed on the phone.
@@ -60,8 +69,9 @@ With a UDID in its entry, Glass looks after the phone itself; nothing else needs
 The viewer says what each phone needs: *starting…*, *locked*, *unlock it*, *allow
 automation*, or *offline* and why, in the Machines menu and over the phone's picture.
 
-Without a UDID, Glass only uses the ports; keeping WebDriverAgent running and forwarded there
-is up to you (`ios runwda …` and `ios forward 8100 8100`, `ios forward 9100 9100`).
+Without a UDID, Glass only uses the ports on 127.0.0.1; keeping WebDriverAgent running and
+forwarded there is up to you (`ios runwda …` and `ios forward 8100 8100`, `ios forward 9100
+9100`), and so is what else can reach those ports (see Safety).
 
 ## Over Wi-Fi
 
@@ -82,7 +92,7 @@ Phones are listed in the Machines menu, under the computer they're plugged into:
 see its live picture and use it with the pointer and keyboard, and pick the computer again to
 go back to its screen. A click is a tap, holding is a long press, a drag is a swipe (played back when it's
 released: WebDriverAgent plays a gesture as one request), scrolling swipes, a trackpad pinch
-pinches, and ⌘V types what's on your clipboard. Home is the toolbar's button (Escape isn't
+pinches, and ⌘V types what's on your clipboard (its first 4 KB). Home is the toolbar's button (Escape isn't
 Home: it's also how you leave fullscreen). The pointer is a fingertip, and a ripple shows
 where each click landed. Turned on its side, the picture turns upright in the viewer (Glass
 asks the phone which way it's held every second) and touches turn with it.
@@ -111,13 +121,16 @@ for the phone to draw it and WebDriverAgent to screenshot it (about 26 a second)
 
 ## Safety
 
-- Glass only talks to phones on loopback ports. WebDriverAgent has no sign-in, so never expose
-  it on a network. Even set up over USB, WebDriverAgent also listens on the phone's own Wi-Fi
-  address, where anyone on the same network can drive it: keep the phone on a network you
-  trust, or off Wi-Fi. And while `ios forward` (or the Wi-Fi tunnel) runs, any program on this
-  computer can reach WebDriverAgent on 127.0.0.1, and a web page open in one of its browsers
-  may be able to send it requests too (pages can send to local ports even when they can't
-  read the answers). Forward only while you're using the phone.
+- WebDriverAgent has no sign-in: whatever reaches it drives the phone and sees its screen,
+  past every check below. A phone Glass manages (a UDID in its entry) is reached directly,
+  with no port opened on this computer. Without a UDID, while `ios forward` runs any program
+  on this computer can reach WebDriverAgent on 127.0.0.1, and a web page open in one of its
+  browsers may be able to send it requests too (pages can send to local ports even when they
+  can't read the answers): forward only while you're using the phone, or give it a UDID.
+- Even set up over USB, WebDriverAgent also listens on the phone's own Wi-Fi address, where
+  anyone on the same network can drive it: keep the phone on a network you trust, or off
+  Wi-Fi. Over Wi-Fi pairing, programs on this computer can also reach it at the device
+  tunnel's address.
 - Phone actions go through the same checks as the computer's: stop and pause, waiting while
   the person uses the computer or a phone from a viewer (looking doesn't wait), an agent's
   grant and hourly budget, the audit log, and the viewer's activity line. An agent's input on
