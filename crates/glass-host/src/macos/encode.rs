@@ -255,6 +255,11 @@ impl Encoder {
     }
 
     /// Capture should deliver BGRA (full colour) rather than 4:2:0, for HEVC 4:2:2.
+    /// Waits for every submitted frame to come out.
+    pub fn flush(&self) {
+        unsafe { self.session.complete_frames(kCMTimeInvalid) };
+    }
+
     pub fn wants_bgra(&self) -> bool {
         self.rext
     }

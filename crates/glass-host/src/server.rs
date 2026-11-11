@@ -114,6 +114,7 @@ pub async fn run(
     }
 
     crate::origin::start(wt_host.as_deref()).await;
+    crate::wol::prefetch_own_macs();
     let cert_hash = cert_hash.map(|h| serde_json::from_str::<Vec<u8>>(&h).unwrap());
     let version_dir = web_dir.clone();
     let client_config = move || {

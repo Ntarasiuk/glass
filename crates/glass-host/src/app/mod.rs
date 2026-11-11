@@ -15,6 +15,10 @@ mod home;
 mod links;
 mod machines;
 mod prefs;
+#[cfg(any(target_os = "macos", windows))]
+mod remote;
+#[cfg(any(target_os = "macos", windows))]
+mod remote_term;
 mod sessions;
 mod setup;
 mod support;
@@ -418,6 +422,15 @@ pub(crate) enum Via {
 pub struct GlassApp {
     store: Entity<Store>,
     page: Page,
+    /// Another computer's screen, shown in place of the pages.
+    #[cfg(any(target_os = "macos", windows))]
+    remotes: Vec<(Entity<remote::RemoteView>, Subscription)>,
+    /// Which of them is on screen (none: a page is).
+    #[cfg(any(target_os = "macos", windows))]
+    showing: Option<usize>,
+    /// A Glass link to open in the viewer (Machines).
+    #[cfg(any(target_os = "macos", windows))]
+    open_link: Entity<InputState>,
     /// First-run setup, shown instead of the pages.
     setup: Option<setup::Setup>,
     chat: Entity<InputState>,
@@ -466,6 +479,12 @@ impl GlassApp {
         let mut this = Self {
             store,
             page: Page::Home,
+            #[cfg(any(target_os = "macos", windows))]
+            remotes: Vec::new(),
+            #[cfg(any(target_os = "macos", windows))]
+            showing: None,
+            #[cfg(any(target_os = "macos", windows))]
+            open_link: input("https://computer.tailnet.ts.net/#l=…", window, cx),
             setup: None,
             chat,
             chat_scroll: ScrollHandle::new(),
@@ -493,6 +512,15 @@ impl GlassApp {
                 }
             }
             Err(_) => {}
+        }
+        // For screenshots and tests: open straight into a viewer (a tailnet name or a URL).
+        #[cfg(any(target_os = "macos", windows))]
+        if let Ok(dns) = std::env::var("GLASS_APP_CONNECT") {
+            let token = std::env::var("GLASS_APP_TOKEN").ok();
+            if let Some(mut t) = crate::viewer::Target::from_url(&dns) {
+                t.token = token.or(t.token);
+                this.connect(t, window, cx);
+            }
         }
         // While setup waits on Tailscale, check it every couple of seconds.
         cx.spawn(async move |this, cx| {
@@ -523,7 +551,50 @@ impl GlassApp {
         self.notes.retain(|id, _| asks.contains(id));
     }
 
+    /// Shows another computer's screen in the window, connecting to it (or back to it, if
+    /// it's already open: several can be, one on screen at a time).
+    #[cfg(any(target_os = "macos", windows))]
+    pub(super) fn connect(&mut self, target: crate::viewer::Target, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(i) = self.remotes.iter().position(|(v, _)| v.read(cx).dns() == target.dns) {
+            self.show_remote(Some(i), window, cx);
+            return;
+        }
+        let rt = self.store.read(cx).rt.clone();
+        let view = cx.new(|cx| remote::RemoteView::new(target, &rt, window, cx));
+        let sub = cx.subscribe_in(&view, window, |this, view, _: &remote::Disconnect, window, cx| {
+            this.remotes.retain(|(v, _)| v != view);
+            this.show_remote(None, window, cx);
+        });
+        self.remotes.push((view, sub));
+        self.show_remote(Some(self.remotes.len() - 1), window, cx);
+    }
+
+    /// Puts one session on screen (or none); the others pause their video.
+    #[cfg(any(target_os = "macos", windows))]
+    fn show_remote(&mut self, which: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.showing = which.filter(|&i| i < self.remotes.len());
+        for (i, (v, _)) in self.remotes.iter().enumerate() {
+            let on = Some(i) == self.showing;
+            v.update(cx, |v, cx| v.set_visible(on, window, cx));
+        }
+        if self.showing.is_none() {
+            window.set_window_title("Glass");
+        }
+        cx.notify();
+    }
+
     fn go(&mut self, page: Page, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", windows))]
+        if self.showing.is_some() {
+            // Sessions stay connected (video paused) while a page is shown.
+            let remotes: Vec<_> = self.remotes.iter().map(|(v, _)| v.clone()).collect();
+            self.showing = None;
+            cx.defer(move |cx| {
+                for v in remotes {
+                    v.update(cx, |v, cx| v.pause(cx));
+                }
+            });
+        }
         self.page = page;
         if page == Page::Agents {
             self.check_clients(cx);
@@ -630,6 +701,27 @@ impl Render for GlassApp {
         if let Some(setup) = self.setup.clone() {
             return self.render_setup(setup, window, cx).into_any_element();
         }
+        #[cfg(any(target_os = "macos", windows))]
+        if let Some((remote, _)) = self.showing.and_then(|i| self.remotes.get(i)) {
+            let full = remote.read(cx).full_screen();
+            let view = remote.clone();
+            return h_flex()
+                .size_full()
+                .text_color(cx.theme().foreground)
+                .when(!full, |d| d.child(self.sidebar(cx)))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .h_full()
+                        .min_w_0()
+                        .bg(cx.theme().background)
+                        .border_l_1()
+                        .border_color(cx.theme().border)
+                        .when(!full, |d| d.child(TitleBar::new().bg(cx.theme().background).border_b_0()))
+                        .child(div().flex_1().min_h_0().child(view)),
+                )
+                .into_any_element();
+        }
         let page = match self.page {
             Page::Home => self.home(window, cx).into_any_element(),
             Page::Sessions => self.sessions(window, cx).into_any_element(),
@@ -661,6 +753,43 @@ impl Render for GlassApp {
 }
 
 impl GlassApp {
+    /// The computers open in the window, to switch between.
+    #[cfg(any(target_os = "macos", windows))]
+    fn open_sessions(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if self.remotes.is_empty() {
+            return Vec::new();
+        }
+        let theme = cx.theme().clone();
+        let mut rows = vec![div().px_2p5().pt_4().pb_1().text_xs().text_color(theme.muted_foreground).child("Open screens").into_any_element()];
+        for (i, (v, _)) in self.remotes.iter().enumerate() {
+            let active = self.showing == Some(i);
+            let (name, live) = v.read(cx).summary();
+            rows.push(
+                h_flex()
+                    .id(SharedString::from(format!("screen-{i}")))
+                    .h(px(32.))
+                    .px_2p5()
+                    .gap_2p5()
+                    .rounded(px(8.))
+                    .text_sm()
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(theme.secondary_active).font_weight(FontWeight::MEDIUM))
+                    .when(!active, |d| d.text_color(theme.foreground.opacity(0.82)).hover(|d| d.bg(theme.secondary_hover)))
+                    .child(Icon::new(I::Monitor).small().text_color(if active { theme.primary } else { theme.muted_foreground }))
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(ui::dot(if live { theme.success } else { theme.warning }))
+                    .on_click(cx.listener(move |this, _, window, cx| this.show_remote(Some(i), window, cx)))
+                    .into_any_element(),
+            );
+        }
+        rows
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    fn open_sessions(&self, _: &mut Context<Self>) -> Vec<AnyElement> {
+        Vec::new()
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
         let snap = &store.snap;
@@ -717,6 +846,9 @@ impl GlassApp {
                     ),
             )
             .children(Page::ALL.into_iter().map(|page| {
+                #[cfg(any(target_os = "macos", windows))]
+                let active = self.page == page && self.showing.is_none();
+                #[cfg(not(any(target_os = "macos", windows)))]
                 let active = self.page == page;
                 let theme = cx.theme();
                 h_flex()
@@ -734,6 +866,7 @@ impl GlassApp {
                     .children(badge(page).map(|n| ui::count(n, theme.primary, theme.primary_foreground)))
                     .on_click(cx.listener(move |this, _, _, cx| this.go(page, cx)))
             }))
+            .children(self.open_sessions(cx))
             .child(div().flex_1())
             .child(self.update_button(update, cx))
     }
