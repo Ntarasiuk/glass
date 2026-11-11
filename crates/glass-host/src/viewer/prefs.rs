@@ -11,6 +11,9 @@ pub struct MachinePrefs {
     pub swap: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<bool>,
+    /// How loud its sound plays here, 0..1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f32>,
     /// A guest pass a link was traded for (and when it runs out, unix seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass: Option<(String, u64)>,

@@ -48,7 +48,7 @@ pub mod selftest;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -170,6 +170,8 @@ pub struct Viewer {
     clip_image: Mutex<Option<(String, Vec<u8>)>>,
     /// Play the computer's sound here.
     pub audio_on: AtomicBool,
+    /// How loud it plays here, 0..1 (an f32's bits).
+    pub volume: Arc<AtomicU32>,
     /// Video is wanted (the session is on screen).
     video_on: AtomicBool,
     /// The last viewport sent, sent again to each new session.
@@ -197,6 +199,7 @@ impl Viewer {
             lossless: Mutex::new(Vec::new()),
             clip_image: Mutex::new(None),
             audio_on: AtomicBool::new(true),
+            volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             video_on: AtomicBool::new(true),
             viewport: Mutex::new(None),
             pass: Mutex::new(None),
