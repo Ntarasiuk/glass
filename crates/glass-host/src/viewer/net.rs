@@ -516,7 +516,11 @@ async fn once(target: &Target, viewer: &Arc<Viewer>, rx: &mut mpsc::UnboundedRec
                                 }
                             }
                         }
-                        write_json(&mut send, &json!({ "t": "mic", "on": on && mic.is_some() })).await?;
+                        #[cfg(any(target_os = "macos", windows))]
+                        let sending = on && mic.is_some();
+                        #[cfg(not(any(target_os = "macos", windows)))]
+                        let sending = false;
+                        write_json(&mut send, &json!({ "t": "mic", "on": sending })).await?;
                     }
                     Some(Out::ClipImage { mime, bytes, text, paste }) => {
                         tokio::spawn(send_clip_image(conn.clone(), mime, bytes, text, paste));

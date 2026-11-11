@@ -92,7 +92,7 @@ pub async fn confirm(reason: String) -> Result<bool> {
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-async fn confirm(_: String) -> Result<bool> {
+pub async fn confirm(_: String) -> Result<bool> {
     Ok(false)
 }
 
