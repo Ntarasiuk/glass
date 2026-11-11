@@ -340,6 +340,9 @@ enum Command {
         /// Click once at x,y (0..1 of the first display) when connected.
         #[arg(long, value_parser = parse_point)]
         click: Option<(f32, f32)>,
+        /// Send this control message (JSON) once connected; repeatable.
+        #[arg(long = "control")]
+        controls: Vec<String>,
         /// Type this, key by key (`{wait:N}` pauses; \n is Return, \t is Tab).
         #[arg(long)]
         keys: Option<String>,
@@ -1247,7 +1250,7 @@ async fn async_main(args: Args) -> Result<()> {
             println!("{}/app/#r={}", remote::base().trim_end_matches('/'), key.public());
             Ok(())
         }
-        Some(Command::ViewerProbe { target, seconds, token, input, save, sharp, click, keys }) => viewer::probe(target, token.clone(), *seconds, *input, save.clone(), *sharp, *click, keys.clone().map(|k| k.replace("\\n", "\n").replace("\\t", "\t"))).await,
+        Some(Command::ViewerProbe { target, seconds, token, input, save, sharp, click, keys, controls }) => viewer::probe(target, token.clone(), *seconds, *input, save.clone(), *sharp, *click, keys.clone().map(|k| k.replace("\\n", "\n").replace("\\t", "\t")), controls.clone()).await,
         #[cfg(any(target_os = "macos", windows))]
         Some(Command::App { .. }) => unreachable!("handled before the runtime starts"),
         Some(Command::Support { .. }) => unreachable!("handled before the runtime starts"),

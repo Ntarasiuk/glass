@@ -384,7 +384,7 @@ impl Session {
 
 /// `glass viewer-probe`: connects like the app's viewer, without a window, and reports what
 /// arrived: the native pipeline end to end (QUIC, reassembly, hardware decode, input).
-pub async fn probe(target: &str, token: Option<String>, secs: u64, send_input: bool, save: Option<std::path::PathBuf>, sharp: bool, click: Option<(f32, f32)>, typed: Option<String>) -> anyhow::Result<()> {
+pub async fn probe(target: &str, token: Option<String>, secs: u64, send_input: bool, save: Option<std::path::PathBuf>, sharp: bool, click: Option<(f32, f32)>, typed: Option<String>, controls: Vec<String>) -> anyhow::Result<()> {
     let session = Session::start(&tokio::runtime::Handle::current(), {
         let mut t = Target::from_url(target).unwrap_or(Target { name: target.into(), dns: target.into(), is_self: false, token: None, link: None, remote: None });
         t.token = token.or(t.token);
@@ -396,6 +396,7 @@ pub async fn probe(target: &str, token: Option<String>, secs: u64, send_input: b
     let mut moved = !send_input;
     let mut clicked = click.is_none();
     let mut typing = typed;
+    let mut controls = Some(controls);
     while start.elapsed().as_secs() < secs {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         if let Status::Refused(m) = session.viewer.status() {
@@ -407,6 +408,14 @@ pub async fn probe(target: &str, token: Option<String>, secs: u64, send_input: b
             session.input(InputEvent::MouseMove { x, y, stream: 0 });
             session.input(InputEvent::MouseDown { button: 0 });
             session.input(InputEvent::MouseUp { button: 0 });
+        }
+        // `--control`: messages sent as they are, once connected.
+        if session.viewer.status() == Status::Live
+            && let Some(list) = controls.take()
+        {
+            for c in list {
+                session.control(serde_json::from_str(&c)?);
+            }
         }
         // `--keys`: typed key by key (US layout), `{wait:N}` pausing N seconds.
         if let Some(text) = if session.viewer.status() == Status::Live { typing.take() } else { None } {

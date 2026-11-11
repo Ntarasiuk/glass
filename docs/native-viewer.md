@@ -12,7 +12,7 @@ Code: `crates/glass-host/src/viewer/` (session, decoding, platform pieces) and
 
 `glass viewer-selftest <test host> --token …` runs the checks named below against a
 `glass --test` host, through the same session API the window uses, and reads back what the
-host saw. On 2026-11-10 all 28 passed on a Mac and on Windows 11 (Arm VM, x64 build).
+host saw. On 2026-11-10 all 28 passed on a Mac and on Windows 11 (Arm VM, x64 build); `GLASS_SELFTEST_HOST_CONFIG=<the test host's config folder>` adds the Wake-on-LAN check.
 
 | Web viewer | Native viewer | Check |
 |---|---|---|
@@ -43,14 +43,16 @@ host saw. On 2026-11-10 all 28 passed on a Mac and on Windows 11 (Arm VM, x64 bu
 | Use as another display | More menu | selftest `use as another display` |
 | Record | More menu | selftest `record the session` |
 | Restart, update | More menu | selftest `restart Glass there`, `update Glass there` |
+| Ctrl+Alt+Delete | More menu (Windows hosts) | `viewer-probe --control '{"t":"sas"}'` against a Windows host with the secure-desktop service: the secure screen came up and Cancel, clicked through the viewer, closed it |
+| Wake-on-LAN | Machines → Wake (from this computer); through a host by its seen addresses | selftest `wake a computer through this one` |
 | Agents' questions | Cards with Allow / Deny / the number | selftest `an agent's question` (through `glass mcp`) |
 | Guest links, passes | Machines → Open a link; passes kept per computer | test host; live Mac host |
-| Links with a passkey | The app is its own authenticator, unlocked with Touch ID or Windows Hello | live Mac host: Touch ID (Mac) and Windows Hello PIN (VM), registered then verified |
+| Links with a passkey | The app is its own authenticator, unlocked with Touch ID or Windows Hello | live Mac host: Touch ID (Mac) and Windows Hello PIN (VM), registered then verified; an unanswered prompt keeps the session up until the host's own 2-minute limit |
 | Links from anywhere (WebRTC) | Through glassdesk.dev, the answer checked against the link's key | live Mac host |
 
-Not covered by an automatic check: Ctrl+Alt+Delete (needs a Windows host with the
-secure-desktop service), Wake-on-LAN (needs a sleeping machine), hardware HEVC decoding on
-Windows (needs a GPU with HEVC; the VM's declines it and decodes in software). Touch, Apple
+Not checked: hardware HEVC decoding on Windows (needs a GPU with HEVC; the VM's declines
+the Direct3D device and the decoder works in software), and a real magic packet waking a
+real sleeping machine (the check stops at the host sending it). Touch, Apple
 Pencil and trackpad mode don't apply on a Mac or Windows PC.
 
 ## More than the browser

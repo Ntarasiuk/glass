@@ -309,6 +309,15 @@ pub async fn run(base: &str, token: String) -> Result<()> {
     let picked = seen.iter().rev().find(|m| m["t"] == "_file").map(|m| m["name"].to_string()).unwrap_or_default();
     results.push(("get files from there", ok, picked));
 
+    // ---- Wake-on-LAN through this computer (it has seen the other one's address) ----
+    if let Ok(dir) = std::env::var("GLASS_SELFTEST_HOST_CONFIG") {
+        let _ = std::fs::write(std::path::Path::new(&dir).join("peers.json"), r#"{"sleepy.example.ts.net":["aa:bb:cc:dd:ee:01"]}"#);
+        let before = records("wake").len();
+        session.control(json!({ "t": "wake", "dns": "sleepy.example.ts.net" }));
+        let ok = until(4, || records("wake").len() > before).await;
+        results.push(("wake a computer through this one", ok, records("wake").last().map(|r| r.to_string()).unwrap_or_default()));
+    }
+
     // ---- An agent's question, answered here ----
     let ask = agent_confirm(&base, &token_for_mcp).await;
     let asked = message(&session, &mut seen, 10, |m| m["t"] == "agentAsk").await;
@@ -325,6 +334,7 @@ pub async fn run(base: &str, token: String) -> Result<()> {
         println!("{} {name}{}", if *ok { "✓" } else { "✗" }, if detail.is_empty() { String::new() } else { format!(" — {detail}") });
         failed += !ok as usize;
     }
+    println!("{} of {} passed", results.len() - failed, results.len());
     if failed > 0 {
         bail!("{failed} failed");
     }
