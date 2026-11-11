@@ -73,7 +73,7 @@ impl GlassApp {
         } else {
             div()
                 .id("chat-log")
-                .max_h(px(320.))
+                .max_h(super::text_size::pt(320.))
                 .overflow_y_scroll()
                 .track_scroll(&self.chat_scroll)
                 .child(v_flex().px_4().py_3().gap_2().children(snap.chat.iter().map(|m| {

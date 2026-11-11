@@ -15,6 +15,10 @@ November 11, 2026
 - Beyond the browser: the keyboard can be captured, so system shortcuts go to the other computer (⌘Tab, ⌘Space and Mission Control on a Mac, the Windows key and Alt+Tab on Windows; ⌃⌥⎋ or Ctrl+Alt+Esc lets go; a Mac needs Accessibility for Glass), the mouse too for games. ⌘Q still quits Glass. On a Mac the pointer is the Mac's own, in the other computer's shapes, so it never lags. Copy on one and paste on the other with nothing to press. The speaker opens what's playing there with its controls, a volume slider and mute. Several computers stay open at once, switched from the sidebar; ⌘ as Ctrl, sound and its volume are remembered for each computer. End closes the session.
 - Machines → Open a link takes a link someone sent you, including ones that work from anywhere (over WebRTC, through glassdesk.dev, the host's answer checked against the link's key).
 
+### The Glass app
+
+- Text can be made bigger (or smaller): View → Bigger Text and Smaller Text, ⌘+ / ⌘− / ⌘0 (Ctrl on Windows), or Settings → Appearance. The whole window grows with it, from 12 to 24 pt, and Glass remembers it.
+
 ### Windows
 
 - Viewers can type into Windows' own credential prompts (such as "verify your account password" or a Windows Hello PIN) when the secure-desktop service is installed: input goes through it whenever the window in front is out of the host's reach, not only when it's elevated.

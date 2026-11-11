@@ -788,7 +788,9 @@ impl RemoteView {
             .small()
             .ghost()
             .icon(I::Monitor)
-            .label(if streams.len() > 1 { format!("{} displays", streams.len()) } else { "Display".into() })
+            // Just the icon once big text would push End off the toolbar.
+            .when(!compact_toolbar(), |b| b.label(if streams.len() > 1 { format!("{} displays", streams.len()) } else { "Display".into() }))
+            .tooltip("Displays")
             .dropdown_menu(move |mut menu, _, _| {
                 for (i, d) in displays.iter().enumerate() {
                     let id = d["id"].as_u64().unwrap_or(0) as u32;
@@ -952,7 +954,7 @@ impl RemoteView {
         let has_audio = self.welcome()["audio"].as_bool().unwrap_or(false);
         h_flex()
             .flex_none()
-            .h(px(40.))
+            .h(super::text_size::pt(40.))
             .px_3()
             .gap_1()
             .border_b_1()
@@ -1006,7 +1008,10 @@ impl RemoteView {
                     .small()
                     .map(|b| if captured { b.primary() } else { b.ghost() })
                     .icon(I::Keyboard)
-                    .label(if captured { format!("{} to release", crate::viewer::sys::RELEASE_HINT) } else { "Capture keys".into() })
+                    .map(|b| {
+                        let text = if captured { format!("{} to release", crate::viewer::sys::RELEASE_HINT) } else { "Capture keys".into() };
+                        if compact_toolbar() { b.tooltip(text) } else { b.label(text) }
+                    })
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_capture(window, cx))),
             )
             .child(Button::new("remote-full").small().ghost().icon(if self.full_screen { I::Minimize } else { I::Maximize }).on_click(cx.listener(|this, _, window, cx| this.toggle_full_screen(window, cx))))
@@ -1041,7 +1046,7 @@ impl RemoteView {
             Button::new(id).small().ghost().icon(icon).on_click(move |_, _, cx| view.update(cx, |v, _| v.session.control(json!({ "t": "media", "action": action }))))
         };
         v_flex()
-            .w(px(260.))
+            .w(super::text_size::pt(260.))
             .gap_3()
             .children(v.now_playing.as_ref().map(|np| {
                 let title = np["title"].as_str().unwrap_or_default().to_string();
@@ -1105,13 +1110,13 @@ impl RemoteView {
     fn chat_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         v_flex()
-            .w(px(280.))
+            .w(super::text_size::pt(280.))
             .flex_none()
             .h_full()
             .border_l_1()
             .border_color(theme.border)
             .bg(theme.background)
-            .child(h_flex().h(px(36.)).px_3().text_sm().font_weight(FontWeight::MEDIUM).child("Chat"))
+            .child(h_flex().h(super::text_size::pt(36.)).px_3().text_sm().font_weight(FontWeight::MEDIUM).child("Chat"))
             .child(
                 v_flex()
                     .id("remote-chat-lines")
@@ -1203,7 +1208,7 @@ impl RemoteView {
                 h_flex()
                     .id(SharedString::from(format!("file-{i}")))
                     .px_2()
-                    .h(px(28.))
+                    .h(super::text_size::pt(28.))
                     .gap_2()
                     .rounded(px(6.))
                     .hover(|d| d.bg(theme.secondary_hover))
@@ -1236,7 +1241,7 @@ impl RemoteView {
         }
         let here = path.clone();
         v_flex()
-            .w(px(320.))
+            .w(super::text_size::pt(320.))
             .flex_none()
             .h_full()
             .border_l_1()
@@ -1244,7 +1249,7 @@ impl RemoteView {
             .bg(theme.background)
             .child(
                 h_flex()
-                    .h(px(36.))
+                    .h(super::text_size::pt(36.))
                     .px_2()
                     .gap_1()
                     .child(Button::new("files-up").xsmall().ghost().icon(I::ChevronLeft).disabled(path.is_empty()).on_click(cx.listener(move |this, _, _, _| this.list_files(up.clone()))))
@@ -1268,7 +1273,7 @@ impl RemoteView {
     fn agent_asks(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let owner = self.owner();
-        v_flex().absolute().top_3().left_3().w(px(340.)).gap_2().children(self.asks.iter().map(|a| {
+        v_flex().absolute().top_3().left_3().w(super::text_size::pt(340.)).gap_2().children(self.asks.iter().map(|a| {
             let id = a["id"].as_u64().unwrap_or(0);
             let kind = a["kind"].as_str().unwrap_or("confirm").to_string();
             let text = a["text"].as_str().unwrap_or_default();
@@ -1608,7 +1613,7 @@ impl Render for RemoteView {
                     .justify_center()
                     .gap_2()
                     .p_8()
-                    .child(div().max_w(px(460.)).text_center().text_sm().text_color(color).child(text)),
+                    .child(div().max_w(super::text_size::pt(460.)).text_center().text_sm().text_color(color).child(text)),
             );
         }
 
@@ -1692,4 +1697,9 @@ impl EntityInputHandler for RemoteView {
     fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
         None
     }
+}
+
+/// Text big enough that the toolbar's labels wouldn't all fit: icons only (with tooltips).
+fn compact_toolbar() -> bool {
+    super::text_size::scale() > 1.15
 }
