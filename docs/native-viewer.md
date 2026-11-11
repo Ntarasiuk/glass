@@ -10,37 +10,48 @@ Code: `crates/glass-host/src/viewer/` (session, decoding, platform pieces) and
 
 ## Parity with the web viewer
 
-| Web viewer | Native viewer | How it was checked |
+`glass viewer-selftest <test host> --token …` runs the checks named below against a
+`glass --test` host, through the same session API the window uses, and reads back what the
+host saw. On 2026-11-10 all 28 passed on a Mac and on Windows 11 (Arm VM, x64 build).
+
+| Web viewer | Native viewer | Check |
 |---|---|---|
-| Video, H.264 | Mac: VideoToolbox into IOSurfaces GPUI draws as they are. Windows: OpenH264 | Test host, live Mac host, Windows VM |
-| HEVC | Mac: VideoToolbox. Windows: Media Foundation on the GPU (DXVA) where it can, else software. Offered only once a sample frame decodes | Test vectors on both; live Mac host from the VM |
-| Sharp text, HEVC 4:2:2 | Same rule (Mac: encode-and-decode probe; Windows: checked-in 4:2:2 frame) | Live Mac host with `hevc` on, from the Mac and the VM |
-| Sharp text, lossless pictures | PNG overlays until the screen changes | Test host |
-| Loss repair (NACK), keyframe requests, frame acks | Same rules as `video-stream.js` | Unit tests; test host |
-| Every display, one at a time or side by side | Display menu; layout as the displays are arranged | Test host (2 displays) |
-| Display previews | Strip along the bottom | Test host |
-| One window only | Display menu | Code path; host message |
-| Sound (Opus) | cpal output, ~40 ms buffer | Self-test (muted), Mac and Windows |
-| Microphone | cpal input → KIND_MIC | Self-test, Mac and Windows |
-| Keyboard | Mac: event tap; Windows: low-level hook. System shortcuts go through (⌘Tab, ⌘Space, Win, Alt+Tab) | Synthetic events on the Mac; real injected keys in the VM |
-| Text (IME, accents, emoji) | Input handler → text events | Dead-key é on the Mac |
-| ⌘ ↔ Ctrl per machine | Remembered per computer | Code path |
-| Pointer | Mac: the host's cursor shapes as NSCursors (no lag); Windows: drawn by the host | Test host |
-| Pointer lock (games) | Captured mouse, relative motion | Synthetic events on the Mac |
-| Game controllers | Mac: GameController; Windows: Windows.Gaming.Input (any pad), XInput fallback | A real DualShock 4 on the Mac and passed through to the VM |
-| Clipboard: text, rich text, images | Both ways, automatically | Self-test, Mac and Windows |
-| Files: send, receive, file browser | Drop on the screen; Downloads; a browser panel | Test host |
-| Terminal | VT100 screen in a panel | Self-test (`echo glass-$((40+2))`) |
-| Chat | Panel; notifications in the background | Self-test |
-| Drawing on the screen | Pens, fade, clear | Code path; screenshots |
-| Now playing | Toolbar controls | Test host |
-| Privacy mode, fit, use as a display, record, restart, update, Ctrl+Alt+Del | More menu | Code path; host messages |
-| Agents' questions | Cards with Allow / Deny / the number | Code path |
-| Guest links, passes | Opened from Machines; passes kept per computer | Test host; live Mac host |
-| Links with a passkey | The app is its own authenticator: a P-256 key unlocked with Touch ID or Windows Hello | Touch ID and Windows Hello prompts against the live Mac host |
-| Links from anywhere (WebRTC) | Through glassdesk.dev, the answer checked against the link's key | Live Mac host |
-| Notifications (Web Push) | Native notifications | Code path |
-| Touch, Apple Pencil, trackpad mode | Not applicable on a Mac or Windows PC | — |
+| Video, H.264 | Mac: VideoToolbox into IOSurfaces GPUI draws as they are. Windows: OpenH264 | selftest `connect`; live Mac host from the Mac and from Windows |
+| HEVC | Mac: VideoToolbox. Windows: Media Foundation, on the GPU (DXVA) when the decoder takes it, else software. Offered only once a sample frame decodes | `glass viewer-codecs`; `decodes_every_codec` (ignored test, real VideoToolbox); live Mac host from Windows |
+| Sharp text, HEVC 4:2:2 | Same rule (Mac: encode-and-decode probe; Windows: a checked-in 4:2:2 frame) | `viewer-probe --sharp` against a live Mac host with `hevc` on, from the Mac and from Windows (host logged "HEVC 4:2:2") |
+| Sharp text, lossless pictures | PNG overlays until the screen changes | selftest `sharp text, lossless pictures` |
+| Loss repair, keyframe requests, frame acks | Same rules as `video-stream.js` | unit tests `viewer::assemble` |
+| Every display, one or all side by side | Display menu; laid out as arranged | selftest `one display`, `all displays side by side` |
+| Display previews | Strip along the bottom | selftest `display previews` |
+| One window only | Display menu | selftest `one window` |
+| Sound (Opus) | cpal output, ~40 ms buffer | selftest `sound` |
+| Microphone | cpal input → KIND_MIC | selftest `microphone` |
+| Keyboard, system shortcuts | Mac: event tap; Windows: low-level hook | posted key events on the Mac (⌘Tab arrived as 55/48); real injected Win+Tab in the VM |
+| Text (IME, accents, emoji) | Input handler → text events | posted ⌥e e on the Mac arrived as "é" |
+| ⌘ ↔ Ctrl | Remembered per computer | unit test `keys`; Win+Tab → ⌘Tab in the VM |
+| Pointer | Mac: the host's cursor shapes as NSCursors; Windows: drawn by the host | test host |
+| Pointer lock (games) | Captured mouse, relative motion | selftest `gamepad + captured mouse`; posted mouse deltas through the tap |
+| Game controllers | Mac: GameController; Windows: Windows.Gaming.Input (any pad), XInput fallback | a real DualShock 4 on the Mac and passed through to the VM; unit test `gamepad` |
+| Clipboard: text, rich text, images | Both ways, automatically | selftest `clipboard …` (4 checks) |
+| Files: send, receive, browser | Drop on the screen; a panel | selftest `file browser (list, fetch)`, `get files from there`; probe upload |
+| Terminal | VT100 screen in a panel | selftest `terminal` |
+| Chat | Panel; notifications in the background | selftest `chat` |
+| Drawing on the screen | Pens, fade, clear | selftest `drawing on the screen` |
+| Now playing | Toolbar controls | selftest `media controls` |
+| Privacy mode | More menu | selftest `privacy mode` |
+| Fit to the window | More menu | selftest `fit to the window` |
+| Use as another display | More menu | selftest `use as another display` |
+| Record | More menu | selftest `record the session` |
+| Restart, update | More menu | selftest `restart Glass there`, `update Glass there` |
+| Agents' questions | Cards with Allow / Deny / the number | selftest `an agent's question` (through `glass mcp`) |
+| Guest links, passes | Machines → Open a link; passes kept per computer | test host; live Mac host |
+| Links with a passkey | The app is its own authenticator, unlocked with Touch ID or Windows Hello | live Mac host: Touch ID (Mac) and Windows Hello PIN (VM), registered then verified |
+| Links from anywhere (WebRTC) | Through glassdesk.dev, the answer checked against the link's key | live Mac host |
+
+Not covered by an automatic check: Ctrl+Alt+Delete (needs a Windows host with the
+secure-desktop service), Wake-on-LAN (needs a sleeping machine), hardware HEVC decoding on
+Windows (needs a GPU with HEVC; the VM's declines it and decodes in software). Touch, Apple
+Pencil and trackpad mode don't apply on a Mac or Windows PC.
 
 ## More than the browser
 

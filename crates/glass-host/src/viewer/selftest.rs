@@ -50,9 +50,54 @@ async fn message(session: &Session, seen: &mut Vec<Value>, secs: u64, f: impl Fn
     }
 }
 
+/// `glass mcp` against the test host, asking the person to confirm something; resolves to
+/// the agent's reply once someone answers.
+async fn agent_confirm(base: &str, token: &str) -> tokio::task::JoinHandle<Option<String>> {
+    let token_file = std::env::temp_dir().join(format!("glass-selftest-token-{}", std::process::id()));
+    let _ = std::fs::write(&token_file, token);
+    let base = base.to_string();
+    tokio::task::spawn_blocking(move || {
+        use std::io::{BufRead, Write};
+        let mut child = std::process::Command::new(std::env::current_exe().ok()?)
+            .args(["mcp", "--url", &base, "--token-file", &token_file.to_string_lossy()])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut stdin = child.stdin.take()?;
+        let mut out = std::io::BufReader::new(child.stdout.take()?);
+        let mut send = |v: Value| writeln!(stdin, "{v}").ok();
+        send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "selftest", "version": "1" } } }))?;
+        let mut line = String::new();
+        out.read_line(&mut line).ok()?;
+        send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))?;
+        send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "confirm", "arguments": { "action": "Send the report (a self-test)" } } }))?;
+        let mut reply = None;
+        for l in out.lines().map_while(Result::ok) {
+            if let Ok(v) = serde_json::from_str::<Value>(&l)
+                && v["id"] == 2
+            {
+                reply = v["result"]["content"][0]["text"].as_str().map(str::to_string);
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = std::fs::remove_file(&token_file);
+        reply
+    })
+}
+
 pub async fn run(base: &str, token: String) -> Result<()> {
-    // SAFETY: before any other thread reads it (the sound thread starts later).
-    unsafe { std::env::set_var("GLASS_VIEWER_MUTE", "1") };
+    let token_for_mcp = token.clone();
+    // Files from there go to a folder of the test's own, not this computer's Downloads.
+    let downloads = std::env::temp_dir().join(format!("glass-selftest-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&downloads);
+    // SAFETY: before any other thread reads them (the session and sound threads start later).
+    unsafe {
+        std::env::set_var("GLASS_VIEWER_MUTE", "1");
+        std::env::set_var("GLASS_VIEWER_DOWNLOADS", &downloads);
+    }
     let base = base.trim_end_matches('/').to_string();
     let mut target = Target::from_url(&base).unwrap();
     target.token = Some(token);
@@ -101,9 +146,10 @@ pub async fn run(base: &str, token: String) -> Result<()> {
 
     // And onto this Mac's pasteboard (the window's code), putting what was there back.
     let before = super::sys::clipboard();
+    let before_image = before.2.then(crate::clipboard::image_png).flatten();
     crate::clipboard::set(&crate::clip::Clip { text: "glass selftest".into(), html: None, image: Some(png.clone()) });
     let (text, _, image) = super::sys::clipboard();
-    crate::clipboard::set(&crate::clip::Clip { text: before.0.clone(), html: before.1.clone(), image: None });
+    crate::clipboard::set(&crate::clip::Clip { text: before.0.clone(), html: before.1.clone(), image: before_image });
     results.push(("this computer's clipboard", text == "glass selftest" && image, format!("restored {} chars", before.0.len())));
 
     // Chat: sent, and everyone (this viewer too) hears it.
@@ -158,6 +204,121 @@ pub async fn run(base: &str, token: String) -> Result<()> {
     let ok = message(&session, &mut seen, 3, |m| m["t"] == "thumbs" && m["thumbs"].as_array().is_some_and(|a| !a.is_empty())).await.is_some();
     results.push(("display previews", ok, String::new()));
 
+    // ---- Displays and windows ----
+    let displays = session.viewer.displays();
+    if let Some(second) = displays.get(1).and_then(|d| d["id"].as_u64()) {
+        session.control(json!({ "t": "selectDisplay", "id": second }));
+        let ok = until(5, || session.viewer.streams().first().is_some_and(|s| s.display as u64 == second) && session.viewer.streams().len() == 1).await;
+        results.push(("one display", ok, format!("display {second}")));
+        session.control(json!({ "t": "showAll" }));
+        let ok = until(5, || session.viewer.streams().len() == displays.len()).await;
+        results.push(("all displays side by side", ok, format!("{} streams", session.viewer.streams().len())));
+    }
+    session.control(json!({ "t": "listWindows" }));
+    let windows = message(&session, &mut seen, 3, |m| m["t"] == "windows").await;
+    let first = windows.as_ref().and_then(|w| w["windows"][0]["id"].as_u64());
+    if let Some(id) = first {
+        session.control(json!({ "t": "selectWindow", "id": id }));
+    }
+    let ok = first.is_some() && message(&session, &mut seen, 4, |m| m["t"] == "layout").await.is_some();
+    results.push(("one window", ok, format!("{} windows listed", windows.map_or(0, |w| w["windows"].as_array().map_or(0, |a| a.len())))));
+    session.control(json!({ "t": "showAll" }));
+
+    // ---- Owner controls ----
+    let records = |kind: &str| get(&base, &format!("/test/records?kind={kind}")).ok().and_then(|v| v["records"].as_array().cloned()).unwrap_or_default();
+    let before = records("privacy").len();
+    session.control(json!({ "t": "privacy", "on": true }));
+    session.control(json!({ "t": "privacy", "on": false }));
+    let ok = until(3, || records("privacy")[before.min(records("privacy").len())..] == [json!(true), json!(false)]).await;
+    results.push(("privacy mode", ok, String::new()));
+
+    session.control(json!({ "t": "fit", "size": [1000, 700] }));
+    let ok = until(4, || get(&base, "/test/fit").is_ok_and(|v| v["requests"].as_array().is_some_and(|a| a.contains(&json!([1000, 700]))))).await;
+    session.control(json!({ "t": "fit", "size": null }));
+    results.push(("fit to the window", ok, String::new()));
+
+    session.control(json!({ "t": "extend", "size": [1280, 800], "hidpi": true }));
+    let ok = until(4, || records("extend").iter().any(|r| r["size"] == json!([1280, 800]))).await;
+    session.control(json!({ "t": "extend", "size": null }));
+    results.push(("use as another display", ok, String::new()));
+
+    let before = records("restart").len();
+    session.control(json!({ "t": "restart", "glass": true }));
+    let ok = until(3, || records("restart").len() > before).await;
+    results.push(("restart Glass there", ok, records("restart").last().map(|r| r.to_string()).unwrap_or_default()));
+
+    let updates = || get(&base, "/test/updates").ok().and_then(|v| v["count"].as_u64()).unwrap_or(0);
+    let before = updates();
+    session.control(json!({ "t": "update" }));
+    let ok = until(3, || updates() > before).await;
+    results.push(("update Glass there", ok, String::new()));
+
+    session.control(json!({ "t": "record", "on": true }));
+    let started = message(&session, &mut seen, 4, |m| m["t"] == "recording" && m["on"] == true).await.is_some();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    session.control(json!({ "t": "record", "on": false }));
+    let stopped = message(&session, &mut seen, 6, |m| m["t"] == "recording" && m["on"] == false).await;
+    let path = stopped.as_ref().and_then(|m| m["path"].as_str()).map(str::to_string);
+    let made = path.as_ref().is_some_and(|p| std::path::Path::new(p).exists());
+    // The test host runs here: its recording isn't worth keeping.
+    if let Some(p) = &path {
+        let _ = std::fs::remove_file(p);
+    }
+    results.push(("record the session", started && stopped.is_some(), format!("{} ({})", path.unwrap_or_default(), if made { "made, then deleted" } else { "on the host" })));
+
+    // ---- Sharp text: a still screen comes as lossless pictures ----
+    let _ = agent().post(format!("{base}/test/pause?on=true")).send_empty();
+    session.control(json!({ "t": "sharp", "on": true }));
+    let ok = until(15, || !session.viewer.lossless().is_empty()).await;
+    let mode = message(&session, &mut seen, 1, |m| m["t"] == "sharp").await.map(|m| m["mode"].to_string()).unwrap_or_default();
+    results.push(("sharp text, lossless pictures", ok, format!("mode {mode}, {} pictures", session.viewer.lossless().len())));
+    session.control(json!({ "t": "sharp", "on": false }));
+    let _ = agent().post(format!("{base}/test/pause?on=false")).send_empty();
+
+    // ---- Drawing, media, files ----
+    session.control(json!({ "t": "annotate", "stroke": { "id": "s1", "stream": 0, "color": "#ff453a", "points": [[0.1, 0.1], [0.5, 0.5]] } }));
+    let ok = message(&session, &mut seen, 3, |m| m["t"] == "annotate" && m["stroke"]["id"] == "s1").await.is_some();
+    session.control(json!({ "t": "annotateClear" }));
+    results.push(("drawing on the screen", ok, String::new()));
+
+    let before = records("media").len();
+    session.control(json!({ "t": "media", "action": "toggle" }));
+    let ok = until(3, || records("media").len() > before).await;
+    results.push(("media controls", ok, records("media").last().map(|r| r.to_string()).unwrap_or_default()));
+
+    session.control(json!({ "t": "filesList", "path": "", "req": 7 }));
+    let listing = message(&session, &mut seen, 4, |m| m["t"] == "files").await;
+    let file = listing.as_ref().and_then(|l| l["entries"].as_array().and_then(|e| e.iter().find(|e| e["dir"] == false && e["size"].as_u64().is_some_and(|s| s < 1 << 20)).cloned()));
+    let ok = match &file {
+        Some(f) => {
+            session.control(json!({ "t": "filesFetch", "path": f["name"] }));
+            message(&session, &mut seen, 8, |m| m["t"] == "_file" && m["name"] == f["name"]).await.is_some()
+        }
+        None => listing.is_some(),
+    };
+    let errors: Vec<String> = seen.iter().filter(|m| m["t"] == "error" || m["t"] == "_error").map(|m| m["msg"].to_string()).collect();
+    results.push(("file browser (list, fetch)", ok, format!("{} {}", file.map(|f| f["name"].to_string()).unwrap_or_default(), errors.join("; "))));
+
+    let files_before = seen.iter().filter(|m| m["t"] == "_file").count();
+    session.control(json!({ "t": "pickFiles" }));
+    let ok = until(8, || {
+        seen.extend(session.viewer.take_inbox());
+        seen.iter().filter(|m| m["t"] == "_file").count() > files_before
+    })
+    .await;
+    let picked = seen.iter().rev().find(|m| m["t"] == "_file").map(|m| m["name"].to_string()).unwrap_or_default();
+    results.push(("get files from there", ok, picked));
+
+    // ---- An agent's question, answered here ----
+    let ask = agent_confirm(&base, &token_for_mcp).await;
+    let asked = message(&session, &mut seen, 10, |m| m["t"] == "agentAsk").await;
+    if let Some(a) = &asked {
+        session.control(json!({ "t": "agentAnswer", "id": a["id"], "ok": true, "note": "from the native viewer" }));
+    }
+    let reply = ask.await.ok().flatten().unwrap_or_default();
+    results.push(("an agent's question", asked.is_some() && reply.contains("Approved"), reply));
+
+    let _ = std::fs::remove_dir_all(&downloads);
     println!();
     let mut failed = 0;
     for (name, ok, detail) in &results {

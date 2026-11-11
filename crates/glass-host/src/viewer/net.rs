@@ -669,7 +669,10 @@ async fn accept_streams(conn: Conn, viewer: Arc<Viewer>) {
 
 /// Where a file from the other computer goes: this Mac's Downloads, under a name that's free.
 fn download_path(name: &str) -> PathBuf {
-    let dir = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Downloads");
+    // (`GLASS_VIEWER_DOWNLOADS`: elsewhere, for the self-test.)
+    let dir = std::env::var_os("GLASS_VIEWER_DOWNLOADS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default().join("Downloads"));
     let _ = std::fs::create_dir_all(&dir);
     let clean: String = name.chars().map(|c| if c == '/' || c == '\\' || c == '\0' { '_' } else { c }).collect();
     let clean = clean.trim_start_matches('.').to_string();
