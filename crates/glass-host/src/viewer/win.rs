@@ -16,7 +16,7 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MSLLHOOKSTRUCT, SetWindowsHookExW,
+    CallNextHookEx, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSLLHOOKSTRUCT, SetWindowsHookExW,
     ShowCursor, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_MOUSEMOVE, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
@@ -148,6 +148,11 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     }
     // SAFETY: for WH_KEYBOARD_LL, lparam is a KBDLLHOOKSTRUCT.
     let k = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+    // Typed by a program (Glass's own host, when this PC is the one being viewed): taking it
+    // would send it round again.
+    if k.flags.contains(LLKHF_INJECTED) {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
     let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
     let up = matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP);
     let Some(local) = kvk_for(k.vkCode, k.scanCode as u16, k.flags.contains(LLKHF_EXTENDED)) else {
@@ -179,6 +184,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     if code >= 0 && wparam.0 as u32 == WM_MOUSEMOVE && ours_in_front() {
         // SAFETY: for WH_MOUSE_LL, lparam is a MSLLHOOKSTRUCT.
         let m = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        if m.flags & LLMHF_INJECTED != 0 {
+            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        }
         let taken = HOOK.with(|h| {
             let h = h.borrow();
             let Some(h) = h.as_ref().filter(|h| h.relative.load(Ordering::Relaxed)) else { return false };

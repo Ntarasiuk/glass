@@ -42,7 +42,10 @@ impl GlassApp {
                     })
                     .when(m.online, |d| {
                         #[cfg(any(target_os = "macos", windows))]
-                        let d = {
+                        // Not this computer: its own screen inside itself, and its keys typed back into it.
+                        let d = if m.is_self {
+                            d
+                        } else {
                             let target = crate::viewer::Target { name: m.name.clone(), dns: m.dns.clone(), is_self: m.is_self, token: None, link: None, remote: None };
                             d.child(
                                 Button::new(SharedString::from(format!("connect-{}", m.dns)))

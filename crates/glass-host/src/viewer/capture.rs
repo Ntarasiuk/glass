@@ -22,6 +22,8 @@ use super::keys::*;
 
 /// The key that, with Control and Option held, lets go of the keyboard.
 pub const RELEASE_KEY: u16 = ESCAPE;
+/// kVK_ANSI_Q: with ⌘ alone, quits Glass rather than going over.
+const QUIT_KEY: u16 = 0x0C;
 pub const RELEASE_HINT: &str = "⌃⌥⎋";
 
 // Device-dependent modifier bits (IOLLEvent.h's NX_DEVICE*KEYMASK): which side is down.
@@ -126,6 +128,11 @@ unsafe extern "C-unwind" fn on_event(_proxy: CGEventTapProxy, ty: CGEventType, e
         return pass;
     }
     let ev = unsafe { event.as_ref() };
+    // Posted by a program, not typed: Glass's own host typing into this Mac when it's the
+    // computer being viewed. Taking it would send it round again, forever.
+    if CGEvent::integer_value_field(Some(ev), CGEventField::EventSourceUnixProcessID) != 0 {
+        return pass;
+    }
     let local = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventKeycode) as u16;
     let keycode = if ctx.swap.load(Ordering::Relaxed) { swapped(local) } else { local };
     let flags = CGEvent::flags(Some(ev));
@@ -146,6 +153,14 @@ unsafe extern "C-unwind" fn on_event(_proxy: CGEventTapProxy, ty: CGEventType, e
             if local == RELEASE_KEY && release {
                 (ctx.release)();
                 return ptr::null_mut();
+            }
+            // ⌘Q quits Glass: nothing held stays down over there.
+            let cmd_only = flags.contains(CGEventFlags::MaskCommand) && !flags.contains(CGEventFlags::MaskControl) && !flags.contains(CGEventFlags::MaskAlternate);
+            if local == QUIT_KEY && cmd_only {
+                for keycode in ctx.down.drain() {
+                    (ctx.send)(InputEvent::KeyUp { keycode });
+                }
+                return pass;
             }
             ctx.down.insert(keycode);
             (ctx.send)(InputEvent::KeyDown { keycode });

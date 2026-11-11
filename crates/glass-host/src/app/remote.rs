@@ -689,6 +689,10 @@ impl RemoteView {
             return;
         }
         let m = &ev.keystroke.modifiers;
+        // ⌘Q always quits Glass (here, not there).
+        if cfg!(target_os = "macos") && m.platform && !m.control && !m.alt && ev.keystroke.key == "q" {
+            return;
+        }
         let shortcut = m.platform || m.control || m.function;
         // Characters come through the input handler below (any layout, accents, IME).
         let text = ev.keystroke.key_char.as_deref().is_some_and(|c| !shortcut && !c.chars().any(char::is_control));
@@ -993,7 +997,7 @@ impl RemoteView {
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_capture(window, cx))),
             )
             .child(Button::new("remote-full").small().ghost().icon(if self.full_screen { I::Minimize } else { I::Maximize }).on_click(cx.listener(|this, _, window, cx| this.toggle_full_screen(window, cx))))
-            .child(Button::new("remote-close").small().ghost().icon(I::Unplug).on_click(cx.listener(|_, _, _, cx| cx.emit(Disconnect))))
+            .child(Button::new("remote-close").small().danger().icon(I::Unplug).label("End").tooltip("End the session").on_click(cx.listener(|_, _, _, cx| cx.emit(Disconnect))))
     }
 
     /// What the computer is playing, with its controls.
