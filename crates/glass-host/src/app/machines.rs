@@ -10,11 +10,7 @@ use super::ui::{self, I};
 use super::{GlassApp, Store, act, actions};
 
 impl GlassApp {
-    pub(super) fn machines(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn machines(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
         let tailnet = store.tailnet.clone();
         let machines = store.machines.clone();
@@ -39,16 +35,10 @@ impl GlassApp {
                 let control = h_flex()
                     .gap_2()
                     .when(!m.online && m.wakeable, |d| {
-                        d.child(
-                            Button::new(SharedString::from(format!("wake-{dns}")))
-                                .small()
-                                .ghost()
-                                .label("Wake")
-                                .on_click(move |_, window, cx| {
-                                    let dns = dns.clone();
-                                    act(window, cx, move || actions::wake(&dns))
-                                }),
-                        )
+                        d.child(Button::new(SharedString::from(format!("wake-{dns}"))).small().ghost().label("Wake").on_click(move |_, window, cx| {
+                            let dns = dns.clone();
+                            act(window, cx, move || actions::wake(&dns))
+                        }))
                     })
                     .when(m.online, |d| {
                         #[cfg(any(target_os = "macos", windows))]
@@ -56,23 +46,14 @@ impl GlassApp {
                         let d = if m.is_self {
                             d
                         } else {
-                            let target = crate::viewer::Target {
-                                name: m.name.clone(),
-                                dns: m.dns.clone(),
-                                is_self: m.is_self,
-                                token: None,
-                                link: None,
-                                remote: None,
-                            };
+                            let target = crate::viewer::Target { name: m.name.clone(), dns: m.dns.clone(), is_self: m.is_self, token: None, link: None, remote: None };
                             d.child(
                                 Button::new(SharedString::from(format!("connect-{}", m.dns)))
                                     .small()
                                     .primary()
                                     .label("Connect")
                                     .icon(I::Monitor)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.connect(target.clone(), window, cx)
-                                    })),
+                                    .on_click(cx.listener(move |this, _, window, cx| this.connect(target.clone(), window, cx))),
                             )
                         };
                         d.child(
@@ -84,18 +65,7 @@ impl GlassApp {
                                 .on_click(move |_, _, _| actions::open(&url)),
                         )
                     });
-                ui::icon_row(
-                    icon,
-                    if m.online {
-                        theme.success
-                    } else {
-                        theme.muted_foreground
-                    },
-                    m.name.clone(),
-                    detail,
-                    control,
-                    cx,
-                )
+                ui::icon_row(icon, if m.online { theme.success } else { theme.muted_foreground }, m.name.clone(), detail, control, cx)
             })
             .collect();
         if rows.is_empty() {
@@ -103,9 +73,7 @@ impl GlassApp {
                 match tailnet {
                     Tailnet::Checking => "Looking for your machines…",
                     Tailnet::Missing => "Install Tailscale to see your other computers here.",
-                    Tailnet::NotRunning | Tailnet::LoggedOut => {
-                        "Open Tailscale and sign in to see your other computers."
-                    }
+                    Tailnet::NotRunning | Tailnet::LoggedOut => "Open Tailscale and sign in to see your other computers.",
                     _ => "No other computers on your tailnet yet.",
                 },
                 cx,
@@ -137,36 +105,14 @@ impl GlassApp {
             .gap_2()
             .w(px(420.))
             .child(div().flex_1().child(Input::new(&self.open_link).small()))
-            .child(
-                Button::new("open-link")
-                    .small()
-                    .primary()
-                    .label("Connect")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let url = this.open_link.read(cx).value().to_string();
-                        match crate::viewer::Target::from_url(&url) {
-                            Some(target) => this.connect(target, window, cx),
-                            None => super::toast(
-                                window,
-                                cx,
-                                Err(anyhow::anyhow!("That doesn't look like a Glass link.")),
-                            ),
-                        }
-                    })),
-            );
-        Some(
-            ui::section(
-                "Open a link",
-                vec![ui::row(
-                    "A link someone sent you",
-                    "Or any computer's Glass address.",
-                    control,
-                    cx,
-                )],
-                cx,
-            )
-            .into_any_element(),
-        )
+            .child(Button::new("open-link").small().primary().label("Connect").on_click(cx.listener(|this, _, window, cx| {
+                let url = this.open_link.read(cx).value().to_string();
+                match crate::viewer::Target::from_url(&url) {
+                    Some(target) => this.connect(target, window, cx),
+                    None => super::toast(window, cx, Err(anyhow::anyhow!("That doesn't look like a Glass link."))),
+                }
+            })));
+        Some(ui::section("Open a link", vec![ui::row("A link someone sent you", "Or any computer's Glass address.", control, cx)], cx).into_any_element())
     }
 
     #[cfg(not(any(target_os = "macos", windows)))]

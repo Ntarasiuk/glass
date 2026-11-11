@@ -12,12 +12,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use glass_proto::InputEvent;
 use objc2_app_kit::NSRunningApplication;
-use objc2_core_foundation::{
-    CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes,
-};
+use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes};
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapLocation, CGEventTapOptions,
-    CGEventTapPlacement, CGEventTapProxy, CGEventType,
+    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEventTapProxy, CGEventType,
 };
 
 use super::keys::*;
@@ -69,6 +67,7 @@ pub fn ask() {
 
 pub use super::keys::swapped;
 
+
 /// Whether a modifier key is down after a FlagsChanged. The left/right bits say exactly;
 /// events without them (synthetic ones, some key remappers) only have the shared flag.
 fn modifier_down(keycode: u16, bit: u64, flags: u64) -> bool {
@@ -95,11 +94,7 @@ mod tests {
         // No side bits at all: the shared flag decides.
         assert!(modifier_down(COMMAND, LCMD, cmd));
         assert!(!modifier_down(COMMAND, LCMD, 0));
-        assert!(modifier_down(
-            CAPS_LOCK,
-            CGEventFlags::MaskAlphaShift.0,
-            CGEventFlags::MaskAlphaShift.0
-        ));
+        assert!(modifier_down(CAPS_LOCK, CGEventFlags::MaskAlphaShift.0, CGEventFlags::MaskAlphaShift.0));
         assert_eq!(swapped(COMMAND), CONTROL);
         assert_eq!(swapped(swapped(RIGHT_COMMAND)), RIGHT_COMMAND);
     }
@@ -121,12 +116,7 @@ fn modifier_bit(keycode: u16) -> Option<u64> {
     })
 }
 
-unsafe extern "C-unwind" fn on_event(
-    _proxy: CGEventTapProxy,
-    ty: CGEventType,
-    event: NonNull<CGEvent>,
-    user: *mut c_void,
-) -> *mut CGEvent {
+unsafe extern "C-unwind" fn on_event(_proxy: CGEventTapProxy, ty: CGEventType, event: NonNull<CGEvent>, user: *mut c_void) -> *mut CGEvent {
     let ctx = unsafe { &mut *(user as *mut Ctx) };
     let pass = event.as_ptr();
     if ty == CGEventType::TapDisabledByTimeout || ty == CGEventType::TapDisabledByUserInput {
@@ -144,22 +134,13 @@ unsafe extern "C-unwind" fn on_event(
         return pass;
     }
     let local = CGEvent::integer_value_field(Some(ev), CGEventField::KeyboardEventKeycode) as u16;
-    let keycode = if ctx.swap.load(Ordering::Relaxed) {
-        swapped(local)
-    } else {
-        local
-    };
+    let keycode = if ctx.swap.load(Ordering::Relaxed) { swapped(local) } else { local };
     let flags = CGEvent::flags(Some(ev));
     match ty {
-        CGEventType::MouseMoved
-        | CGEventType::LeftMouseDragged
-        | CGEventType::RightMouseDragged
-        | CGEventType::OtherMouseDragged => {
+        CGEventType::MouseMoved | CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged | CGEventType::OtherMouseDragged => {
             if ctx.relative.load(Ordering::Relaxed) {
-                let dx =
-                    CGEvent::integer_value_field(Some(ev), CGEventField::MouseEventDeltaX) as f32;
-                let dy =
-                    CGEvent::integer_value_field(Some(ev), CGEventField::MouseEventDeltaY) as f32;
+                let dx = CGEvent::integer_value_field(Some(ev), CGEventField::MouseEventDeltaX) as f32;
+                let dy = CGEvent::integer_value_field(Some(ev), CGEventField::MouseEventDeltaY) as f32;
                 if dx != 0.0 || dy != 0.0 {
                     (ctx.send)(InputEvent::MouseMoveBy { dx, dy });
                 }
@@ -168,16 +149,13 @@ unsafe extern "C-unwind" fn on_event(
             return pass;
         }
         CGEventType::KeyDown => {
-            let release = flags.contains(CGEventFlags::MaskControl)
-                && flags.contains(CGEventFlags::MaskAlternate);
+            let release = flags.contains(CGEventFlags::MaskControl) && flags.contains(CGEventFlags::MaskAlternate);
             if local == RELEASE_KEY && release {
                 (ctx.release)();
                 return ptr::null_mut();
             }
             // ⌘Q quits Glass: nothing held stays down over there.
-            let cmd_only = flags.contains(CGEventFlags::MaskCommand)
-                && !flags.contains(CGEventFlags::MaskControl)
-                && !flags.contains(CGEventFlags::MaskAlternate);
+            let cmd_only = flags.contains(CGEventFlags::MaskCommand) && !flags.contains(CGEventFlags::MaskControl) && !flags.contains(CGEventFlags::MaskAlternate);
             if local == QUIT_KEY && cmd_only {
                 for keycode in ctx.down.drain() {
                     (ctx.send)(InputEvent::KeyUp { keycode });
@@ -192,9 +170,7 @@ unsafe extern "C-unwind" fn on_event(
             (ctx.send)(InputEvent::KeyUp { keycode });
         }
         CGEventType::FlagsChanged => {
-            let Some(bit) = modifier_bit(local) else {
-                return pass;
-            };
+            let Some(bit) = modifier_bit(local) else { return pass };
             if modifier_down(local, bit, flags.0) {
                 ctx.down.insert(keycode);
                 (ctx.send)(InputEvent::KeyDown { keycode });
@@ -212,23 +188,11 @@ unsafe extern "C-unwind" fn on_event(
 impl KeyCapture {
     /// Starts taking the keyboard, on this (the main) thread's run loop. `None` without
     /// Accessibility permission.
-    pub fn start(
-        send: impl Fn(InputEvent) + 'static,
-        release: impl Fn() + 'static,
-        swap: Arc<AtomicBool>,
-        relative: Arc<AtomicBool>,
-    ) -> Option<Self> {
+    pub fn start(send: impl Fn(InputEvent) + 'static, release: impl Fn() + 'static, swap: Arc<AtomicBool>, relative: Arc<AtomicBool>) -> Option<Self> {
         if !allowed() {
             return None;
         }
-        let ctx = Box::into_raw(Box::new(Ctx {
-            send: Box::new(send),
-            release: Box::new(release),
-            port: ptr::null(),
-            swap,
-            relative,
-            down: HashSet::new(),
-        }));
+        let ctx = Box::into_raw(Box::new(Ctx { send: Box::new(send), release: Box::new(release), port: ptr::null(), swap, relative, down: HashSet::new() }));
         let mask: CGEventMask = [
             CGEventType::KeyDown,
             CGEventType::KeyUp,
