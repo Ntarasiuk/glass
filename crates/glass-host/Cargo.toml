@@ -44,6 +44,12 @@ zip = { version = "7", default-features = false, features = ["deflate-flate2-zli
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 gpui-kit = "0.8"
+# The native viewer's sound output.
+cpal = "0.18"
+# The native viewer on Windows: decoded frames as images GPUI draws.
+image = { version = "0.25", default-features = false }
+# The native viewer's terminal: the screen a shell's output draws.
+vt100 = "0.16"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
@@ -57,6 +63,10 @@ objc2-core-graphics = "0.3.2"
 objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"
 objc2-foundation = "0.3.2"
+# The native viewer's passkeys (Touch ID).
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "block2", "LAContext", "LAError"] }
+# The native viewer's game controllers.
+objc2-game-controller = { version = "0.3.2", default-features = false, features = ["std", "GCController", "GCExtendedGamepad", "GCPhysicalInputProfile", "GCControllerElement", "GCControllerButtonInput", "GCControllerAxisInput", "GCControllerDirectionPad", "GCDevice"] }
 objc2-screen-capture-kit = "0.3.2"
 objc2-video-toolbox = "0.3.2"
 
@@ -70,9 +80,12 @@ gstreamer-app = { version = "0.25", optional = true }
 gstreamer-video = { version = "0.25", optional = true }
 
 [target.'cfg(windows)'.dependencies]
+# The native viewer's Windows Hello prompt (an IAsyncOperation, from WinRT interop).
+windows-future = "0.3"
 windows = { version = "0.62.2", features = [
     "Data_Xml_Dom",
     "Foundation",
+    "Gaming_Input",
     "Media_Control",
     "Storage_Streams",
     "UI_Notifications",
@@ -113,10 +126,13 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Threading",
     "Win32_System_Time",
     "Win32_System_Variant",
+    "Win32_System_WinRT",
     "Win32_UI_Accessibility",
     "Win32_UI_Controls",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_XboxController",
+    "Security_Credentials_UI",
     "Win32_UI_Input_Pointer",
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
