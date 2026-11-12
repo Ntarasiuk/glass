@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const SITE = resolve(import.meta.dirname, '../../site');
-const PORT = 8791;
+// (Another port when something is already on this one: it would answer in this Worker's place.)
+const PORT = Number(process.env.SITE_TEST_PORT ?? 8791);
 const BASE = `http://localhost:${PORT}`;
 let wrangler;
 
@@ -206,6 +207,7 @@ async function hostKey() {
   const sign = async (text) => b64(new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, new TextEncoder().encode(text))));
   return {
     key,
+    sign,
     async claim({ name = 'Studio', ts = Math.floor(Date.now() / 1000), signedName = name } = {}) {
       const code = b64(crypto.getRandomValues(new Uint8Array(32)));
       const sig = await sign(`glass-claim-v1\n${code}\n${ts}\n${signedName}`);
@@ -266,6 +268,101 @@ test('only the computer itself takes itself off accounts', async () => {
 
   assert.deepEqual((await host.remove()).body, { removed: 1 });
   assert.equal((await browser.call('/api/account/computers')).body.computers.length, 0);
+});
+
+test('a host\'s signed message works once, however fresh', async () => {
+  const host = await hostKey();
+  const { browser } = await newAccount();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: (await host.claim()).code } });
+  const ts = Math.floor(Date.now() / 1000) - 5;
+  assert.deepEqual((await host.remove({ ts })).body, { removed: 1 });
+  // Back on an account, and a copy of that removal turns up: it does nothing.
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: (await host.claim()).code } });
+  assert.equal((await host.remove({ ts })).status, 409);
+  assert.equal((await browser.call('/api/account/computers')).body.computers.length, 1);
+
+  // A report: the same again is refused, once it's past the every-few-seconds limit too.
+  assert.equal((await host.report(JSON.stringify(REPORT), { ts })).status, 200);
+  assert.deepEqual((await host.report('', { ts })).body, { deleted: true });
+  assert.equal((await host.report(JSON.stringify(REPORT), { ts })).status, 409);
+  assert.equal((await host.report('', { ts })).status, 409);
+});
+
+test('a computer taking itself off while its link is being used doesn\'t stay on', async () => {
+  for (let i = 0; i < 3; i++) {
+    const host = await hostKey();
+    const { browser } = await newAccount();
+    const { code } = await host.claim();
+    await Promise.all([browser.call('/api/account/computers', { method: 'POST', body: { claim: code } }), host.remove()]);
+    assert.equal((await browser.call('/api/account/computers')).body.computers.length, 0);
+    assert.equal((await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } })).status, 404);
+  }
+});
+
+test('one link adds one computer once, even with two browsers at once', async () => {
+  const host = await hostKey();
+  const [a, b] = [await newAccount(), await newAccount()];
+  const { code } = await host.claim();
+  const answers = await Promise.all([a, b].map((x) => x.browser.call('/api/account/computers', { method: 'POST', body: { claim: code } })));
+  assert.deepEqual(answers.map((r) => r.status).sort(), [200, 404]);
+  const lists = await Promise.all([a, b].map((x) => x.browser.call('/api/account/computers')));
+  assert.equal(lists.reduce((n, l) => n + l.body.computers.length, 0), 1);
+});
+
+test('a used-up account limit keeps the link for a computer it couldn\'t add', async () => {
+  const { browser } = await newAccount();
+  const hosts = await Promise.all(Array.from({ length: 32 }, hostKey));
+  for (const host of hosts) {
+    const { code } = await host.claim();
+    assert.equal((await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } })).status, 200);
+  }
+  const extra = await hostKey();
+  const { code } = await extra.claim();
+  assert.equal((await browser.call('/api/account/computers', { method: 'POST', body: { claim: code } })).status, 400);
+  assert.deepEqual((await browser.call(`/api/account/claim?code=${code}`)).body, { name: 'Studio' });
+  assert.equal((await browser.call('/api/account/computers')).body.computers.length, 32);
+});
+
+test('a challenge left open doesn\'t bring a deleted account back', async () => {
+  const { browser, account } = await newAccount();
+  const { body: options } = await browser.call('/api/account/challenge', { method: 'POST', body: { mode: 'create' } });
+  assert.equal(options.user.id, account);
+  await browser.call('/api/account', { method: 'DELETE' });
+  const res = await browser.call('/api/account/passkey', { method: 'POST', body: await (await Passkey.make()).created(options) });
+  assert.equal(res.status, 400);
+  assert.deepEqual((await browser.call('/api/account')).body, { account: null });
+});
+
+test('a command sent to a computer that goes away is answered at once', async () => {
+  const host = await hostKey();
+  const { browser } = await newAccount();
+  await browser.call('/api/account/computers', { method: 'POST', body: { claim: (await host.claim()).code } });
+  const id = (await browser.call('/api/account/computers')).body.computers[0].id;
+  const ws = new WebSocket(`ws://localhost:${PORT}/signal/host/${id}`);
+  const seen = [];
+  const next = (t) => new Promise((resolve) => {
+    const look = () => {
+      const m = seen.find((x) => x.t === t);
+      if (m) resolve(m);
+      else setTimeout(look, 20);
+    };
+    look();
+  });
+  ws.addEventListener('message', (e) => seen.push(JSON.parse(e.data)));
+  const { nonce } = await next('challenge');
+  ws.send(JSON.stringify({ t: 'auth', key: host.key, sig: await host.sign(`glass-signal-v1\n${nonce}`) }));
+  await next('ready');
+
+  const assertion = { id: 'a', clientDataJSON: 'b', authenticatorData: 'c', signature: 'd' };
+  const started = Date.now();
+  const answer = browser.call(`/api/account/computers/${id}/action`, { method: 'POST', body: { cmd: '{}', assertion } });
+  await next('command');
+  ws.close();
+  const { status, body } = await answer;
+  assert.equal(status, 200);
+  assert.equal(body.ok, false);
+  assert.match(body.message, /went away/);
+  assert.ok(Date.now() - started < 30_000, 'not the full wait');
 });
 
 test('deleting an account deletes its list of computers', async () => {

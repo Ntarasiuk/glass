@@ -11,13 +11,16 @@ const MAX_OFFERS_PER_SOCKET = 5;
 // How long a command waits for its computer (a script may take a minute).
 const RELAY_WAIT_MS = 70_000;
 const RELAY_IN_FLIGHT = 4;
+// Host connections that haven't signed in yet: a real one does at once, so the oldest go first.
+const MAX_UNSIGNED_HOSTS = 4;
 
 export class Introducer extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     // The host's heartbeat, answered without waking this object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
-    // Commands waiting for the host's answer (id → resolve); lives only while a request is open.
+    // Commands waiting for the host's answer (id → the socket it went to, and how to answer it);
+    // lives only while a request is open.
     this.pending = new Map();
   }
 
@@ -32,8 +35,11 @@ export class Introducer extends DurableObject {
     const { 0: client, 1: server } = new WebSocketPair();
     if (role === 'host') {
       const nonce = randomId(24);
+      const unsigned = this.ctx.getWebSockets('host').map((ws) => ({ ws, meta: ws.deserializeAttachment() })).filter(({ meta }) => !meta?.authed);
+      unsigned.sort((a, b) => (a.meta?.at ?? 0) - (b.meta?.at ?? 0));
+      for (const { ws } of unsigned.slice(0, Math.max(0, unsigned.length + 1 - MAX_UNSIGNED_HOSTS))) ws.close(4008, 'never signed in');
       this.ctx.acceptWebSocket(server, ['host']);
-      server.serializeAttachment({ role: 'host', hostId, nonce, authed: false });
+      server.serializeAttachment({ role: 'host', hostId, nonce, authed: false, at: Date.now() });
       server.send(JSON.stringify({ t: 'challenge', nonce }));
     } else {
       if (this.ctx.getWebSockets('client').length >= MAX_CLIENTS) return new Response('Busy', { status: 503 });
@@ -64,19 +70,34 @@ export class Introducer extends DurableObject {
     // A few at a time: a flood of commands never reaches the computer.
     if (this.pending.size >= RELAY_IN_FLIGHT) return Response.json({ ok: false, message: 'This computer is busy with other actions. Try again in a moment.' }, { status: 429 });
     const id = randomId(12);
+    const socket = host.deserializeAttachment()?.nonce;
     const answer = new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         resolve({ ok: false, message: "The computer didn't answer in time." });
       }, RELAY_WAIT_MS);
-      this.pending.set(id, (r) => {
-        clearTimeout(timer);
-        this.pending.delete(id);
-        resolve(r);
+      this.pending.set(id, {
+        socket,
+        done: (r) => {
+          clearTimeout(timer);
+          this.pending.delete(id);
+          resolve(r);
+        },
       });
     });
-    host.send(JSON.stringify({ t: kind, id, ...payload }));
+    try {
+      host.send(JSON.stringify({ t: kind, id, ...payload }));
+    } catch {
+      this.hostGone(socket);
+    }
     return Response.json(await answer);
+  }
+
+  /** A host's connection ended: nothing sent over it will be answered, so don't wait for it. */
+  hostGone(socket) {
+    for (const { socket: to, done } of [...this.pending.values()]) {
+      if (to === socket) done({ ok: false, message: 'The computer went away before answering. It may have done it anyway: check before trying again.' });
+    }
   }
 
   /**
@@ -111,13 +132,17 @@ export class Introducer extends DurableObject {
         return;
       }
       // One live host per id: a newer connection replaces an older one.
-      for (const other of this.ctx.getWebSockets('host')) if (other !== ws) other.close(4000, 'replaced');
+      for (const other of this.ctx.getWebSockets('host')) {
+        if (other === ws) continue;
+        this.hostGone(other.deserializeAttachment()?.nonce);
+        other.close(4000, 'replaced');
+      }
       ws.serializeAttachment({ ...meta, authed: true, authedAt: Date.now() });
       ws.send(JSON.stringify({ t: 'ready' }));
       return;
     }
     if (msg.t === 'result' && typeof msg.id === 'string') {
-      this.pending.get(msg.id)?.({ ok: msg.ok === true, message: String(msg.message ?? '').slice(0, 2500) });
+      this.pending.get(msg.id)?.done({ ok: msg.ok === true, message: String(msg.message ?? '').slice(0, 2500) });
       return;
     }
     if ((msg.t === 'answer' || msg.t === 'error') && typeof msg.session === 'string') {
@@ -144,7 +169,17 @@ export class Introducer extends DurableObject {
   }
 
   async webSocketClose(ws, code) {
+    this.ended(ws);
     try { ws.close(code, 'closing'); } catch {}
+  }
+
+  async webSocketError(ws) {
+    this.ended(ws);
+  }
+
+  ended(ws) {
+    const meta = ws.deserializeAttachment();
+    if (meta?.role === 'host') this.hostGone(meta.nonce);
   }
 }
 
