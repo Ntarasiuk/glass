@@ -198,6 +198,60 @@ impl SteadySize {
     }
 }
 
+/// How long an encoder's thread waits for the next picture: until the frame that's waiting is
+/// due, when there is one and it's for a stream being shown; else a while. A picture nobody
+/// is shown stays unsent, and waiting for it to be "due" would spin.
+pub fn encode_wait(shown: bool, unsent: bool, due: Instant, now: Instant, idle: Duration) -> Duration {
+    if shown && unsent { due.saturating_duration_since(now) } else { idle }
+}
+
+/// Whether the hardware encoder may be tried. One asked not to be used, or that isn't there,
+/// never is. One that failed is given a rest, longer each time, and tried again: a stall of
+/// half a second or a GPU reset shouldn't mean software encoding until the host restarts.
+/// Each display's encoder falls back on its own; others keep what's working for them.
+#[derive(Debug)]
+pub struct HardwarePolicy {
+    never: bool,
+    failures: u32,
+    retry_at: Option<Instant>,
+}
+
+/// The first rest, doubling up to the longest.
+const HARDWARE_REST: Duration = Duration::from_secs(60);
+const HARDWARE_MAX_REST: Duration = Duration::from_secs(3600);
+/// An encoder that ran this long had its failure forgiven: it's a new problem.
+const HARDWARE_PROVEN: Duration = Duration::from_secs(600);
+
+impl HardwarePolicy {
+    pub const fn new() -> Self {
+        Self { never: false, failures: 0, retry_at: None }
+    }
+
+    /// Asked for software, or no hardware encoder is installed.
+    pub fn never(&mut self) {
+        self.never = true;
+    }
+
+    pub fn is_never(&self) -> bool {
+        self.never
+    }
+
+    pub fn allowed(&self, now: Instant) -> bool {
+        !self.never && self.retry_at.is_none_or(|at| now >= at)
+    }
+
+    /// One failed after running for `ran`; how long until it's tried again.
+    pub fn failed(&mut self, now: Instant, ran: Duration) -> Duration {
+        if ran >= HARDWARE_PROVEN {
+            self.failures = 0;
+        }
+        let rest = HARDWARE_REST.saturating_mul(1u32 << self.failures.min(10)).min(HARDWARE_MAX_REST);
+        self.failures = self.failures.saturating_add(1);
+        self.retry_at = Some(now + rest);
+        rest
+    }
+}
+
 /// Largest picture side H.264 hardware encoders take (level 5.1); bigger screens are halved.
 const MAX_SIDE: usize = 4096;
 /// Smallest picture side hardware encoders reliably take.
@@ -502,6 +556,43 @@ mod tests {
         assert_eq!(s.update((820, 600), ms(200)), (800, 600));
         assert_eq!(s.update((820, 600), ms(400)), (820, 600), "held still");
         assert_eq!(s.update((820, 600), ms(410)), (820, 600));
+    }
+
+    #[test]
+    fn hardware_failures_get_longer_rests_and_are_forgiven() {
+        let t = Instant::now();
+        let mut p = HardwarePolicy::new();
+        assert!(p.allowed(t));
+        assert_eq!(p.failed(t, Duration::ZERO), Duration::from_secs(60));
+        assert!(!p.allowed(t + Duration::from_secs(59)));
+        assert!(p.allowed(t + Duration::from_secs(60)), "tried again");
+        assert_eq!(p.failed(t, Duration::from_secs(5)), Duration::from_secs(120), "failed again soon");
+        assert_eq!(p.failed(t, Duration::from_secs(5)), Duration::from_secs(240));
+        for _ in 0..20 {
+            p.failed(t, Duration::ZERO);
+        }
+        assert_eq!(p.failed(t, Duration::ZERO), Duration::from_secs(3600), "at most an hour");
+        assert_eq!(p.failed(t, Duration::from_secs(600)), Duration::from_secs(60), "it had been fine");
+    }
+
+    #[test]
+    fn hardware_nobody_wants_is_never_tried() {
+        let t = Instant::now();
+        let mut p = HardwarePolicy::new();
+        p.never();
+        assert!(p.is_never());
+        assert!(!p.allowed(t + Duration::from_secs(1_000_000)));
+    }
+
+    #[test]
+    fn an_encoder_only_waits_for_a_due_frame_on_a_shown_stream() {
+        let t = Instant::now();
+        let (idle, soon) = (Duration::from_millis(100), Duration::from_millis(5));
+        assert_eq!(encode_wait(true, true, t + soon, t, idle), soon);
+        assert_eq!(encode_wait(true, true, t, t + soon, idle), Duration::ZERO, "overdue");
+        assert_eq!(encode_wait(true, false, t, t, idle), idle, "nothing waiting");
+        // A display not shown keeps its newest picture unsent, already "due": no spinning.
+        assert_eq!(encode_wait(false, true, t, t + soon, idle), idle);
     }
 
     #[test]

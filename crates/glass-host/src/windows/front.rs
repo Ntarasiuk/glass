@@ -366,41 +366,61 @@ pub fn run_hook_helper(host_pid: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Starts watching local input (once) through the hook helper. False if it couldn't start
-/// or Windows refused its hooks.
+/// How often a hook helper that died or was refused is started again.
+const HOOK_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The hook helper, and when it was last started.
+static HOOK_HELPER: std::sync::Mutex<(Option<std::process::Child>, Option<std::time::Instant>)> = std::sync::Mutex::new((None, None));
+
+/// Keeps local input watched through the hook helper, starting it (again) if it isn't running.
+/// True while its hooks are in; call it to find out, as it can die at any time. Its counters
+/// outlive it, so a new one takes up what the last was doing (privacy mode's blocking too).
 pub fn watch() -> bool {
-    static STARTED: OnceLock<bool> = OnceLock::new();
-    *STARTED.get_or_init(|| {
-        let pid = std::process::id();
+    let pid = std::process::id();
+    if SHARED.get().is_none() {
         let Some(shared) = map_shared(pid, true) else {
             tracing::warn!("local input: no shared memory for the hook helper");
             return false;
         };
         let _ = SHARED.set(shared);
-        let mut cmd = match std::env::current_exe() {
-            Ok(exe) => std::process::Command::new(exe),
-            Err(_) => return false,
-        };
-        cmd.args([HOOK_HELPER_ARG, &pid.to_string()])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        super::no_window(&mut cmd);
-        if let Err(e) = cmd.spawn() {
+    }
+    let Some(shared) = SHARED.get() else { return false };
+    let mut helper = HOOK_HELPER.lock().unwrap_or_else(|e| e.into_inner());
+    let running = helper.0.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)));
+    let retry_due = helper.1.is_none_or(|at| at.elapsed() >= HOOK_RETRY);
+    match super::convert::hook_step(running, shared.ready.load(Ordering::SeqCst), retry_due) {
+        super::convert::HookStep::Ready => return true,
+        super::convert::HookStep::Waiting | super::convert::HookStep::Down => return false,
+        super::convert::HookStep::Start => {}
+    }
+    helper.1 = Some(std::time::Instant::now());
+    shared.ready.store(0, Ordering::SeqCst);
+    let mut cmd = match std::env::current_exe() {
+        Ok(exe) => std::process::Command::new(exe),
+        Err(_) => return false,
+    };
+    cmd.args([HOOK_HELPER_ARG, &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    super::no_window(&mut cmd);
+    match cmd.spawn() {
+        Ok(child) => helper.0 = Some(child),
+        Err(e) => {
             tracing::warn!("local input: couldn't start the hook helper: {e}");
             return false;
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while std::time::Instant::now() < deadline {
-            match shared.ready.load(Ordering::SeqCst) {
-                1 => return true,
-                2 => break,
-                _ => std::thread::sleep(std::time::Duration::from_millis(20)),
-            }
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        match shared.ready.load(Ordering::SeqCst) {
+            1 => return true,
+            2 => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(20)),
         }
-        tracing::warn!("local input: the hook helper didn't set its hooks");
-        false
-    })
+    }
+    tracing::warn!("local input: the hook helper didn't set its hooks");
+    false
 }
 
 /// Privacy mode: drop (or stop dropping) local keyboard and mouse input.

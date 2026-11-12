@@ -282,10 +282,11 @@ impl Injector {
         }
     }
 
-    pub fn handle(&mut self, ev: Ev) {
-        // While the secure desktop is up (or an elevated window has focus), this process's
-        // SendInput is refused; the SYSTEM helper injects for us. Release what the side we're
-        // leaving still holds, so nothing stays stuck down across the switch.
+    /// While the secure desktop is up (or an elevated window has focus), this process's
+    /// SendInput is refused; the SYSTEM helper injects for us. Release what the side we're
+    /// leaving still holds, so nothing stays stuck down across the switch. Whether input goes
+    /// through the helper now.
+    fn follow_route(&mut self) -> bool {
         let want_route = super::secure::route_input();
         if want_route != self.routing {
             if self.routing {
@@ -295,7 +296,11 @@ impl Injector {
             }
             self.routing = want_route;
         }
-        if self.routing {
+        self.routing
+    }
+
+    pub fn handle(&mut self, ev: Ev) {
+        if self.follow_route() {
             match ev {
                 Ev::MouseMove { x, y, stream } => {
                     let display = self.displays.get(stream as usize).or(self.displays.first());
@@ -349,18 +354,7 @@ impl Injector {
                 }
             }
             Ev::MouseDown { button } | Ev::MouseUp { button } => {
-                let down = matches!(ev, Ev::MouseDown { .. });
-                let flags = match (button, down) {
-                    (0, true) => MOUSEEVENTF_LEFTDOWN,
-                    (0, false) => MOUSEEVENTF_LEFTUP,
-                    (1, true) => MOUSEEVENTF_MIDDLEDOWN,
-                    (1, false) => MOUSEEVENTF_MIDDLEUP,
-                    (2, true) => MOUSEEVENTF_RIGHTDOWN,
-                    (2, false) => MOUSEEVENTF_RIGHTUP,
-                    _ => return,
-                };
-                self.buttons[button as usize] = down;
-                send(&[mouse(0, 0, 0, flags)]);
+                self.local_button(button, matches!(ev, Ev::MouseDown { .. }));
             }
             Ev::Scroll { dx, dy } => {
                 // DOM: +dy scrolls down, +dx right. Windows: +wheel scrolls up, +hwheel right.
@@ -433,6 +427,10 @@ impl Injector {
     /// Windows key, so that's lifted for the paste and restored after.
     pub fn paste(&mut self) {
         tracing::trace!("input: paste (Ctrl+V)");
+        if self.follow_route() {
+            super::secure::paste();
+            return;
+        }
         let wins: Vec<Key> = [LEFT_WIN, RIGHT_WIN].into_iter().filter(|k| self.held.contains(k)).collect();
         if !wins.is_empty() {
             send(&[keyboard(MASK, true), keyboard(MASK, false)]);
@@ -454,6 +452,21 @@ impl Injector {
             send(&[keyboard(LEFT_CTRL, false)]);
         }
         send(&wins.iter().map(|&k| keyboard(k, true)).collect::<Vec<_>>());
+    }
+
+    /// A mouse button, through this process's own SendInput.
+    fn local_button(&mut self, button: u8, down: bool) {
+        let flags = match (button, down) {
+            (0, true) => MOUSEEVENTF_LEFTDOWN,
+            (0, false) => MOUSEEVENTF_LEFTUP,
+            (1, true) => MOUSEEVENTF_MIDDLEDOWN,
+            (1, false) => MOUSEEVENTF_MIDDLEUP,
+            (2, true) => MOUSEEVENTF_RIGHTDOWN,
+            (2, false) => MOUSEEVENTF_RIGHTUP,
+            _ => return,
+        };
+        self.buttons[button as usize] = down;
+        send(&[mouse(0, 0, 0, flags)]);
     }
 
     /// The pen lifts (if touching) and goes out of range.
@@ -484,10 +497,17 @@ impl Injector {
             self.pen_leaves();
         }
         for button in 0..3u8 {
+            // Not through `handle`: it calls this while `routing` is still out of date, and
+            // would come straight back here.
             if self.buttons[button as usize] {
-                self.handle(Ev::MouseUp { button });
+                self.local_button(button, false);
             }
         }
+        // A Windows key let go by a paste and pressed again: letting it go now would open Start.
+        if std::mem::take(&mut self.mask_win) && (self.held.contains(&LEFT_WIN) || self.held.contains(&RIGHT_WIN)) {
+            send(&[keyboard(MASK, true), keyboard(MASK, false)]);
+        }
+        self.pressed.clear();
         let keys: Vec<INPUT> = std::mem::take(&mut self.held).into_iter().map(|k| keyboard(k, false)).collect();
         send(&keys);
     }
@@ -635,7 +655,12 @@ impl crate::media::InputSink for Injector {
         self.window = rect.map(|[x, y, w, h]| Rect { x, y, w, h });
     }
     fn move_on_display(&mut self, display: u32, x: f32, y: f32) {
-        if let Some(r) = video::rect_of(display) {
+        let Some(r) = video::rect_of(display) else { return };
+        if self.follow_route() {
+            let gx = (r.x + x.clamp(0.0, 1.0) as f64 * (r.w - 1.0).max(0.0)).round() as i32;
+            let gy = (r.y + y.clamp(0.0, 1.0) as f64 * (r.h - 1.0).max(0.0)).round() as i32;
+            super::secure::move_abs(gx, gy);
+        } else {
             self.move_in(r, x, y);
         }
     }
@@ -646,7 +671,7 @@ impl crate::media::InputSink for Injector {
     fn type_text(&mut self, text: &str) -> bool {
         // On the secure desktop (e.g. typing a password at the lock screen) injection goes
         // through the helper, which has no Unicode path; let the caller press keys instead.
-        if super::secure::route_input() {
+        if self.follow_route() {
             return false;
         }
         let layout = foreground_layout();

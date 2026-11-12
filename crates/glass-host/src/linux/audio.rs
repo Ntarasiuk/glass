@@ -2,6 +2,7 @@
 //! stereo f32, and packs it into the same 5 ms s16 packets the macOS host sends.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use glass_proto::{AUDIO_FRAMES_PER_PACKET, AUDIO_SAMPLE_RATE, audio_packet};
 use pipewire as pw;
@@ -17,15 +18,30 @@ const CHANNELS: usize = 2;
 struct State {
     packets: AudioPackets,
     pending: Vec<i16>,
-    seq: u32,
+    /// Goes on across reconnections, for the viewers' jitter buffers.
+    seq: Arc<AtomicU32>,
 }
+
+/// How soon a capture that ended (PipeWire restarted, say) is started again.
+const RECONNECT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub fn start(packets: AudioPackets) {
     let spawned = std::thread::Builder::new()
         .name("glass-audio".into())
         .spawn(move || {
-            if let Err(e) = run(packets) {
-                tracing::warn!("audio capture stopped: {e:#}");
+            let seq = Arc::new(AtomicU32::new(0));
+            let mut said = String::new();
+            loop {
+                let ended = match run(packets.clone(), seq.clone()) {
+                    Ok(()) => "it ended".to_string(),
+                    Err(e) => format!("{e:#}"),
+                };
+                // Once, not every few seconds while there's no PipeWire to talk to.
+                if ended != said {
+                    tracing::warn!("audio capture stopped ({ended}); trying again");
+                    said = ended;
+                }
+                std::thread::sleep(RECONNECT);
             }
         });
     if let Err(e) = spawned {
@@ -33,11 +49,22 @@ pub fn start(packets: AudioPackets) {
     }
 }
 
-fn run(packets: AudioPackets) -> anyhow::Result<()> {
+/// Captures until the stream or PipeWire goes away.
+fn run(packets: AudioPackets, seq: Arc<AtomicU32>) -> anyhow::Result<()> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
     let core = context.connect_rc(None)?;
+    let quit = mainloop.clone();
+    let _core_listener = core
+        .add_listener_local()
+        .error(move |id, _seq, _res, message| {
+            if id == pw::core::PW_ID_CORE {
+                tracing::debug!("audio: pipewire: {message}");
+                quit.quit();
+            }
+        })
+        .register();
 
     let mut props = pw::properties::properties! {
         *pw::keys::MEDIA_TYPE => "Audio",
@@ -51,10 +78,17 @@ fn run(packets: AudioPackets) -> anyhow::Result<()> {
     let state = State {
         packets,
         pending: Vec::new(),
-        seq: 0,
+        seq,
     };
+    let quit = mainloop.clone();
     let _listener = stream
         .add_local_listener_with_user_data(state)
+        .state_changed(move |_stream, _st, old, new| {
+            use pw::stream::StreamState::{Error, Unconnected};
+            if matches!(new, Error(_)) || (matches!(new, Unconnected) && !matches!(old, Unconnected)) {
+                quit.quit();
+            }
+        })
         .process(|stream, st| {
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
@@ -74,14 +108,13 @@ fn run(packets: AudioPackets) -> anyhow::Result<()> {
             let mut offset = 0;
             while st.pending.len() - offset >= per_packet {
                 let packet = audio_packet(
-                    st.seq,
+                    st.seq.fetch_add(1, Ordering::Relaxed),
                     now_us(),
                     CHANNELS as u8,
                     &st.pending[offset..offset + per_packet],
                 );
                 // No receivers (nobody listening) is fine.
                 let _ = st.packets.send(Arc::new(packet));
-                st.seq = st.seq.wrapping_add(1);
                 offset += per_packet;
             }
             st.pending.drain(..offset);

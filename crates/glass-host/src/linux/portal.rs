@@ -18,13 +18,27 @@ pub struct PortalStream {
 pub struct Cast {
     pub fd: OwnedFd,
     pub streams: Vec<PortalStream>,
+    /// Dropping it ends the portal session.
+    pub session: tokio::sync::oneshot::Sender<()>,
 }
+
+/// The person at the computer didn't approve the share: not to be asked again unprompted.
+#[derive(Debug)]
+pub struct NotApproved;
+
+impl std::fmt::Display for NotApproved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "screen sharing was not approved")
+    }
+}
+
+impl std::error::Error for NotApproved {}
 
 fn token_path() -> std::path::PathBuf {
     crate::config_dir().join("portal-restore-token")
 }
 
-/// Starts a session on a dedicated thread that keeps it open for the life of the process.
+/// Starts a session on a dedicated thread that keeps it open until `Cast::session` is dropped.
 /// Blocks until the user approves (or cancels) the share dialog.
 pub fn start() -> Result<Cast> {
     let (tx, rx) = mpsc::channel();
@@ -48,11 +62,12 @@ pub fn start() -> Result<Cast> {
                     }
                 };
                 match open(&proxy).await {
-                    Ok((cast, session)) => {
-                        let _ = tx.send(Ok(cast));
-                        // Dropping the session would end the cast; hold it forever.
+                    Ok(((fd, streams), session)) => {
+                        let (hold, ended) = tokio::sync::oneshot::channel();
+                        let _ = tx.send(Ok(Cast { fd, streams, session: hold }));
+                        // Dropping the session would end the cast; hold it until told.
                         let _session = session;
-                        std::future::pending::<()>().await;
+                        let _ = ended.await;
                     }
                     Err(e) => {
                         let _ = tx.send(Err(e));
@@ -63,7 +78,7 @@ pub fn start() -> Result<Cast> {
     rx.recv().context("portal thread exited")?
 }
 
-async fn open(proxy: &Screencast) -> Result<(Cast, ashpd::desktop::Session<Screencast>)> {
+async fn open(proxy: &Screencast) -> Result<((OwnedFd, Vec<PortalStream>), ashpd::desktop::Session<Screencast>)> {
     let session = proxy.create_session(Default::default()).await?;
     let token = std::fs::read_to_string(token_path()).ok();
     proxy
@@ -81,7 +96,7 @@ async fn open(proxy: &Screencast) -> Result<(Cast, ashpd::desktop::Session<Scree
         .start(&session, None, Default::default())
         .await?
         .response()
-        .context("screen sharing was not approved")?;
+        .map_err(|_| anyhow::Error::new(NotApproved))?;
     if let Some(token) = response.restore_token() {
         let _ = std::fs::create_dir_all(crate::config_dir());
         let _ = std::fs::write(token_path(), token);
@@ -99,5 +114,5 @@ async fn open(proxy: &Screencast) -> Result<(Cast, ashpd::desktop::Session<Scree
     let fd = proxy
         .open_pipe_wire_remote(&session, Default::default())
         .await?;
-    Ok((Cast { fd, streams }, session))
+    Ok(((fd, streams), session))
 }

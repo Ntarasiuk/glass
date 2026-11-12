@@ -13,6 +13,63 @@ pub fn app_id(exe_path: &str) -> Option<String> {
     (!stem.is_empty()).then(|| stem.to_lowercase())
 }
 
+/// When a process the service keeps running may be started again: at once if it had been up a
+/// while, later and later if it keeps exiting straight away. One that can't start (its pipe
+/// still taken, say) would otherwise be started again the moment it exits, over and over.
+#[derive(Debug, Default)]
+pub struct Respawn {
+    started: Option<std::time::Instant>,
+    failures: u32,
+    not_before: Option<std::time::Instant>,
+}
+
+/// Up this long, it wasn't failing to start.
+const RESPAWN_PROVEN: std::time::Duration = std::time::Duration::from_secs(30);
+const RESPAWN_MAX_SECS: u64 = 30;
+
+impl Respawn {
+    pub fn started(&mut self, now: std::time::Instant) {
+        self.started = Some(now);
+    }
+
+    /// It exited by itself; how long until it may be started again.
+    pub fn exited(&mut self, now: std::time::Instant) -> std::time::Duration {
+        let ran = self.started.take().map_or(std::time::Duration::ZERO, |at| now.duration_since(at));
+        self.failures = if ran >= RESPAWN_PROVEN { 0 } else { self.failures.saturating_add(1) };
+        let wait = match self.failures {
+            0 => std::time::Duration::ZERO,
+            n => std::time::Duration::from_secs((1u64 << n.min(6)).min(RESPAWN_MAX_SECS)),
+        };
+        self.not_before = Some(now + wait);
+        wait
+    }
+
+    pub fn may_start(&self, now: std::time::Instant) -> bool {
+        self.not_before.is_none_or(|at| now >= at)
+    }
+}
+
+/// What the input hooks' helper needs now, from whether it's running, what it last said in
+/// its shared memory (1 hooks in, 2 refused) and whether it's time to try again.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HookStep {
+    Ready,
+    /// Running, its hooks not in yet.
+    Waiting,
+    Start,
+    /// Not working, and not time to try again.
+    Down,
+}
+
+pub fn hook_step(running: bool, ready: u64, retry_due: bool) -> HookStep {
+    match (running && ready != 2, ready) {
+        (true, 1) => HookStep::Ready,
+        (true, _) => HookStep::Waiting,
+        (false, _) if retry_due => HookStep::Start,
+        (false, _) => HookStep::Down,
+    }
+}
+
 /// UIA_*ControlTypeId values (UIAutomationClient.h).
 pub mod control {
     pub const BUTTON: i32 = 50000;
@@ -197,6 +254,49 @@ pub fn pen_frame(phase: PenPhase, pressure: f32, tilt: (i8, i8), twist: f32) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_process_that_keeps_exiting_is_started_less_and_less() {
+        let t = Instant::now();
+        let mut r = super::Respawn::default();
+        assert!(r.may_start(t));
+        r.started(t);
+        assert_eq!(r.exited(t + Duration::from_millis(50)), Duration::from_secs(2));
+        assert!(!r.may_start(t + Duration::from_secs(1)));
+        assert!(r.may_start(t + Duration::from_secs(3)));
+        r.started(t);
+        assert_eq!(r.exited(t), Duration::from_secs(4));
+        for _ in 0..10 {
+            r.started(t);
+            r.exited(t);
+        }
+        r.started(t);
+        assert_eq!(r.exited(t), Duration::from_secs(30), "at most half a minute");
+    }
+
+    #[test]
+    fn a_process_that_ran_a_while_is_started_again_at_once() {
+        let t = Instant::now();
+        let mut r = super::Respawn::default();
+        r.started(t);
+        r.exited(t);
+        r.started(t);
+        assert_eq!(r.exited(t + Duration::from_secs(60)), Duration::ZERO);
+        assert!(r.may_start(t + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn the_hook_helper_is_started_again_when_it_dies_or_is_refused() {
+        use super::{HookStep::*, hook_step};
+        assert_eq!(hook_step(true, 1, false), Ready);
+        assert_eq!(hook_step(true, 0, true), Waiting, "a slow start isn't a failure");
+        assert_eq!(hook_step(false, 1, true), Start, "it had hooks, and died");
+        assert_eq!(hook_step(false, 0, true), Start, "never started");
+        assert_eq!(hook_step(true, 2, true), Start, "refused");
+        assert_eq!(hook_step(false, 1, false), Down);
+    }
+
     use super::*;
 
     #[test]

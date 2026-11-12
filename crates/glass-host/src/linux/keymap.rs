@@ -127,6 +127,7 @@ pub fn all_evdev() -> impl Iterator<Item = u16> {
 }
 
 pub const KEY_LEFTCTRL: u16 = 29;
+pub const KEY_RIGHTCTRL: u16 = 97;
 pub const KEY_V: u16 = 47;
 pub const KEY_LEFTMETA: u16 = 125;
 pub const KEY_RIGHTMETA: u16 = 126;

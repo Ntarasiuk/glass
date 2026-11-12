@@ -15,6 +15,8 @@
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::core::{HSTRING, PWSTR};
@@ -503,9 +505,11 @@ fn keep_helper_alive(stop: HANDLE, wake: HANDLE, sas: HANDLE) {
     use windows::Win32::System::Threading::WaitForMultipleObjects;
     let mut child: Option<HANDLE> = None;
     let mut child_session = 0xFFFF_FFFFu32;
+    let mut child_respawn = super::convert::Respawn::default();
     // The sign-in host (signin.rs), while nobody is signed in at the console.
     let mut signin: Option<HANDLE> = None;
     let mut signin_session = 0xFFFF_FFFFu32;
+    let mut signin_respawn = super::convert::Respawn::default();
     loop {
         // SAFETY: plain query.
         let session = unsafe { WTSGetActiveConsoleSessionId() };
@@ -516,18 +520,20 @@ fn keep_helper_alive(stop: HANDLE, wake: HANDLE, sas: HANDLE) {
             // SAFETY: closing the exited child's handle.
             unsafe { let _ = CloseHandle(h); }
             child = None;
+            child_respawn.exited(Instant::now());
         }
         // A real interactive session (not the "no one connected" 0xFFFFFFFF, nor session 0).
         let usable = session != 0xFFFF_FFFF && session != 0;
-        if usable && (child.is_none() || session != child_session) {
-            if let Some(h) = child.take() {
-                // Session changed: the old helper is in the wrong session; drop it.
-                terminate(h);
-            }
+        if usable && child.is_some() && session != child_session {
+            // Session changed: the old helper is in the wrong session; drop it.
+            terminate(child.take().unwrap());
+        }
+        if usable && child.is_none() && child_respawn.may_start(Instant::now()) {
             match spawn_in_session(session, super::secure::HELPER_ARG, &[], Some(sas)) {
                 Ok(h) => {
                     child = Some(h);
                     child_session = session;
+                    child_respawn.started(Instant::now());
                 }
                 Err(()) => {}
             }
@@ -541,6 +547,7 @@ fn keep_helper_alive(stop: HANDLE, wake: HANDLE, sas: HANDLE) {
             // SAFETY: closing the exited child's handle.
             unsafe { let _ = CloseHandle(h); }
             signin = None;
+            signin_respawn.exited(Instant::now());
         }
         let wanted = usable && signin_dir().join("token").exists() && !signed_in(session);
         if wanted && (signin.is_none() || session != signin_session) {
@@ -548,9 +555,12 @@ fn keep_helper_alive(stop: HANDLE, wake: HANDLE, sas: HANDLE) {
                 terminate(h);
             }
             let env = [("GLASS_CONFIG_DIR", signin_dir().display().to_string()), ("GLASS_NO_MENUBAR", "1".into())];
-            if let Ok(h) = spawn_in_session(session, crate::signin::ARG, &env, None) {
+            if signin_respawn.may_start(Instant::now())
+                && let Ok(h) = spawn_in_session(session, crate::signin::ARG, &env, None)
+            {
                 signin = Some(h);
                 signin_session = session;
+                signin_respawn.started(Instant::now());
             }
         } else if !wanted && let Some(h) = signin.take() {
             terminate(h);
@@ -636,11 +646,14 @@ fn copy_all(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Ends a child, and waits a moment for it to be gone: what follows may need what it holds
+/// (the helper's pipe has only one instance).
 fn terminate(child: HANDLE) {
-    use windows::Win32::System::Threading::TerminateProcess;
+    use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
     // SAFETY: the child is ours; terminate and close it.
     unsafe {
         let _ = TerminateProcess(child, 0);
+        let _ = WaitForSingleObject(child, 2000);
         let _ = CloseHandle(child);
     }
 }

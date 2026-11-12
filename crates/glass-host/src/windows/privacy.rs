@@ -204,11 +204,24 @@ fn overlay(started: std::sync::mpsc::Sender<Result<u32, String>>) {
             }
         };
         SetTimer(None, 0, 1000, None);
-        let _ = started.send(Ok(GetCurrentThreadId()));
+        let me = GetCurrentThreadId();
+        let _ = started.send(Ok(me));
+        let mut hooks_down = false;
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             match (msg.hwnd.is_invalid(), msg.message) {
                 (true, WM_TIMER | REBUILD) => {
+                    // `engage` gave up waiting for this thread, so nothing can ever end it.
+                    // (While it's still deciding, it holds the lock.)
+                    if THREAD.try_lock().is_ok_and(|t| *t != Some(me)) {
+                        break;
+                    }
+                    // The hook helper may have died: local input isn't blocked without it.
+                    let hooks = front::watch();
+                    if !hooks && !hooks_down {
+                        tracing::warn!("privacy: local keyboard and mouse aren't being blocked (input hooks are down); trying to bring them back");
+                    }
+                    hooks_down = !hooks;
                     let now = monitors();
                     if now != rects || windows.is_empty() || msg.message == REBUILD {
                         uncover(&mut windows);
