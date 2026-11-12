@@ -20,6 +20,10 @@ const FIRST_SILENCE_TIMEOUT_MS = 10000;
 const NACK_TICK_MS = 20;
 const MIC_AFTER_MS = 500;
 const SOUND_WAIT_MS = 6000;
+// A transport can hang in its handshake without ever failing. Remote access takes longer:
+// rtc.js bounds its own signalling and connecting, at about 50 s in all.
+const CONNECT_TIMEOUT_MS = 20_000;
+const REMOTE_CONNECT_TIMEOUT_MS = 60_000;
 
 const log = (level, msg, data) => self.postMessage({ type: 'log', level, msg, data });
 self.addEventListener('unhandledrejection', (e) =>
@@ -43,7 +47,9 @@ let wideColor = false; // the screen shows Display P3: draw video in it
 // This viewer draws the host's pointer itself (cursor.js), offered in hello.
 let localCursor = false;
 let codecs = ['h264']; // what this browser decodes, offered in hello (HEVC if hardware, Opus)
-let rejected = false;
+// The host turned this viewer away, so don't knock again on our own: 'token' (wait for a
+// new one) or 'owner' (the person at the computer said no; asking again is the user's call).
+let refused;
 let controlWriter;
 let audioPort; // MessagePort of the main thread's AudioWorkletNode
 let audioOn = false;
@@ -57,11 +63,13 @@ let audioCodec = ''; // 'pcm' or 'opus': what the host sends
 let opusDecoder; // WebCodecs AudioDecoder for KIND_AUDIO_OPUS
 let micOn = false;
 let micSeq = 0;
+let micIn; // MessagePort of the main thread's mic worklet
 let transport;
 let lastRxMs = 0;
 let kill; // ends the current session's read loop even if the transport never reports closing
 let wake; // resolves the reconnect backoff early
-let denied = false; // the host's owner said no; don't knock again on our own
+let aborted = false; // this session or attempt was ended on purpose: see endAttempt
+let attemptAt = 0; // when this attempt started
 let datagramWriter;
 let inputWriter;
 let bench; // BenchProbe, when the page asked for it (bench/ only)
@@ -90,6 +98,7 @@ const streamEnv = {
     if (bench && index === 0) bench.read(frame, hostNowUs);
   },
   // The first picture of this connection.
+  paused: () => !visible,
   firstFrame: () => {
     if (sawFrame) return;
     sawFrame = true;
@@ -103,6 +112,7 @@ const streamEnv = {
   ack: (index, frameId) => datagramWriter?.write(frameAck(index, frameId)).catch(() => {}),
 };
 const streams = []; // VideoStream per host stream number
+let streamCount = Infinity; // how many of them the host is sending, once main.js has said
 function videoStream(index) {
   return (streams[index] ??= new VideoStream(index, streamEnv));
 }
@@ -122,7 +132,10 @@ self.onmessage = async ({ data }) => {
     codecs.push('nack'); // Asks for lost fragments again instead of whole new keyframes.
     setInterval(() => datagramWriter?.write(ping(performance.now())).catch(() => {}), PING_INTERVAL_MS);
     setInterval(tick, 1000);
-    setInterval(() => { if (nackOn && visible) for (const s of streams) s?.repair(rttMs); }, NACK_TICK_MS);
+    setInterval(() => {
+      if (!nackOn || !visible) return;
+      for (let i = 0; i < streams.length && i < streamCount; i++) streams[i]?.repair(rttMs);
+    }, NACK_TICK_MS);
     run();
   } else if (data.type === 'certHash') {
     // The host's self-signed WebTransport certificate was replaced (main.js refetched it).
@@ -131,7 +144,8 @@ self.onmessage = async ({ data }) => {
   } else if (data.type === 'canvas') {
     videoStream(data.stream).setCanvas(data.canvas, wideColor);
   } else if (data.type === 'streams') {
-    // Streams the host no longer sends give up their decoders.
+    // Streams the host no longer sends give up their decoders, and stop asking for pictures.
+    streamCount = data.count;
     for (const s of streams.slice(data.count)) s?.release();
   } else if (data.type === 'input') {
     inputWriter?.write(data.bytes).catch(() => {});
@@ -142,19 +156,24 @@ self.onmessage = async ({ data }) => {
     localCursor = data.on;
     sendControl({ t: 'localCursor', on: localCursor });
   } else if (data.type === 'sendFile') {
-    sendFile(data.file, data.dir).catch((e) => log('error', `send file failed: ${e.message ?? e}`));
+    const id = `${Date.now()}-${data.file.name}`;
+    sendFile(id, data.file, data.dir).catch((e) => {
+      log('error', `send file failed: ${e.message ?? e}`);
+      self.postMessage({ type: 'fileFailed', id, name: data.file.name, direction: 'up', reason: e.message ?? String(e) });
+    });
   } else if (data.type === 'sendClipboard') {
     sendClipboard(data.clip).catch((e) => log('error', `send clipboard failed: ${e.message ?? e}`));
   } else if (data.type === 'switchHost') {
     url = data.url;
-    rejected = false;
-    // End the current session; the reconnect loop picks up the new URL immediately.
-    kill?.('switching machine');
+    refused = undefined;
+    // End the session or attempt in progress (it may still be on its way to the old host);
+    // the reconnect loop picks up the new URL immediately.
+    endAttempt('switching machine');
     wake?.();
   } else if (data.type === 'token') {
     token = data.token;
-    rejected = false;
-    transport?.close();
+    refused = undefined;
+    endAttempt('new token');
     wake?.();
   } else if (data.type === 'visible') {
     setVisible(data.visible);
@@ -164,7 +183,9 @@ self.onmessage = async ({ data }) => {
     audioPort.onmessage = ({ data: m }) => { audioUnderruns = m.underruns; };
   } else if (data.type === 'micPort') {
     // 5 ms mono packets from the main thread's mic worklet, sent as datagrams.
-    data.port.onmessage = ({ data: pcm }) => {
+    stopMicPort();
+    micIn = data.port;
+    micIn.onmessage = ({ data: pcm }) => {
       if (!micOn || !datagramWriter) return;
       const captureUs = clockSynced ? performance.now() * 1000 + clockOffsetUs : 0;
       micSeq = (micSeq + 1) >>> 0;
@@ -172,23 +193,22 @@ self.onmessage = async ({ data }) => {
     };
   } else if (data.type === 'mic') {
     micOn = data.on;
+    if (!micOn) stopMicPort();
     sendControl({ t: 'mic', on: micOn });
   } else if (data.type === 'audioToggle') {
     audioOn = !audioOn;
     sendControl({ t: 'audio', on: audioOn });
     self.postMessage({ type: 'audio', on: audioOn });
   } else if (data.type === 'askAgain') {
-    denied = false;
+    refused = undefined;
     wake?.();
   } else if (data.type === 'leave') {
     leaving = true;
-    kill?.('page closing');
-    try { transport?.close(); } catch {}
+    endAttempt('page closing');
   } else if (data.type === 'suspend') {
     // Another tab of this browser shows this computer now: stay off until told otherwise.
     suspended = true;
-    kill?.('another tab took over');
-    try { transport?.close(); } catch {}
+    endAttempt('another tab took over');
   } else if (data.type === 'resume') {
     suspended = false;
     wake?.();
@@ -206,18 +226,27 @@ self.onmessage = async ({ data }) => {
 let leaving = false;
 let suspended = false;
 
+/** What keeps this viewer from connecting: a status to show ('' for none), or undefined if nothing. */
+function heldBack() {
+  if (leaving || suspended) return '';
+  // After a rejection, retrying would only be rejected again; wait for a new token.
+  if (refused === 'token') return 'waiting for access token';
+  if (refused === 'owner') return 'not let in';
+}
+
+/** Ends the session, or the attempt at one, on purpose: not a failure, and no retry delay. */
+function endAttempt(reason) {
+  aborted = true;
+  kill?.(reason);
+  try { transport?.close(); } catch {}
+}
+
 async function run() {
   let delay = RECONNECT_MIN_MS;
   for (;;) {
-    while (leaving || suspended) await new Promise((resolve) => { wake = resolve; });
-    // After a rejection, retrying would only be rejected again; wait for a new token.
-    while (rejected) {
-      self.postMessage({ type: 'status', text: 'waiting for access token' });
-      await new Promise((resolve) => { wake = resolve; });
-    }
-    // Turned away by the person at the computer: asking again is the user's call.
-    while (denied) {
-      self.postMessage({ type: 'status', text: 'not let in' });
+    // Asked again after every wake: any of these can change while another one holds.
+    for (let why = heldBack(); why !== undefined; why = heldBack()) {
+      if (why) self.postMessage({ type: 'status', text: why });
       await new Promise((resolve) => { wake = resolve; });
     }
     try {
@@ -225,9 +254,15 @@ async function run() {
       delay = RECONNECT_MIN_MS;
       self.postMessage({ type: 'status', level: 'warn', text: 'disconnected, reconnecting…' });
     } catch (e) {
-      self.postMessage({ type: 'status', level: 'error', text: `connection failed: ${e.message ?? e}, retrying…` });
+      if (aborted) self.postMessage({ type: 'status', level: 'warn', text: 'disconnected, reconnecting…' });
+      else self.postMessage({ type: 'status', level: 'error', text: `connection failed: ${e.message ?? e}, retrying…` });
     }
+    const again = aborted;
     resetSession();
+    if (again) {
+      delay = RECONNECT_MIN_MS;
+      continue;
+    }
     await new Promise((resolve) => {
       wake = resolve;
       setTimeout(resolve, delay);
@@ -241,9 +276,22 @@ function resetSession() {
   kill = undefined;
   try { transport?.close(); } catch {}
   transport = datagramWriter = inputWriter = controlWriter = undefined;
-  for (const s of streams) s?.reset();
+  // Their decoders too: what's still queued in one is the old session's picture.
+  for (const s of streams) s?.release();
   clockSamples.length = 0;
   clockSynced = false;
+  clearStats();
+}
+
+function clearStats() {
+  Object.assign(stats, { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0, lossless: 0 });
+}
+
+function stopMicPort() {
+  // Lets its worklet stop: a stopped microphone still feeds it silence.
+  micIn?.postMessage('stop');
+  micIn?.close();
+  micIn = undefined;
 }
 
 /** Resolves when the session ends; throws if it never came up. */
@@ -252,9 +300,15 @@ async function connect() {
     ? { serverCertificateHashes: [{ algorithm: 'sha-256', value: new Uint8Array(certHash) }] }
     : {};
   log('info', 'connecting', rtcPort ? { remote: true } : { url, pinned: !!certHash });
+  aborted = false;
+  attemptAt = performance.now();
   transport = rtcPort ? new RtcTransport(rtcPort) : new WebTransport(url, options);
-  transport.closed.catch(() => {});
-  await transport.ready;
+  const session = transport;
+  // Ended on purpose while it was coming up: nothing more goes to this host.
+  const stillWanted = () => { if (aborted) throw new Error('attempt ended'); };
+  session.closed.catch(() => {});
+  await session.ready;
+  stillWanted();
   lastRxMs = performance.now();
   sawFrame = false;
   nackOn = false;
@@ -274,14 +328,16 @@ async function connect() {
 
   // Control stream first: the host ignores everything else until hello is accepted.
   const control = await transport.createBidirectionalStream();
+  stillWanted();
   controlWriter = control.writable.getWriter();
   sendControl({ t: 'hello', token, link, pass, device, codecs, ua: navigator.userAgent, cursor: localCursor, acks: true });
   soundWaiting = audioOn || micOn;
   connectedAt = performance.now();
   if (!visible) sendControl({ t: 'video', on: false });
-  readControl(control.readable).catch((e) => log('warn', `control read ended: ${e.message ?? e}`));
+  readControl(control.readable, session).catch((e) => log('warn', `control read ended: ${e.message ?? e}`));
 
   const inputStream = await transport.createUnidirectionalStream();
+  stillWanted();
   inputWriter = inputStream.getWriter();
   inputWriter.write(new Uint8Array([STREAM_INPUT]));
   acceptIncoming(transport).catch(() => {});
@@ -325,8 +381,12 @@ async function connect() {
 function setVisible(next) {
   if (next === visible) return;
   visible = next;
+  // Hidden: decoders go. Shown again: wait for the picture from now.
+  for (const s of streams) {
+    if (visible) s?.reset();
+    else s?.release();
+  }
   sendControl({ t: 'video', on: visible });
-  if (!visible) for (const s of streams) s?.release();
   log('info', `video ${visible ? 'resumed' : 'paused'} (tab ${visible ? 'visible' : 'hidden'})`);
 }
 
@@ -370,7 +430,7 @@ function byteReader(readable) {
   };
 }
 
-async function readControl(readable) {
+async function readControl(readable, session) {
   const r = byteReader(readable);
   for (;;) {
     const len = await r.read(4);
@@ -378,27 +438,31 @@ async function readControl(readable) {
     const body = await r.read(new DataView(len.buffer).getUint32(0, true));
     if (!body) return;
     const msg = JSON.parse(textDecoder.decode(body));
+    // From a session that has been left: it says nothing about the one that follows.
+    if (session !== transport || aborted) return;
     if (msg.t === 'pass') {
       // The link is used up; reconnects sign in with the pass.
       pass = msg.pass;
       link = undefined;
     }
-    if (msg.t === 'denied') denied = true;
+    if (msg.t === 'denied') refused = 'owner';
     if (msg.t === 'error' && msg.msg === 'unauthorized') {
-      rejected = true;
+      refused = 'token';
       link = undefined;
       pass = undefined;
       self.postMessage({ type: 'unauthorized' });
     }
     if (!sawFrame) controlBytes[msg.t] = (controlBytes[msg.t] ?? 0) + body.byteLength;
-    if (msg.t === 'welcome') nackOn = Boolean(msg.features?.nack);
+    if (msg.t === 'welcome') {
+      nackOn = Boolean(msg.features?.nack);
+      for (const s of streams) s?.expectPicture();
+    }
     self.postMessage({ type: 'control', msg });
   }
 }
 
-async function sendFile(file, dir) {
+async function sendFile(id, file, dir) {
   if (!transport) throw new Error('not connected');
-  const id = `${Date.now()}-${file.name}`;
   // `dir`: the file browser's folder (relative to the home folder) instead of Downloads.
   const header = encoder.encode(JSON.stringify({ name: file.name, size: file.size, ...(dir != null && { dir }) }));
   const prefix = new Uint8Array(5 + header.length);
@@ -412,17 +476,22 @@ async function sendFile(file, dir) {
   const reader = file.stream().getReader();
   let sent = 0;
   let lastReport = 0;
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    await writer.write(value);
-    sent += value.byteLength;
-    if (performance.now() - lastReport > 200) {
-      lastReport = performance.now();
-      self.postMessage({ type: 'fileProgress', id, name: file.name, done: sent, total: file.size, direction: 'up' });
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      await writer.write(value);
+      sent += value.byteLength;
+      if (performance.now() - lastReport > 200) {
+        lastReport = performance.now();
+        self.postMessage({ type: 'fileProgress', id, name: file.name, done: sent, total: file.size, direction: 'up' });
+      }
     }
+    await writer.close();
+  } catch (e) {
+    writer.abort(e).catch(() => {});
+    throw e;
   }
-  await writer.close();
   self.postMessage({ type: 'fileProgress', id, name: file.name, done: file.size, total: file.size, direction: 'up' });
   log('info', 'file sent', { name: file.name, size: file.size });
 }
@@ -452,7 +521,7 @@ async function receiveClipboard(r) {
   for await (const chunk of r.rest()) chunks.push(chunk);
   const image = new Blob(chunks, { type: header.mime || 'image/png' });
   if (image.size !== header.size) throw new Error(`clipboard image: got ${image.size} of ${header.size} bytes`);
-  self.postMessage({ type: 'clipboardImage', image });
+  self.postMessage({ type: 'clipboardImage', image, id: header.id });
 }
 
 /** A clipboard with an image, to the host (and pasted there with `paste`). */
@@ -500,17 +569,22 @@ async function receiveFile(r) {
   const chunks = [];
   let got = 0;
   let lastReport = 0;
-  for await (const chunk of r.rest()) {
-    chunks.push(chunk);
-    got += chunk.byteLength;
-    if (performance.now() - lastReport > 200) {
-      lastReport = performance.now();
-      self.postMessage({ type: 'fileProgress', id, name: header.name, done: got, total: header.streamed ? null : header.size, direction: 'down' });
+  try {
+    for await (const chunk of r.rest()) {
+      chunks.push(chunk);
+      got += chunk.byteLength;
+      if (performance.now() - lastReport > 200) {
+        lastReport = performance.now();
+        self.postMessage({ type: 'fileProgress', id, name: header.name, done: got, total: header.streamed ? null : header.size, direction: 'down' });
+      }
     }
+    // A folder zipped on the fly has no size up front: it's whole if it ends with the zip's
+    // end record (a broken remote stream just ends early).
+    if (header.streamed ? !endsLikeZip(chunks) : got !== header.size) throw new Error(`${header.name}: cut short after ${got} bytes`);
+  } catch (e) {
+    self.postMessage({ type: 'fileFailed', id, name: header.name, direction: 'down', reason: e.message ?? String(e) });
+    throw e;
   }
-  // A folder zipped on the fly has no size up front: it's whole if it ends with the zip's
-  // end record (a broken remote stream just ends early).
-  if (header.streamed ? !endsLikeZip(chunks) : got !== header.size) throw new Error(`${header.name}: cut short after ${got} bytes`);
   const file = new File(chunks, header.name);
   self.postMessage({ type: 'fileReceived', id, file });
   log('info', 'file received', { name: header.name, size: got });
@@ -629,6 +703,12 @@ function startSound() {
 function tick() {
   // A page that isn't showing never gets a picture: don't keep sound waiting for it.
   if (soundWaiting && performance.now() - connectedAt > SOUND_WAIT_MS) startSound();
+  // Still coming up after all this time: give up on this attempt.
+  if (transport && !kill && performance.now() - attemptAt > (rtcPort ? REMOTE_CONNECT_TIMEOUT_MS : CONNECT_TIMEOUT_MS)) {
+    log('warn', 'connection attempt timed out');
+    attemptAt = performance.now();
+    try { transport.close(); } catch {}
+  }
   if (!sawFrame && transport && visible && streams[0]) log('info', 'waiting for first picture', { rtt: Math.round(rttMs), control: controlBytes, ...streams[0].waitingState() });
   const silence = sawFrame ? SILENCE_TIMEOUT_MS : FIRST_SILENCE_TIMEOUT_MS;
   if (kill && performance.now() - lastRxMs > silence) {
@@ -676,5 +756,5 @@ function reportStats() {
   audioPackets = 0;
   audioLost = 0;
   audioPeak = 0;
-  Object.assign(stats, { frames: 0, bytes: 0, latencySamples: 0, latencySum: 0, latencyMax: 0, dropped: 0, lossless: 0 });
+  clearStats();
 }

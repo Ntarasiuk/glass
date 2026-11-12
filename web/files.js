@@ -55,6 +55,87 @@ function formatDate(unix) {
 }
 const join = (dir, name) => (dir ? `${dir}/${name}` : name);
 
+/**
+ * Previews asked of the host, a few at a time. `get`: a data URL, null (it has none) or
+ * undefined (not known yet). Answers don't outlive the session they were asked in.
+ */
+export function thumbRequests(send) {
+  const known = new Map();
+  const queue = [];
+  let inFlight = 0;
+  function pump() {
+    while (inFlight < MAX_THUMB_REQUESTS && queue.length) {
+      const p = queue.shift();
+      known.set(p, undefined);
+      inFlight++;
+      send(p);
+    }
+  }
+  return {
+    get: (p) => known.get(p),
+    ask(p) {
+      if (known.has(p) || queue.includes(p)) return;
+      queue.push(p);
+      pump();
+    },
+    answered(p, data) {
+      inFlight = Math.max(0, inFlight - 1);
+      known.set(p, data ?? null);
+      pump();
+    },
+    reset() {
+      known.clear();
+      queue.length = 0;
+      inFlight = 0;
+    },
+  };
+}
+
+/**
+ * Folder listings asked of the host. They can answer out of order, so the one asked for last
+ * is the one that counts, by its id. A listing with no id (a change in the folder prompted it,
+ * or the host is too old to echo one) goes by its path: one that comes back under another
+ * name (the host tidies paths) is still taken once nothing else is on its way.
+ */
+export function folderRequests() {
+  let asked = 0; // answers still to come
+  let wanted = '';
+  let answered = true;
+  let lastReq = 0;
+  return {
+    get loading() { return asked > 0; },
+    /** Going to `path`: the request's id. */
+    go(path) {
+      wanted = path;
+      answered = false;
+      asked++;
+      return ++lastReq;
+    },
+    /** A change in the folder, which the host answers by listing it again. */
+    changed() {
+      asked++;
+    },
+    /** A listing came: whether to show it. */
+    reply(path, req) {
+      asked = Math.max(0, asked - 1);
+      if (req !== undefined ? req !== lastReq : path !== wanted && (answered || asked)) return false;
+      wanted = path;
+      answered = true;
+      return true;
+    },
+    /** It couldn't go there: `path` is the folder shown, whose listings count again. */
+    stay(path) {
+      wanted = path;
+      answered = true;
+    },
+    reset(path = wanted) {
+      asked = 0;
+      wanted = path;
+      answered = true;
+    },
+  };
+}
+
 export function createFiles({ control, toast, upload, download, rawUrl, log }) {
   const button = document.getElementById('btn-files');
   let trashName = 'Trash';
@@ -114,13 +195,12 @@ export function createFiles({ control, toast, upload, download, rawUrl, log }) {
   let shown = []; // entries after the filter
   let selected = -1; // index into `shown`
   let ticket = '';
-  let loading = false;
+  let hostShown; // whose folders these are
+  const folders = folderRequests();
   let view = storage((s) => s.getItem(VIEW_KEY)) === 'grid' ? 'grid' : 'list';
   let size = [0, 0]; // the scroll box, from ResizeObserver
   let promptAction;
-  const thumbs = new Map(); // path -> data URL, or null (none)
-  const thumbQueue = [];
-  let thumbsInFlight = 0;
+  const thumbs = thumbRequests((path) => control({ t: 'filesThumb', path }));
   const rows = new Map(); // index -> element (rendered rows only)
 
   for (const [label, p] of QUICK) {
@@ -152,9 +232,9 @@ export function createFiles({ control, toast, upload, download, rawUrl, log }) {
   $('.close').addEventListener('click', () => setOpen(false));
 
   function go(p) {
-    loading = true;
+    const req = folders.go(p);
     status.textContent = 'Loading…';
-    control({ t: 'filesList', path: p });
+    control({ t: 'filesList', path: p, req });
   }
 
   function renderCrumbs() {
@@ -183,7 +263,7 @@ export function createFiles({ control, toast, upload, download, rawUrl, log }) {
     for (const el of rows.values()) el.remove();
     rows.clear();
     spacer.style.height = `${Math.ceil(shown.length / perRow()) * rowHeight()}px`;
-    empty.classList.toggle('hidden', shown.length > 0 || loading);
+    empty.classList.toggle('hidden', shown.length > 0 || folders.loading);
     empty.textContent = q ? `Nothing here matches “${search.value.trim()}”.` : 'This folder is empty. Drop files here to upload them.';
     render();
     updateFooter();
@@ -234,7 +314,7 @@ export function createFiles({ control, toast, upload, download, rawUrl, log }) {
     el.querySelector('.name').textContent = e.name;
     el.querySelector('.meta').textContent = meta;
     el.title = e.name;
-    if (!e.dir && thumb === undefined && PREVIEWABLE.has(e.kind)) askThumb(full);
+    if (!e.dir && thumb === undefined && PREVIEWABLE.has(e.kind)) thumbs.ask(full);
     // Drag a file (or a folder, as a zip) out onto this device's desktop (Chromium, from
     // the computer's own page).
     const url = rawUrl(ticket, full);
@@ -246,20 +326,6 @@ export function createFiles({ control, toast, upload, download, rawUrl, log }) {
       });
     }
     return el;
-  }
-
-  function askThumb(full) {
-    if (thumbs.has(full) || thumbQueue.includes(full)) return;
-    thumbQueue.push(full);
-    pumpThumbs();
-  }
-  function pumpThumbs() {
-    while (thumbsInFlight < MAX_THUMB_REQUESTS && thumbQueue.length) {
-      const p = thumbQueue.shift();
-      thumbs.set(p, undefined);
-      thumbsInFlight++;
-      control({ t: 'filesThumb', path: p });
-    }
   }
 
   // Clicks: select (or open on touch / double-click).
@@ -318,7 +384,7 @@ export function createFiles({ control, toast, upload, download, rawUrl, log }) {
     openButton.textContent = e?.dir ? 'Open' : 'Download';
     zipButton.classList.toggle('hidden', !e?.dir);
     const count = `${shown.length} item${shown.length === 1 ? '' : 's'}`;
-    status.textContent = loading ? 'Loading…' : e ? `${e.name}${e.dir ? '' : ` · ${formatSize(e.size)}`}` : count;
+    status.textContent = folders.loading ? 'Loading…' : e ? `${e.name}${e.dir ? '' : ` · ${formatSize(e.size)}`}` : count;
   }
 
   openButton.addEventListener('click', () => open(selected));
@@ -329,13 +395,22 @@ export function createFiles({ control, toast, upload, download, rawUrl, log }) {
   renameButton.addEventListener('click', () => {
     const e = shown[selected];
     if (!e) return;
-    askName('Rename to', e.name, (name) => name !== e.name && control({ t: 'filesRename', path: join(path, e.name), name }));
+    askName('Rename to', e.name, (name) => {
+      if (name === e.name) return;
+      folders.changed();
+      control({ t: 'filesRename', path: join(path, e.name), name });
+    });
   });
   trashButton.addEventListener('click', () => {
     const e = shown[selected];
-    if (e && confirm(`Move “${e.name}” to the ${trashName}?`)) control({ t: 'filesTrash', path: join(path, e.name) });
+    if (!e || !confirm(`Move “${e.name}” to the ${trashName}?`)) return;
+    folders.changed();
+    control({ t: 'filesTrash', path: join(path, e.name) });
   });
-  $('.mkdir').addEventListener('click', () => askName('New folder', 'untitled folder', (name) => control({ t: 'filesMkdir', path, name })));
+  $('.mkdir').addEventListener('click', () => askName('New folder', 'untitled folder', (name) => {
+    folders.changed();
+    control({ t: 'filesMkdir', path, name });
+  }));
   viewButton.addEventListener('click', () => {
     view = view === 'grid' ? 'list' : 'grid';
     storage((s) => s.setItem(VIEW_KEY, view));
@@ -490,6 +565,28 @@ export function createFiles({ control, toast, upload, download, rawUrl, log }) {
       trashName = os === 'windows' ? 'Recycle Bin' : 'Trash';
       sheet.querySelector('.act.trash').textContent = `Move to ${trashName}`;
     },
+    /**
+     * A new session (from welcome): what was on its way went with the last one, and another
+     * computer's folders and previews aren't this one's.
+     */
+    reset(host) {
+      thumbs.reset();
+      folders.reset();
+      if (host !== hostShown) {
+        hostShown = host;
+        path = '';
+        entries = [];
+        selected = -1;
+        ticket = '';
+        search.value = '';
+        folders.reset('');
+        renderCrumbs();
+        applyFilter();
+      } else {
+        updateFooter();
+      }
+      if (isOpen()) go(path);
+    },
     /** Owners with files allowed get the button. */
     setAvailable(on) {
       available = on;
@@ -501,21 +598,23 @@ export function createFiles({ control, toast, upload, download, rawUrl, log }) {
     },
     onMessage(msg) {
       if (msg.t === 'filesThumb') {
-        thumbsInFlight = Math.max(0, thumbsInFlight - 1);
-        thumbs.set(msg.path, msg.data ?? null);
+        thumbs.answered(msg.path, msg.data);
         if (msg.data) {
           for (const [i, el] of rows) {
             const e = shown[i];
             if (e && join(path, e.name) === msg.path) el.querySelector('.pic').innerHTML = `<img class="thumb" src="${msg.data}" alt="" draggable="false">`;
           }
         }
-        pumpThumbs();
         return;
       }
       // A folder listing.
-      loading = false;
+      if (!folders.reply(msg.path, msg.req)) {
+        updateFooter();
+        return;
+      }
       if (msg.error) {
         toast({ text: msg.error, kind: 'error' });
+        if (msg.path !== path) folders.stay(path);
         updateFooter();
         if (msg.path !== path) return;
       }

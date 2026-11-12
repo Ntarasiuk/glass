@@ -7,7 +7,8 @@ import { attachGamepads } from './gamepad.js';
 import { createUI, positionNames } from './ui.js';
 import { log, setLogSink } from './log.js';
 import { MAC_KEYCODES as K } from './keymap.js';
-import { hostIdFor, serveRtc } from './rtc.js';
+import { hostIdFor, rtpPictureOverdue, rtpVideoStats, serveRtc } from './rtc.js';
+import { imageRequests } from './clip-image.js';
 import { createChat } from './chat.js';
 import { loadProfile, saveProfile } from './keyboard-profile.js';
 import { answerPasskey } from './passkey.js';
@@ -147,14 +148,18 @@ const token = hashToken ?? storage((s) => s.getItem(tokenKey));
 // my screens" (one window per Mac display).
 const query = new URLSearchParams(location.search);
 const openParam = query.get('open');
-const sharedParam = query.has('shared');
+// Kept for this tab until it's delivered: a reload before the first welcome mustn't lose it.
+if (query.has('shared')) { try { sessionStorage.setItem('glass.shared', '1'); } catch {} }
+const sharedParam = query.has('shared') || (() => {
+  try { return sessionStorage.getItem('glass.shared') === '1'; } catch { return false; }
+})();
 const displayParam = query.get('display');
 // A machine to open: from a per-machine app shortcut (?machine=dns) or a web+glass:// link.
 const machineParam = query.get('machine') ?? (() => {
   const l = query.get('link');
   return l ? decodeURIComponent(l).replace(/^web\+glass:(\/\/)?/i, '').replace(/[/?#].*$/, '') || undefined : undefined;
 })();
-if (openParam || sharedParam || machineParam) history.replaceState(null, '', location.pathname + location.hash);
+if (openParam || query.has('shared') || machineParam) history.replaceState(null, '', location.pathname + location.hash);
 const savedPass = (() => {
   try {
     const p = JSON.parse(storage((s) => s.getItem(passKey)) ?? 'null');
@@ -229,15 +234,17 @@ let inputAllowed = true;
 // Text events come ready made (textEvents); the rest from their fields.
 const send = (kind, fields) => inputAllowed && worker.postMessage({ type: 'input', bytes: kind === Input.TEXT ? fields.bytes : inputEvent(kind, fields) });
 let session = 0; // this session's id, from welcome (chat from it is our own)
+let live = false; // the host has welcomed this viewer on the connection it has now
 let perms = { input: true, clipboard: true, files: true, owner: true };
 let features = {};
 let sharpWanted = storage((s) => s.getItem(SHARP_KEY)) === '1';
 let sharpPending = false; // to ask for once the first picture is up
 let sharpMode = 'off'; // what the host is doing: 'off', 'sharp' or '4:2:2'
 let deniedMsg; // why the host last turned us away
+let deniedToast; // its "Ask again"
 
 // Resolves with the next clipboard the Mac reports (used for Cmd+C / Cmd+X):
-// { text, html?, image } where `image` says there's one to fetch (macImage).
+// { text, html?, image } where `image` says there's one to fetch (macImages).
 let clipboardWaiters = [];
 let lastMacClipboard;
 function nextClipboard(timeoutMs) {
@@ -256,15 +263,7 @@ function nextClipboard(timeoutMs) {
 }
 
 // The Mac clipboard's image, fetched when needed (it can be several MB).
-const IMAGE_WAIT_MS = 8000;
-let imageWaiters = [];
-function macImage() {
-  return new Promise((resolve, reject) => {
-    imageWaiters.push(resolve);
-    control({ t: 'clipboardImage' });
-    setTimeout(() => reject(new Error('the image never came')), IMAGE_WAIT_MS);
-  });
-}
+const macImages = imageRequests({ ask: (id) => control({ t: 'clipboardImage', id }), timeoutMs: 8000 });
 
 /**
  * After ⌘C copied rich text or an image on the Mac (the text is already on this device's
@@ -277,8 +276,9 @@ async function copyRich(clip) {
   if (clip.html) items['text/html'] = new Blob([clip.html], { type: 'text/html' });
   if (clip.image) {
     try {
-      items['image/png'] = await macImage();
+      items['image/png'] = await macImages.next();
     } catch (e) {
+      if (e.superseded) return;
       log('warn', `clipboard image: ${e.message}`);
     }
   }
@@ -467,7 +467,7 @@ const ui = createUI({
     worker.postMessage({ type: 'token', token: t });
   },
 });
-const terminal = createTerminal({ control, log });
+const terminal = createTerminal({ control, log, toast: (o) => ui.toast(o) });
 // Which display each stream shows, for placing the agent's marker.
 let streamIds = [];
 const agent = createAgent({
@@ -570,9 +570,11 @@ let padOn = false; // keyboard and mouse mode: see setPad
 let usedAt = -Infinity; // while hidden: when it was hidden (desktop only), or the last input
 let videoOn = true;
 let pauseTimer;
+let floatWindow = false; // a Document Picture-in-Picture window is open (from device.js)
+let rtpCheck; // see checkRtpVideoArrives
 
 function floating() {
-  return Boolean(document.pictureInPictureElement || window.documentPictureInPicture?.window);
+  return Boolean(document.pictureInPictureElement || floatWindow);
 }
 /** Whether video should run. Everything that can change the answer calls syncVideo. */
 function wantsVideo() {
@@ -581,12 +583,21 @@ function wantsVideo() {
 }
 function syncVideo() {
   clearTimeout(pauseTimer);
+  const was = videoOn;
   videoOn = wantsVideo();
+  if (videoOn && !was && rtpVideo && live) checkRtpVideoArrives();
   worker.postMessage({ type: 'visible', visible: videoOn });
   // On only because it was used lately: look again when that runs out. Input just moves usedAt.
   if (videoOn && document.visibilityState !== 'visible' && !floating()) {
     pauseTimer = setTimeout(syncVideo, usedAt + PAUSE_HIDDEN_AFTER_MS - performance.now());
   }
+}
+
+/** No longer floating, with the page still hidden: pause now. */
+function floatEnded() {
+  if (document.visibilityState !== 'hidden') return;
+  usedAt = -Infinity;
+  syncVideo();
 }
 
 const device = createDevice({
@@ -599,6 +610,10 @@ const device = createDevice({
   streams: () => (rtpVideo ? videos : canvases).slice(0, streamCount),
   sendClip: (clip) => sendClip(clip),
   displays: () => displays,
+  onFloatWindow: (open) => {
+    floatWindow = open;
+    if (!open) floatEnded();
+  },
   onPause: (isAway) => {
     away = isAway;
     syncVideo();
@@ -632,6 +647,12 @@ if (machineParam && !remoteKey) {
 let currentHost = storage((s) => s.getItem(MACHINE_KEY)) ?? homeHost;
 let machineFailures = 0;
 let machineTimer;
+
+/** The host has answered (it wants a token, or someone to let this viewer in): it's reachable. */
+function hostAnswered() {
+  machineFailures = 0;
+  clearTimeout(machineTimer);
+}
 
 function giveUpOnMachine() {
   ui.toast({ text: `Couldn't reach ${currentHost}; back to this machine`, kind: 'error' });
@@ -718,7 +739,7 @@ function videoFor(stream) {
       videoSizes[i] = `${v.videoWidth}×${v.videoHeight}`;
       input.setVideoSize(i, v.videoWidth, v.videoHeight);
       thumbs.measure();
-      hideStatus();
+      if (pictureUp()) hideStatus();
     });
     screens.append(v);
     input.observeCanvas(v);
@@ -773,7 +794,6 @@ worker.onmessage = ({ data }) => {
       break;
     case 'connected':
       reloadIfUpdated('reconnect');
-      if (rtpVideo) checkRtpVideoArrives();
       break;
     case 'status':
       if (data.level === 'error' && /connection failed/.test(data.text)) refreshCertHash();
@@ -782,7 +802,12 @@ worker.onmessage = ({ data }) => {
       }
       status = data.text;
       // Logs wait (in log.js) until the next session is signed in.
-      if (status !== 'connected') setLogSink(undefined);
+      if (status !== 'connected') {
+        setLogSink(undefined);
+        live = false;
+        clearTimeout(rtpCheck);
+        terminal.setConnected(false);
+      }
       onConnectionStatus(status);
       log(data.level ?? 'info', `status: ${status}`);
       break;
@@ -798,7 +823,7 @@ worker.onmessage = ({ data }) => {
       input.setVideoSize(data.stream, data.width, data.height);
       thumbs.measure();
       annotator.invalidate();
-      hideStatus();
+      if (pictureUp()) hideStatus();
       break;
     case 'stats':
       // Over RTP the worker sees no video; the connection's own stats describe it.
@@ -809,7 +834,7 @@ worker.onmessage = ({ data }) => {
         log('info', 'stats', { ...data, audioPeak: loggedPeak });
         loggedPeak = 0;
       }
-      if (data.fps > 0) hideStatus();
+      if (data.fps > 0 && pictureUp()) hideStatus();
       renderHud(data);
       break;
     case 'firstFrame':
@@ -827,6 +852,7 @@ worker.onmessage = ({ data }) => {
       storage((s) => s.setItem(DECODER_STEP_KEY, String(data.step)));
       break;
     case 'unauthorized':
+      hostAnswered();
       storage((s) => s.removeItem(tokenKey));
       storage((s) => s.removeItem(passKey));
       log('warn', 'token rejected');
@@ -845,11 +871,14 @@ worker.onmessage = ({ data }) => {
     case 'fileReceived':
       onFileReceived(data);
       break;
+    case 'fileFailed':
+      onFileFailed(data);
+      break;
     case 'clipboardImage':
-      for (const w of imageWaiters) w(data.image);
-      imageWaiters = [];
+      macImages.received(data.image, data.id);
       break;
     case 'audio':
+      audioOn = data.on;
       ui.setAudioOn(data.on);
       if (!data.on) audioContext?.suspend();
       log('info', `audio ${data.on ? 'on' : 'off'}`);
@@ -879,6 +908,10 @@ function startAfterFirstPicture(wait) {
 function onControl(msg) {
   switch (msg.t) {
     case 'welcome':
+      live = true;
+      if (rtpVideo) checkRtpVideoArrives();
+      ui.hideAuth();
+      deniedToast?.dismiss();
       startAfterFirstPicture(FIRST_PICTURE_WAIT_MS);
       cursor.reset();
       cursor.setHostSupports(Boolean(msg.features?.cursor));
@@ -908,6 +941,8 @@ function onControl(msg) {
       ui.setCanFit(!guest && msg.features?.fit !== false);
       // A new session has no second display (the host removed it when the last one ended).
       extended = undefined;
+      extendsOwed = 0;
+      extendAcks = Boolean(msg.features?.extend_ack);
       ui.setExtend({ available: Boolean(msg.features?.extend && (msg.perms ? msg.perms.owner : !guest)), on: false });
       session = msg.session ?? 0;
       perms = msg.perms ?? perms;
@@ -916,6 +951,7 @@ function onControl(msg) {
       ui.setPerms(perms);
       chat.setAvailable(true);
       files.setAvailable(Boolean(msg.features?.browse));
+      files.reset(currentHost);
       restarting = undefined;
       onNowPlaying(null); // the host says what it's playing right after welcome
       push.connected({ key: msg.features?.push, isOwner: Boolean(msg.perms ? msg.perms.owner : !guest) }).then(() => {
@@ -948,7 +984,7 @@ function onControl(msg) {
         micReady = Boolean(msg.features?.mic);
         micInstallable = Boolean(msg.features?.mic_install);
         ui.setMicAvailable((micReady || micInstallable) && canInput);
-        if (!canInput && micStream) stopMic();
+        if (!canInput && (micStream || micStarting)) stopMic();
       }
       terminal.reset();
       terminal.setAvailable(Boolean(msg.perms?.owner && msg.features?.terminal));
@@ -970,20 +1006,33 @@ function onControl(msg) {
       cursor.setShape(msg);
       break;
     case 'layout':
+      if (extended) extended.asking = false;
       // The host's current displays (a fit adds a virtual one and hides the one it mirrors).
       if (msg.displays) displays = msg.displays;
       onLayout(msg.streams);
       break;
     case 'waiting':
+      hostAnswered();
       showStatus('connecting', 'Waiting to be let in', msg.msg);
       break;
     case 'denied':
+      hostAnswered();
       deniedMsg = msg.msg;
       showStatus('error', 'Not let in', msg.msg);
-      ui.toast({ text: msg.msg, kind: 'error', timeout: 0, action: { label: 'Ask again', run: () => {
+      deniedToast?.dismiss();
+      // `ended`: the host took back this guest's pass with its answer, so only a new link helps.
+      deniedToast = ui.toast({ text: msg.msg, kind: 'error', timeout: 0, action: msg.ended ? undefined : { label: 'Ask again', run: () => {
         showStatus('connecting', 'Connecting', machineName(currentHost));
         worker.postMessage({ type: 'askAgain' });
       } } });
+      break;
+    case 'extended':
+      // Only the answer to the latest request says where things stand.
+      extendsOwed = Math.max(0, extendsOwed - 1);
+      if (!extendsOwed && !msg.on && extended) {
+        extended = undefined;
+        ui.setExtend({ on: false });
+      }
       break;
     case 'nowPlaying':
       onNowPlaying(msg.info);
@@ -1053,6 +1102,7 @@ function onControl(msg) {
       break;
     case 'passkey':
       // A --passkey link: create one now, or prove this is the device that did.
+      hostAnswered();
       showStatus('connecting', 'Confirm with your passkey…', msg.mode === 'create' ? 'This link asks this device to save a passkey for Glass.' : machineName(currentHost));
       answerPasskey(msg).then((answer) => {
         if (answer.mode === 'error') log('warn', `passkey: ${answer.error}`);
@@ -1068,6 +1118,11 @@ function onControl(msg) {
       onRecording(msg);
       break;
     case 'error':
+      // An older host has no answer to a display request but this: it didn't happen.
+      if (!extendAcks && extended?.asking) {
+        extended = undefined;
+        ui.setExtend({ on: false });
+      }
       if (msg.msg !== 'unauthorized') ui.toast({ text: msg.msg, kind: 'error', timeout: 6000 });
       log('error', `host: ${msg.msg}`);
       break;
@@ -1132,6 +1187,11 @@ function showStatus(state, title, detail = '') {
 
 function hideStatus() {
   statusEl.classList.add('gone');
+}
+
+/** A picture may take over from the overlay only on a connection that's up and staying. */
+function pictureUp() {
+  return status === 'connected' && !elsewhere && !restarting;
 }
 
 /** Maps the worker's status text to what the person should see. */
@@ -1210,6 +1270,12 @@ async function loadMachines() {
 function switchMachine(host, name = host) {
   currentHost = host;
   machineFailures = 0;
+  live = false;
+  restarting = undefined;
+  deniedMsg = undefined;
+  deniedToast?.dismiss();
+  lastMacClipboard = undefined;
+  ui.hideAuth();
   storage((s) => (host === homeHost ? s.removeItem(MACHINE_KEY) : s.setItem(MACHINE_KEY, host)));
   displays = [];
   showStatus('connecting', `Connecting to ${name}`);
@@ -1220,11 +1286,10 @@ function switchMachine(host, name = host) {
 }
 
 /** If tracks were negotiated but no picture comes, go back to data-channel video. */
-let rtpCheck;
 function checkRtpVideoArrives() {
   clearTimeout(rtpCheck);
   rtpCheck = setTimeout(() => {
-    if (!rtpVideo || videos.some((v) => v.videoWidth > 0)) return;
+    if (!rtpPictureOverdue({ rtp: rtpVideo, live, showing: videoOn, picture: videos.some((v) => v.videoWidth > 0) })) return;
     log('warn', 'remote video: no picture over RTP; falling back to the data channel');
     try { sessionStorage.setItem('glass.rtp', '0'); } catch {}
     location.reload();
@@ -1237,39 +1302,15 @@ let lastInbound;
 setInterval(async () => {
   if (!rtpVideo || !rtc) return;
   const report = await rtc.stats?.();
-  if (!report) return;
-  let frames = 0, bytes = 0, dropped = 0, jitter = 0, emitted = 0, decode = 0, decoded = 0, rtt;
-  for (const r of report.values()) {
-    if (r.type === 'inbound-rtp' && r.kind === 'video') {
-      frames += r.framesDecoded ?? 0;
-      bytes += r.bytesReceived ?? 0;
-      dropped += (r.framesDropped ?? 0) + (r.freezeCount ?? 0);
-      jitter += r.jitterBufferDelay ?? 0;
-      emitted += r.jitterBufferEmittedCount ?? 0;
-      decode += r.totalDecodeTime ?? 0;
-      decoded += r.framesDecoded ?? 0;
-    } else if (r.type === 'candidate-pair' && r.nominated && r.currentRoundTripTime != null) {
-      rtt = r.currentRoundTripTime * 1000;
-    }
+  if (!report) {
+    // No connection: nothing is arriving, and the next one counts from zero.
+    lastInbound = undefined;
+    Object.assign(rtpStats, { fps: 0, mbps: 0, dropped: 0 });
+    return;
   }
-  const now = { frames, bytes, dropped, jitter, emitted, decode, decoded };
-  const was = lastInbound ?? now;
+  const { now, stats } = rtpVideoStats(report, lastInbound);
   lastInbound = now;
-  const dEmitted = emitted - was.emitted;
-  const dDecoded = decoded - was.decoded;
-  // One-way network time + jitter buffer + decode: what the viewer waits beyond capture.
-  const buffer = dEmitted > 0 ? ((jitter - was.jitter) / dEmitted) * 1000 : 0;
-  const decodeMs = dDecoded > 0 ? ((decode - was.decode) / dDecoded) * 1000 : 0;
-  const latency = (rtt ?? 0) / 2 + buffer + decodeMs;
-  Object.assign(rtpStats, {
-    fps: frames - was.frames,
-    mbps: ((bytes - was.bytes) * 8) / 1e6,
-    dropped: dropped - was.dropped,
-    latencyAvg: latency,
-    latencyMax: latency,
-    ...(rtt != null && { rtt }),
-    jitterBufferMs: buffer,
-  });
+  Object.assign(rtpStats, stats);
 }, 1000);
 
 function queueViewport(force = false) {
@@ -1305,12 +1346,18 @@ function sendViewport() {
 
 // "Use as a second display": the host adds a display in this screen's shape beside its main
 // one and streams it here. `extended` keeps what was shown before, to go back to it.
-let extended;
+let extended; // `asking`: the host hasn't shown it yet, and an error from it means it failed
+let extendAcks = false; // this host answers with `extended`
+let extendsOwed = 0; // `extended` answers still to come
+// An older host answers with a layout or an error, once its new display is up.
+const EXTEND_WAIT_MS = 10_000;
 function setExtended(on) {
   if (on && !extended) {
-    extended = { before: streamIds.length > 1 ? 'all' : streamIds[0] };
+    const asked = (extended = { before: streamIds.length > 1 ? 'all' : streamIds[0], asking: true });
+    setTimeout(() => { asked.asking = false; }, EXTEND_WAIT_MS);
     const dpr = devicePixelRatio;
     const size = [Math.round(innerWidth * dpr), Math.round(innerHeight * dpr)];
+    extendsOwed++;
     control({ t: 'extend', size, hidpi: dpr >= 1.5 });
     log('info', 'second display', { size, dpr });
   } else if (!on && extended) {
@@ -1467,6 +1514,12 @@ function onFileReceived({ id, file }) {
   });
 }
 
+function onFileFailed({ id, name, direction, reason }) {
+  transfers.get(id)?.dismiss();
+  transfers.delete(id);
+  ui.toast({ text: `Couldn't ${direction === 'up' ? 'send' : 'get'} ${name}: ${reason}`, kind: 'error', timeout: 8000 });
+}
+
 async function saveFile(file) {
   // Desktop Chromium: a real Save dialog (pick the folder and name).
   if (!mobile && window.showSaveFilePicker) {
@@ -1504,13 +1557,17 @@ function formatBytes(n) {
 }
 
 let audioContext;
+let audioLoading = false; // its worklet is on the way, and sound starts when it's in
+let audioOn = false; // what the worker is doing; audioContext.state is the browser's own
 function toggleAudio() {
+  if (audioLoading) return;
   if (!audioContext) {
     // Must be created and resumed inside the tap: Safari can start it suspended.
     // 'playback' keeps it audible when the iPad's silent mode is on.
     setAudioSession(true);
     audioContext = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     audioContext.resume();
+    audioLoading = true;
     audioContext.audioWorklet
       .addModule('audio-worklet.js')
       .then(() => {
@@ -1521,7 +1578,15 @@ function toggleAudio() {
         setMediaSession();
         log('info', 'audio started', { sampleRate: audioContext.sampleRate, baseLatency: audioContext.baseLatency });
       })
-      .catch((e) => log('error', `audio init failed: ${e.message ?? e}`));
+      .catch((e) => {
+        log('error', `audio init failed: ${e.message ?? e}`);
+        // Start over on the next tap.
+        audioContext.close().catch(() => {});
+        audioContext = undefined;
+        setAudioSession();
+        ui.toast({ text: `Couldn't turn the sound on: ${e.message ?? e}`, kind: 'error' });
+      })
+      .finally(() => { audioLoading = false; });
     return;
   }
   if (audioContext.state === 'suspended') audioContext.resume();
@@ -1531,8 +1596,10 @@ function toggleAudio() {
 // The viewer's microphone, as a microphone on the host.
 let micReady = false;
 let micInstallable = false;
+let micStarting; // the start in progress (a permission prompt, say); a second tap cancels it
+let micGraph; // what carries micStream to the worklet
 async function toggleMic() {
-  if (micStream) return stopMic();
+  if (micStream || micStarting) return stopMic();
   if (!micReady) {
     ui.toast({
       text: `Your microphone on ${machineName(currentHost)} needs a small audio driver. Installing it asks for that computer's password, on its screen.`,
@@ -1547,23 +1614,38 @@ async function toggleMic() {
     });
     return;
   }
+  const start = (micStarting = {});
+  let stream;
   try {
     setAudioSession(Boolean(audioContext), true);
-    micStream = await navigator.mediaDevices.getUserMedia({
+    stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
+    if (micStarting !== start) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
     micContext ??= new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     await micContext.resume();
     await micContext.audioWorklet.addModule('mic-worklet.js');
+    if (micStarting !== start) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
     const node = new AudioWorkletNode(micContext, 'glass-mic', { numberOfOutputs: 0 });
-    micContext.createMediaStreamSource(micStream).connect(node);
+    const source = micContext.createMediaStreamSource(stream);
+    source.connect(node);
+    micGraph = { source, node };
+    micStream = stream;
+    micStarting = undefined;
     worker.postMessage({ type: 'micPort', port: node.port }, [node.port]);
     worker.postMessage({ type: 'mic', on: true });
     ui.setMicOn(true);
     log('info', 'microphone on', { sampleRate: micContext.sampleRate });
   } catch (e) {
-    micStream?.getTracks().forEach((t) => t.stop());
-    micStream = undefined;
+    stream?.getTracks().forEach((t) => t.stop());
+    if (micStarting !== start) return;
+    micStarting = undefined;
     setAudioSession();
     ui.toast({ text: `Couldn't use the microphone: ${e.message ?? e}`, kind: 'error' });
     log('error', `microphone failed: ${e.message ?? e}`);
@@ -1578,9 +1660,14 @@ function setAudioSession(playing = Boolean(audioContext), recording = Boolean(mi
 }
 
 function stopMic() {
+  const wasOn = Boolean(micStream);
+  micStarting = undefined;
   micStream?.getTracks().forEach((t) => t.stop());
   micStream = undefined;
+  micGraph?.source.disconnect();
+  micGraph = undefined;
   setAudioSession();
+  if (!wasOn) return;
   worker.postMessage({ type: 'mic', on: false });
   ui.setMicOn(false);
   log('info', 'microphone off');
@@ -1637,11 +1724,7 @@ document.addEventListener('visibilitychange', () => {
   reloadIfUpdated('visible');
 });
 // Back from picture in picture with the page still hidden: pause now.
-document.addEventListener('leavepictureinpicture', () => {
-  if (document.visibilityState !== 'hidden') return;
-  usedAt = -Infinity;
-  syncVideo();
-}, true);
+document.addEventListener('leavepictureinpicture', floatEnded, true);
 // Opened in a background tab, or reloaded while reported hidden.
 if (document.visibilityState !== 'visible') onHidden();
 addEventListener('online', () => worker.postMessage({ type: 'wake' }));
@@ -1701,11 +1784,14 @@ function setMediaSession() {
     artist: 'Glass',
     artwork: [{ src: 'icon-512.png', sizes: '512x512', type: 'image/png' }],
   });
-  const running = audioContext?.state === 'running';
-  ms.playbackState = running ? 'playing' : 'paused';
+  ms.playbackState = audioOn ? 'playing' : 'paused';
   for (const [action, on] of [['play', true], ['pause', false]]) {
     handle(action, () => {
-      if (on === (audioContext?.state === 'running')) return;
+      if (on === audioOn) {
+        // On, but the browser suspended it: bring it back rather than turn it off.
+        if (on) audioContext?.resume();
+        return;
+      }
       toggleAudio();
       ms.playbackState = on ? 'playing' : 'paused';
     });
@@ -1758,7 +1844,7 @@ if ('launchQueue' in window) {
       if (open && open !== 'files') runOpen(open);
     }
     if (!files.length) return;
-    if (session) uploadFiles(files);
+    if (live) uploadFiles(files);
     else pendingFiles.push(...files);
   });
 }
@@ -1776,13 +1862,13 @@ function runOpen(what) {
 let welcomed = false;
 async function onFirstWelcome() {
   if (displayParam) control({ t: 'selectDisplay', id: Number(displayParam) });
-  if (welcomed) return;
-  welcomed = true;
-  if (openParam && openParam !== 'files') runOpen(openParam);
   if (pendingFiles.length) {
     uploadFiles(pendingFiles);
     pendingFiles = [];
   }
+  if (welcomed) return;
+  welcomed = true;
+  if (openParam && openParam !== 'files') runOpen(openParam);
   // Shared to Glass from another app (Web Share Target), stashed by the service worker.
   if (sharedParam && 'caches' in window) {
     const cache = await caches.open('glass-share');
@@ -1800,6 +1886,7 @@ async function onFirstWelcome() {
       }
     }
     await caches.delete('glass-share');
+    try { sessionStorage.removeItem('glass.shared'); } catch {}
     if (files.length) uploadFiles(files);
   }
 }

@@ -23,6 +23,8 @@ const MAX_ZOOM = 5;
 // A two-finger gesture becomes a pinch once the finger spread changes this much.
 const PINCH_THRESHOLD = 0.08;
 const PASTE_FALLBACK_MS = 150;
+// A paste event this soon after giving up on it is for the ⌘V already sent as a keystroke.
+const LATE_PASTE_MS = 3000;
 
 const MODIFIER_CODES = ['MetaLeft', 'MetaRight', 'ShiftLeft', 'ShiftRight', 'AltLeft', 'AltRight', 'ControlLeft', 'ControlRight'];
 const MODIFIER_KEYCODES = new Set(MODIFIER_CODES.map((c) => MAC_KEYCODES[c]));
@@ -50,7 +52,7 @@ export function attachInput({
   // iPadOS claims these ⌘ shortcuts before any page sees them, so Ctrl+<key> stands in:
   // the Mac receives ⌘ for the rest of that chord (holding Ctrl and tapping Tab cycles apps).
   let remapCtrl = ctrlAsCmd;
-  let remappedCtrl; // the Ctrl keycode currently standing in for ⌘, if any
+  let cmdForCtrl = false; // a Ctrl key stands in for ⌘, until the last one is released
   const CMD = MAC_KEYCODES.MetaLeft;
   const CTRL_KEYCODES = [MAC_KEYCODES.ControlLeft, MAC_KEYCODES.ControlRight];
   const stolenByIPad = (code, shift) =>
@@ -167,6 +169,13 @@ export function attachInput({
 
   // ---- Mouse, trackpad and pen: direct mapping ----
 
+  const buttons = new Set(); // pressed on the host by a mouse or pen
+  /** `pointerup` means no button is left down, whichever it names. */
+  function releaseButtons() {
+    for (const button of buttons) send(Input.UP, { button });
+    buttons.clear();
+  }
+
   const moveEvent = 'onpointerrawupdate' in window ? 'pointerrawupdate' : 'pointermove';
   screens.addEventListener(moveEvent, (e) => {
     if (locked) {
@@ -203,6 +212,7 @@ export function attachInput({
     penGone(e);
     if (e.pointerType === 'pen') sendPen(e);
     sendMove(e.clientX, e.clientY, canvas);
+    buttons.add(e.button);
     send(Input.DOWN, { button: e.button });
   });
   screens.addEventListener('pointerup', (e) => {
@@ -210,12 +220,22 @@ export function attachInput({
     if (e.pointerType === 'touch') return trackpad ? tpUp(e) : touchUp(e);
     if (e.pointerType === 'pen') sendPen(e);
     sendMove(e.clientX, e.clientY, canvasOf(e));
-    send(Input.UP, { button: e.button });
+    releaseButtons();
   });
   screens.addEventListener('pointercancel', (e) => {
     if (e.pointerType === 'touch') (trackpad ? tpUp : touchUp)(e, true);
+    else releaseButtons();
     if (e.pointerType === 'pen') sendPen(null);
   });
+  // A pointer that ended away from the screens (capture failed, or the display under it went)
+  // never reaches the handlers above: don't leave it pressed.
+  for (const type of ['pointerup', 'pointercancel']) {
+    window.addEventListener(type, (e) => {
+      if (screens.contains(e.target)) return;
+      if (e.pointerType !== 'touch') releaseButtons();
+      else if (touches.has(e.pointerId)) (trackpad ? tpUp : touchUp)(e, true);
+    }, true);
+  }
   screens.addEventListener('contextmenu', (e) => e.preventDefault());
   screens.addEventListener('wheel', (e) => {
     const canvas = canvasOf(e);
@@ -261,6 +281,7 @@ export function attachInput({
         if (gesture.scrolling || gesture.done || touches.size !== 1) return;
         // Long press without moving: right-click instead of the pending left press.
         if (gesture.pressed) send(Input.UP, { button: 0 });
+        gesture.pressed = false;
         send(Input.DOWN, { button: 2 });
         send(Input.UP, { button: 2 });
         gesture.done = true;
@@ -551,10 +572,25 @@ export function attachInput({
     tp = undefined;
   }
 
-  function setTrackpad(on) {
-    trackpad = on;
-    tp = undefined;
+  /** Ends a gesture cut short: what it pressed on the host doesn't stay pressed. */
+  function endGestures() {
+    clearTimers();
+    if (gesture?.pressed) send(Input.UP, { button: 0 });
+    gesture = undefined;
+    if (tp) {
+      clearTimeout(tp.longTimer);
+      if (tp.dragging) {
+        send(Input.UP, { button: 0 });
+        cursorEl.classList.remove('down');
+      }
+      tp = undefined;
+    }
     touches.clear();
+  }
+
+  function setTrackpad(on) {
+    endGestures();
+    trackpad = on;
     cursorEl.classList.toggle('hidden', !on);
     if (on) {
       placeCursor();
@@ -566,6 +602,8 @@ export function attachInput({
 
   const heldKeys = new Set();
   let pasteHandled = true;
+  let pasteTimer;
+  let pasteSentAt = -Infinity; // when ⌘V last went as a keystroke, no paste event having come
   // Safari fires `paste` only into a focused text field, so ⌘ going down focuses the hidden
   // one until ⌘ is released: ⌘V then pastes this device's clipboard rather than the Mac's own.
   let focusedForPaste = false;
@@ -581,6 +619,10 @@ export function attachInput({
         heldKeys.delete(keycode);
       }
     }
+  }
+  function releaseAllKeys() {
+    releaseKeys();
+    cmdForCtrl = false;
   }
 
   function tapKey(keycode, shift) {
@@ -637,8 +679,11 @@ export function attachInput({
       // the Mac pastes what's on this device's clipboard. Without a focused text field some
       // browsers never fire it, so fall back to sending ⌘V as a plain keystroke.
       pasteHandled = false;
-      setTimeout(() => {
+      pasteSentAt = -Infinity;
+      clearTimeout(pasteTimer);
+      pasteTimer = setTimeout(() => {
         if (pasteHandled) return;
+        pasteSentAt = performance.now();
         log('info', 'paste: no paste event, sent ⌘V as a keystroke', { focused: document.activeElement === keySink });
         send(Input.KEY_DOWN, { keycode });
         send(Input.KEY_UP, { keycode });
@@ -656,14 +701,13 @@ export function attachInput({
     }
 
     e.preventDefault();
-    if (macHost && remapCtrl && !pc && !remappedCtrl && e.ctrlKey && !cmdHeld(e) && stolenByIPad(code, e.shiftKey)) {
-      // Swap the Ctrl the Mac already sees for ⌘, until Ctrl is released.
+    if (macHost && remapCtrl && !pc && !cmdForCtrl && e.ctrlKey && !cmdHeld(e) && stolenByIPad(code, e.shiftKey)) {
+      // Swap the Ctrl the Mac already sees (it may see none: held since before this page had
+      // focus) for ⌘, until Ctrl is released.
       for (const ctrl of CTRL_KEYCODES) {
-        if (heldKeys.delete(ctrl)) {
-          send(Input.KEY_UP, { keycode: ctrl });
-          remappedCtrl = ctrl;
-        }
+        if (heldKeys.delete(ctrl)) send(Input.KEY_UP, { keycode: ctrl });
       }
+      cmdForCtrl = true;
       heldKeys.add(CMD);
       send(Input.KEY_DOWN, { keycode: CMD });
     }
@@ -678,8 +722,9 @@ export function attachInput({
     const keycode = MAC_KEYCODES[code];
     if (keycode === undefined) return;
     e.preventDefault();
-    if (keycode === remappedCtrl) {
-      remappedCtrl = undefined;
+    if (cmdForCtrl && CTRL_KEYCODES.includes(keycode)) {
+      if (e.ctrlKey) return; // the other Ctrl is still down
+      cmdForCtrl = false;
       if (heldKeys.delete(CMD)) send(Input.KEY_UP, { keycode: CMD });
       return;
     }
@@ -690,8 +735,8 @@ export function attachInput({
   });
 
   window.addEventListener('blur', () => {
-    releaseKeys();
-    remappedCtrl = undefined;
+    releaseAllKeys();
+    releaseButtons();
     unfocusAfterPaste();
   });
 
@@ -699,6 +744,12 @@ export function attachInput({
     if (localField(e.target)) return;
     e.preventDefault();
     pasteHandled = true;
+    clearTimeout(pasteTimer);
+    if (performance.now() - pasteSentAt < LATE_PASTE_MS) {
+      pasteSentAt = -Infinity;
+      log('info', 'paste: came after ⌘V went as a keystroke, not pasting twice');
+      return;
+    }
     const data = e.clipboardData;
     const text = data?.getData('text/plain') ?? '';
     const html = data?.getData('text/html') || undefined;
@@ -782,22 +833,19 @@ export function attachInput({
     focusKeys,
     resetZoom,
     setCtrlAsCmd(on) {
-      releaseKeys();
-      remappedCtrl = undefined;
+      releaseAllKeys();
       remapCtrl = on;
     },
     setHostOs(os) {
-      releaseKeys();
-      remappedCtrl = undefined;
+      releaseAllKeys();
       macHost = os === 'macos';
     },
     setPcKeyboard(on) {
-      releaseKeys();
-      remappedCtrl = undefined;
+      releaseAllKeys();
       pc = on;
     },
     setSwapCmdOption(on) {
-      releaseKeys();
+      releaseAllKeys();
       swap = on;
     },
   };

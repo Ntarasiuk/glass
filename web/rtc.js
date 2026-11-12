@@ -30,6 +30,55 @@ export async function hostIdFor(hostKey) {
   return toB64url(digest.slice(0, 16));
 }
 
+/**
+ * Tracks were negotiated, this viewer is signed in and showing video, and still no picture:
+ * only then is the fault with RTP. A viewer at the sign-in screen, waiting to be let in, or
+ * paused gets no picture by design.
+ */
+export function rtpPictureOverdue({ rtp, live, showing, picture }) {
+  return rtp && live && showing && !picture;
+}
+
+/**
+ * Video numbers over RTP, from the connection's stats and the reading before them (`was`).
+ * A new connection counts from zero: its first reading only sets the baseline.
+ */
+export function rtpVideoStats(report, was) {
+  let frames = 0, bytes = 0, dropped = 0, jitter = 0, emitted = 0, decode = 0, rtt;
+  for (const r of report.values()) {
+    if (r.type === 'inbound-rtp' && r.kind === 'video') {
+      frames += r.framesDecoded ?? 0;
+      bytes += r.bytesReceived ?? 0;
+      dropped += (r.framesDropped ?? 0) + (r.freezeCount ?? 0);
+      jitter += r.jitterBufferDelay ?? 0;
+      emitted += r.jitterBufferEmittedCount ?? 0;
+      decode += r.totalDecodeTime ?? 0;
+    } else if (r.type === 'candidate-pair' && r.nominated && r.currentRoundTripTime != null) {
+      rtt = r.currentRoundTripTime * 1000;
+    }
+  }
+  const now = { frames, bytes, dropped, jitter, emitted, decode };
+  const last = was && frames >= was.frames && bytes >= was.bytes ? was : now;
+  const dEmitted = emitted - last.emitted;
+  const dFrames = frames - last.frames;
+  // One-way network time + jitter buffer + decode: what the viewer waits beyond capture.
+  const buffer = dEmitted > 0 ? ((jitter - last.jitter) / dEmitted) * 1000 : 0;
+  const decodeMs = dFrames > 0 ? ((decode - last.decode) / dFrames) * 1000 : 0;
+  const latency = (rtt ?? 0) / 2 + buffer + decodeMs;
+  return {
+    now,
+    stats: {
+      fps: dFrames,
+      mbps: ((bytes - last.bytes) * 8) / 1e6,
+      dropped: dropped - last.dropped,
+      latencyAvg: latency,
+      latencyMax: latency,
+      ...(rtt != null && { rtt }),
+      jitterBufferMs: buffer,
+    },
+  };
+}
+
 /** Displays a connection can carry as video tracks (the host's MAX_STREAMS). */
 const VIDEO_TRACKS = 4;
 
@@ -64,6 +113,7 @@ export function serveRtc({ port, hostKey, signalUrl, log, onVideo = () => {}, on
   // Each connection attempt has a generation (from the worker); everything posted carries
   // it, so a late message from an old connection can't reach a new one.
   let session; // { gen, pc, channels: Map<id, channel>, senders, dgram }
+  let attempt; // the connection being made, until it's open: { gen, ws }
   const api = {};
   let nextIncoming = -1;
 
@@ -122,6 +172,9 @@ export function serveRtc({ port, hostKey, signalUrl, log, onVideo = () => {}, on
   async function connect(gen) {
     teardown('reconnecting', false);
     const ws = new WebSocket(signalUrl);
+    attempt = { gen, ws };
+    // The worker can give up on this attempt at any step: nothing more comes of it then.
+    const stillWanted = () => { if (attempt?.gen !== gen) throw new Error('closed by client'); };
     const inbox = [];
     let wake;
     ws.onmessage = ({ data }) => { inbox.push(JSON.parse(data)); wake?.(); };
@@ -139,6 +192,7 @@ export function serveRtc({ port, hostKey, signalUrl, log, onVideo = () => {}, on
       const hello = await next(10_000);
       if (hello.t !== 'hello') throw new Error('unexpected reply from glassdesk.dev');
       if (!hello.online) throw new Error('This computer is offline, or remote access is turned off on it.');
+      stillWanted();
       const pc = new RTCPeerConnection({ iceServers: [{ urls: STUN }, ...(hello.iceServers ?? [])] });
       session = { gen, pc, channels: new Map(), senders: new Map() };
       const s = session;
@@ -191,6 +245,7 @@ export function serveRtc({ port, hostKey, signalUrl, log, onVideo = () => {}, on
         throw new Error("Couldn't verify this computer's identity; not connecting.");
       }
       await pc.setRemoteDescription({ type: 'answer', sdp: reply.sdp });
+      stillWanted();
       onMode(transceivers.some((t) => t.currentDirection === 'recvonly'));
       ws.close();
       await opened(pc, dgram);
@@ -200,8 +255,11 @@ export function serveRtc({ port, hostKey, signalUrl, log, onVideo = () => {}, on
         answerMs: Math.round(tAnswered - tGathered),
         connectMs: Math.round(performance.now() - tAnswered),
       });
+      stillWanted();
+      attempt = undefined;
       post(gen, { t: 'open' });
     } catch (e) {
+      if (attempt?.gen === gen) attempt = undefined;
       try { ws.close(); } catch {}
       if (session?.gen === gen) teardown('failed', false);
       post(gen, { t: 'failed', msg: e.message ?? String(e) });
@@ -210,6 +268,10 @@ export function serveRtc({ port, hostKey, signalUrl, log, onVideo = () => {}, on
 
   port.onmessage = ({ data: m }) => {
     if (m.t === 'connect') { connect(m.gen); return; }
+    if (m.t === 'close' && attempt?.gen === m.gen) {
+      try { attempt.ws.close(); } catch {}
+      attempt = undefined;
+    }
     const s = session;
     if (!s || m.gen !== s.gen) return;
     if (m.t === 'close') { teardown('closed by client', false); return; }
