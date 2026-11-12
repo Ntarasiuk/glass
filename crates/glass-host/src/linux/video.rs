@@ -318,6 +318,15 @@ fn encode_loop(
     bitrate: u32,
     scale: f64,
 ) {
+    let mut policy = match super::encode_policy::Policy::parse(
+        &std::env::var("GLASS_ENCODER").unwrap_or_default(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("{e}; using OpenH264");
+            super::encode_policy::Policy::parse("software").unwrap()
+        }
+    };
     let mut encoder: Option<VideoEncoder> = None;
     let mut applied_bitrate = bitrate;
     let mut last: Option<(Frame, u64)> = None;
@@ -338,8 +347,16 @@ fn encode_loop(
         }
         // Previews cover every monitor, shown or not.
         if has_fresh
-            && THUMBS_UNTIL.lock().unwrap().is_some_and(|t| t > std::time::Instant::now())
-            && monitor.thumb.lock().unwrap().as_ref().is_none_or(|(at, _)| at.elapsed() >= THUMB_EVERY)
+            && THUMBS_UNTIL
+                .lock()
+                .unwrap()
+                .is_some_and(|t| t > std::time::Instant::now())
+            && monitor
+                .thumb
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_none_or(|(at, _)| at.elapsed() >= THUMB_EVERY)
             && let Some((frame, _)) = last.as_ref()
             && let Some(small) = crate::thumbs::downscale(
                 &frame.data,
@@ -365,12 +382,14 @@ fn encode_loop(
         let Some((frame, captured_us)) = last.as_ref() else {
             continue;
         };
-        monitor.keyframe.store(false, Ordering::Relaxed);
 
         let size = (frame.width, frame.height);
         let mut force = wants_key;
         if encoder.as_ref().is_none_or(|e| e.source_size() != size) {
+            // Release the old GPU session before allocating its replacement.
+            encoder = None;
             match VideoEncoder::new(
+                &mut policy,
                 frame.width,
                 frame.height,
                 fps,
@@ -380,6 +399,7 @@ fn encode_loop(
                 Ok(e) => encoder = Some(e),
                 Err(e) => {
                     warn!("encoder: {e:#}");
+                    monitor.keyframe.store(true, Ordering::Relaxed);
                     continue;
                 }
             }
@@ -418,9 +438,19 @@ fn encode_loop(
         if !wants_key && crate::flow::held(slot as u8) {
             continue;
         }
+        force |= monitor.keyframe.swap(false, Ordering::Relaxed);
         let capture_us = if unsent { *captured_us } else { now_us() };
         unsent = false;
-        match encoder.as_mut().unwrap().encode(frame, force) {
+        // Recover on this retained frame, including when a static desktop produces
+        // no more PipeWire buffers. Each failed backend is tried only once per monitor.
+        let result = encode_recovering(
+            &mut encoder,
+            &mut policy,
+            frame,
+            force,
+            (fps, target, scale),
+        );
+        match result {
             Ok(Some((data, keyframe))) => {
                 let _ = frames.send(Arc::new(EncodedFrame {
                     stream: slot as u8,
@@ -432,83 +462,142 @@ fn encode_loop(
                 }));
             }
             Ok(None) => {}
-            Err(e) => {
-                warn!("encode: {e:#}");
-                if encoder.as_ref().is_some_and(VideoEncoder::is_hardware) {
-                    // Drop it; the next frame gets OpenH264 (and a keyframe).
-                    warn!("hardware encoding failed; using OpenH264 from now on");
-                    HARDWARE_FAILED.store(true, Ordering::Relaxed);
-                    encoder = None;
-                }
-            }
+            Err(e) => warn!("encode: {e:#}"),
         }
     }
 }
 
-/// Set once the VA-API encoder has failed: the host stays on OpenH264 after that.
-static HARDWARE_FAILED: AtomicBool = AtomicBool::new(false);
+fn encode_recovering(
+    encoder: &mut Option<VideoEncoder>,
+    policy: &mut super::encode_policy::Policy,
+    frame: &Frame,
+    mut force: bool,
+    (fps, target, scale): (u32, u32, f64),
+) -> Result<Option<(Vec<u8>, bool)>> {
+    loop {
+        match encoder
+            .as_mut()
+            .context("encoder not initialized")?
+            .encode(frame, force)
+        {
+            Err(e) if encoder.as_ref().unwrap().backend().is_some() => {
+                let backend = encoder.as_ref().unwrap().backend().unwrap();
+                warn!(
+                    "{} encode failed: {e:#}; trying the next encoder",
+                    backend.label()
+                );
+                policy.fail(backend);
+                // Release the failed session before allocating the next one.
+                *encoder = None;
+                *encoder = Some(VideoEncoder::new(
+                    policy,
+                    frame.width,
+                    frame.height,
+                    fps,
+                    target,
+                    scale,
+                )?);
+                force = true;
+            }
+            result => return result,
+        }
+    }
+}
 
-/// OpenH264, or with `GLASS_ENCODER=vaapi` the GPU through VA-API. Opt-in for now: with
-/// frames captured into system memory, copying them to a discrete GPU costs about what
-/// software encoding does (the GPU path uses less CPU). Capturing DMA-BUFs would remove
-/// the copy.
+/// System-memory capture uses the same CPU conversion for either GPU backend.
+/// Hardware encode is opt-in; builds without it retain the OpenH264 default.
 enum VideoEncoder {
     Soft(Encoder),
-    #[cfg(feature = "vaapi")]
-    Va(super::va_encode::VaEncoder),
+    #[cfg(test)]
+    Fault(super::encode_policy::Backend),
+    #[cfg(feature = "gst-encode")]
+    Hardware(super::gst_encode::GstEncoder),
 }
 
 impl VideoEncoder {
-    fn new(width: usize, height: usize, fps: u32, bitrate: u32, scale: f64) -> Result<Self> {
-        let wants_vaapi = std::env::var("GLASS_ENCODER").is_ok_and(|e| e.eq_ignore_ascii_case("vaapi"));
-        #[cfg(not(feature = "vaapi"))]
-        if wants_vaapi && !HARDWARE_FAILED.swap(true, Ordering::Relaxed) {
-            warn!("GLASS_ENCODER=vaapi, but this build has no VA-API (--features vaapi); using OpenH264");
-        }
-        #[cfg(feature = "vaapi")]
-        if wants_vaapi
-            && !HARDWARE_FAILED.load(Ordering::Relaxed)
-            && super::va_encode::fits(width, height, scale)
-        {
-            match super::va_encode::VaEncoder::new(width, height, fps, bitrate, scale) {
-                Ok(e) => {
-                    info!("encoder: {} (VA-API)", e.name);
-                    return Ok(Self::Va(e));
+    fn new(
+        policy: &mut super::encode_policy::Policy,
+        width: usize,
+        height: usize,
+        fps: u32,
+        bitrate: u32,
+        scale: f64,
+    ) -> Result<Self> {
+        policy.source_changed(width, height);
+        while let Some(backend) = policy.next() {
+            let enabled = match backend {
+                super::encode_policy::Backend::Vaapi => cfg!(feature = "vaapi"),
+                super::encode_policy::Backend::Nvenc => cfg!(feature = "nvenc"),
+            };
+            if enabled {
+                #[cfg(feature = "gst-encode")]
+                match super::gst_encode::GstEncoder::new(
+                    backend, width, height, fps, bitrate, scale,
+                ) {
+                    Ok(e) => {
+                        info!(
+                            "encoder: {} ({}), source {width}x{height}",
+                            e.name,
+                            backend.label()
+                        );
+                        return Ok(Self::Hardware(e));
+                    }
+                    Err(e) => warn!(
+                        "{} unavailable: {e:#}; trying the next encoder",
+                        backend.label()
+                    ),
                 }
-                Err(e) => {
-                    warn!("VA-API encoder unavailable, using OpenH264: {e:#}");
-                    HARDWARE_FAILED.store(true, Ordering::Relaxed);
-                }
+            } else {
+                warn!(
+                    "{} was requested but is not compiled in; trying the next encoder",
+                    backend.label()
+                );
             }
+            policy.fail(backend);
         }
-        Ok(Self::Soft(Encoder::new(width, height, fps, bitrate, scale)?))
+        info!("encoder: OpenH264, source {width}x{height}");
+        Ok(Self::Soft(Encoder::new(
+            width, height, fps, bitrate, scale,
+        )?))
     }
 
-    fn is_hardware(&self) -> bool {
-        !matches!(self, Self::Soft(_))
+    fn backend(&self) -> Option<super::encode_policy::Backend> {
+        match self {
+            Self::Soft(_) => None,
+            #[cfg(test)]
+            Self::Fault(backend) => Some(*backend),
+            #[cfg(feature = "gst-encode")]
+            Self::Hardware(e) => Some(e.backend),
+        }
     }
 
     fn source_size(&self) -> (usize, usize) {
         match self {
             Self::Soft(e) => e.source_size(),
-            #[cfg(feature = "vaapi")]
-            Self::Va(e) => e.source_size(),
+            #[cfg(test)]
+            Self::Fault(_) => (320, 240),
+            #[cfg(feature = "gst-encode")]
+            Self::Hardware(e) => e.source_size(),
         }
     }
 
     fn set_bitrate(&mut self, bps: u32) {
         match self {
             Self::Soft(e) => e.set_bitrate(bps),
-            #[cfg(feature = "vaapi")]
-            Self::Va(e) => e.set_bitrate(bps),
+            #[cfg(test)]
+            Self::Fault(_) => {}
+            #[cfg(feature = "gst-encode")]
+            Self::Hardware(e) => e.set_bitrate(bps),
         }
     }
 
     fn encode(&mut self, frame: &Frame, force: bool) -> Result<Option<(Vec<u8>, bool)>> {
         match self {
             Self::Soft(e) => e.encode(frame, force),
-            #[cfg(feature = "vaapi")]
-            Self::Va(e) => e.encode(frame, force),
+            #[cfg(test)]
+            Self::Fault(_) => anyhow::bail!("injected hardware output timeout"),
+            #[cfg(feature = "gst-encode")]
+            Self::Hardware(e) => e.encode(frame, force),
         }
     }
 }
@@ -809,5 +898,38 @@ impl VideoSource for Video {
                 m.bitrate.store(bps, Ordering::Relaxed);
             }
         }
+    }
+}
+#[cfg(test)]
+mod encoder_tests {
+    use super::super::encode_policy::{Backend, Policy};
+    use super::*;
+
+    #[test]
+    fn hardware_failure_reencodes_retained_picture_without_another_capture() {
+        let frame = Frame {
+            width: 320,
+            height: 240,
+            stride: 320 * 4,
+            format: PixelFormat::Bgrx,
+            data: vec![128; 320 * 240 * 4],
+        };
+        let mut policy = Policy::parse("nvenc").unwrap();
+        policy.source_changed(frame.width, frame.height);
+        let mut encoder = Some(VideoEncoder::Fault(Backend::Nvenc));
+        let (data, keyframe) = encode_recovering(
+            &mut encoder,
+            &mut policy,
+            &frame,
+            false,
+            (60, 4_000_000, 1.0),
+        )
+        .unwrap()
+        .expect("fallback must produce output for this picture");
+        assert!(keyframe);
+        assert!(encoder.as_ref().unwrap().backend().is_none());
+        assert_eq!(policy.next(), None);
+        let mut decoder = openh264::decoder::Decoder::new().unwrap();
+        assert!(decoder.decode(&data).unwrap().is_some());
     }
 }

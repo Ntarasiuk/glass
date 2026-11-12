@@ -13,7 +13,7 @@ Windows shipped in 0.13.0 (beta); a ✅ there means it ran in a Windows 11 Arm V
 |---|---|---|---|---|
 | Capture every display | ✅ ScreenCaptureKit | ✅ portal + PipeWire | ✅ DXGI Desktop Duplication | |
 | Pointer in the picture | ✅ | ✅ | ✅ drawn on the CPU | |
-| Hardware H.264 | ✅ VideoToolbox | ✅ VA-API, opt-in | 🧪 Media Foundation | Windows falls back to OpenH264 |
+| Hardware H.264 | ✅ VideoToolbox | ✅ VA-API, opt-in; 🧪 NVENC | 🧪 Media Foundation | NVENC encode/decode tested on RTX 2080 Ti; portal-to-browser validation pending. Windows falls back to OpenH264 |
 | Software H.264 (OpenH264) | — | ✅ | ✅ | |
 | Up to 120 fps | ✅ | ❌ 60 | 🧪 with hardware encode | |
 | HEVC, sharp text 4:2:2 | ✅ | ❌ | ❌ | |
