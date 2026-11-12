@@ -4,6 +4,27 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
+/// Runs a change to the shared encoders' configuration: one at a time and in the order asked,
+/// on a thread of their own (each may restart capture, which blocks on ScreenCaptureKit). A
+/// job works out what's wanted when it runs, not when it was asked for, so the last to run has
+/// the last word whatever came between. The codec, sharp text, sizes and frame rate all go
+/// through here; a thread each, an older change could finish after a newer one.
+pub fn reconfigure(job: impl FnOnce() + Send + 'static) {
+    type Job = Box<dyn FnOnce() + Send>;
+    static WORKER: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> = std::sync::OnceLock::new();
+    let worker = WORKER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        let _ = std::thread::Builder::new().name("glass-encoders".into()).spawn(move || {
+            while let Ok(job) = rx.recv() {
+                // One that panics mustn't take every later change with it.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+            }
+        });
+        tx
+    });
+    let _ = worker.send(Box::new(job));
+}
+
 /// A capturable display. `id` is platform-specific (CGDirectDisplayID on macOS, the
 /// portal stream index on Linux).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -176,5 +197,34 @@ pub trait Clipboard: Send + Sync {
     /// The clipboard's image as PNG, if it holds one.
     fn image_png(&self) -> Option<Vec<u8>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex, mpsc};
+
+    use super::reconfigure;
+
+    #[test]
+    fn changes_run_in_order_and_outlive_a_panic() {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let started = ran.clone();
+        // Slow first: a later one doesn't overtake it.
+        reconfigure(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            started.lock().unwrap().push(1);
+        });
+        let second = ran.clone();
+        reconfigure(move || second.lock().unwrap().push(2));
+        reconfigure(|| panic!("this job fails; the worker doesn't"));
+        let (tx, rx) = mpsc::channel();
+        let third = ran.clone();
+        reconfigure(move || {
+            third.lock().unwrap().push(3);
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(*ran.lock().unwrap(), [1, 2, 3]);
     }
 }

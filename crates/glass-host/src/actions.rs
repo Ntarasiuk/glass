@@ -201,17 +201,37 @@ fn verify_assertion(cmd: &str, a: &Assertion, managers: &[Manager], rp_id: &str,
         .map_err(|_| anyhow::anyhow!("bad signature"))
 }
 
+/// What's in the nonce file. Damaged, it can't say what already ran, so nothing runs until
+/// every command it could have held has expired (`age_secs` after it was last written).
+fn parse_nonces(saved: Option<&[u8]>, age_secs: u64) -> Result<Vec<(String, u64)>> {
+    let Some(bytes) = saved else { return Ok(Vec::new()) };
+    match serde_json::from_slice(bytes) {
+        Ok(seen) => Ok(seen),
+        Err(_) if age_secs > COMMAND_SECS => Ok(Vec::new()),
+        Err(_) => bail!("this computer's record of commands is damaged; try again in a few minutes"),
+    }
+}
+
 /// Commands already run (nonces), so a copy can't run twice.
 fn first_use(nonce: &str, exp: u64) -> Result<()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = dir().join("nonces.json");
-    let mut seen: Vec<(String, u64)> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let saved = match std::fs::read(&path) {
+        Ok(b) => Some(b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).context("read this computer's record of commands"),
+    };
+    let age = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map_or(0, |d| d.as_secs());
+    let mut seen = parse_nonces(saved.as_deref(), age)?;
     seen.retain(|(_, e)| *e > now());
     ensure!(!seen.iter().any(|(n, _)| n == nonce), "that command was already run");
     seen.push((nonce.into(), exp));
     crate::fleet::ensure_dir()?;
-    crate::fleet::write_private(&path, &serde_json::to_vec(&seen)?)?;
+    // Written aside and moved in: a crash can't leave half a file.
+    let tmp = path.with_extension("json.tmp");
+    crate::fleet::write_private(&tmp, &serde_json::to_vec(&seen)?)?;
+    std::fs::rename(tmp, path)?;
     Ok(())
 }
 
@@ -559,6 +579,15 @@ mod tests {
     }
 
     #[test]
+    fn a_damaged_record_of_commands_runs_nothing_until_they_could_all_have_expired() {
+        assert!(parse_nonces(None, 0).unwrap().is_empty());
+        assert_eq!(parse_nonces(Some(br#"[["n",5]]"#), 0).unwrap(), vec![("n".to_string(), 5)]);
+        assert!(parse_nonces(Some(b"[[\"n"), 0).is_err());
+        assert!(parse_nonces(Some(b"[[\"n"), COMMAND_SECS).is_err());
+        assert!(parse_nonces(Some(b"[[\"n"), COMMAND_SECS + 1).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_key_is_read_from_a_p256_spki_only() {
         let p = Passkey::new();
         assert_eq!(point_from_spki(&b64url_decode(&p.spki()).unwrap()).unwrap().to_vec(), p.pair.public_key().as_ref().to_vec());
@@ -639,6 +668,14 @@ mod tests {
         let pid: i32 = std::fs::read_to_string(scripts.join("child.pid")).unwrap().trim().parse().unwrap();
         // SAFETY: signal 0 only checks that the process exists.
         assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "what the script started is gone too");
+
+        // Forgetting: nothing pinned is left to take commands from, and no link to pin one.
+        save_managers(&[Passkey::new().manager()]).unwrap();
+        start_enrollment().unwrap();
+        assert!(managed());
+        assert_eq!(forget_managers().unwrap(), 1);
+        assert!(!managed());
+        assert!(!dir.join("fleet").join("enroll.json").exists());
 
         // The fleet folder and what's in it are private.
         script(&dir, "p.sh", "#!/bin/sh\ntrue\n", 0o755);

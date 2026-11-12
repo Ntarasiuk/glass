@@ -77,12 +77,50 @@ fn status_path() -> std::path::PathBuf {
 }
 
 fn saved_status() -> Status {
-    let v: Value = std::fs::read(status_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    Status { paused: v["paused"] == true, stopped: v["stopped"] == true }
+    parse_status(std::fs::read(status_path()))
 }
 
+/// The saved status. None saved: agents may act. One that can't be read may have said stop,
+/// so it counts as stopped until the owner allows agents again.
+fn parse_status(saved: std::io::Result<Vec<u8>>) -> Status {
+    let stopped = Status { paused: false, stopped: true };
+    let bytes = match saved {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Status::default(),
+        Err(_) => return stopped,
+    };
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(v) if v.is_object() => {
+            let stop = v["stopped"] == true;
+            Status { paused: !stop && v["paused"] == true, stopped: stop }
+        }
+        _ => stopped,
+    }
+}
+
+/// Written aside and moved in, so a crash can't leave half a file.
 fn save_status(status: Status) {
-    let _ = std::fs::write(status_path(), json!({ "paused": status.paused, "stopped": status.stopped }).to_string());
+    let path = status_path();
+    let tmp = path.with_extension("json.tmp");
+    let saved = std::fs::write(&tmp, json!({ "paused": status.paused, "stopped": status.stopped }).to_string()).and_then(|_| std::fs::rename(&tmp, &path));
+    if let Err(e) = saved {
+        tracing::warn!("agent: can't save the status: {e}");
+    }
+}
+
+/// What the owner's `op` makes of `status`, and whether agents get a fresh hour; `None` for
+/// an op there's no such thing as. Stopped stays stopped until `allow`.
+fn next_status(status: Status, op: &str) -> Option<(Status, bool)> {
+    Some(match op {
+        "pause" if status.stopped => (status, false),
+        "pause" => (Status { paused: true, stopped: false }, false),
+        // Resuming also gives agents over their hourly limit a fresh hour.
+        "resume" if status.stopped || !status.paused => (status, false),
+        "resume" => (Status::default(), true),
+        "stop" => (Status { paused: false, stopped: true }, false),
+        "allow" => (Status::default(), status != Status::default()),
+        _ => return None,
+    })
 }
 
 /// A question's id: random, so one asked before a restart never matches one after.
@@ -123,31 +161,27 @@ pub fn guest_connected() -> bool {
 /// The owner, from a viewer: `pause`, `resume`, `stop` or `allow` (after a stop).
 pub fn control(op: &str) {
     let status = with(|s| {
-        match op {
-            "pause" => s.status.paused = true,
-            "resume" => s.status.paused = false,
-            "stop" => {
-                s.status = Status { paused: false, stopped: true };
-                // Nobody's waiting on answers from an agent that's been stopped.
-                // (Agents asking to be let in are a separate matter: they stay.)
-                let ids: Vec<u64> = s.asks.iter().filter(|(_, a)| a.kind != "consent").map(|(id, _)| *id).collect();
-                for id in ids {
-                    if let Some(ask) = s.asks.remove(&id) {
-                        let _ = ask.reply.send(Answer { ok: false, note: Some("stopped by the user".into()) });
-                        broadcast(ServerMsg::AgentAnswered { id });
-                    }
+        let (status, fresh_hour) = next_status(s.status, op)?;
+        s.status = status;
+        if op == "stop" {
+            // Nobody's waiting on answers from an agent that's been stopped.
+            // (Agents asking to be let in are a separate matter: they stay.)
+            let ids: Vec<u64> = s.asks.iter().filter(|(_, a)| a.kind != "consent").map(|(id, _)| *id).collect();
+            for id in ids {
+                if let Some(ask) = s.asks.remove(&id) {
+                    let _ = ask.reply.send(Answer { ok: false, note: Some("stopped by the user".into()) });
+                    broadcast(ServerMsg::AgentAnswered { id });
                 }
             }
-            "allow" => s.status = Status::default(),
-            _ => {}
         }
-        if matches!(op, "resume" | "allow") {
-            // Resuming also gives agents over their hourly limit a fresh hour.
+        if fresh_hour {
             crate::grants::reset_budgets();
         }
-        s.status
+        // Under the lock: two changes at once are saved in the order they happened.
+        save_status(status);
+        Some(status)
     });
-    save_status(status);
+    let Some(status) = status else { return };
     info!("agent: {op} (by the owner)");
     crate::testmode::record("agent", json!({ "op": op }));
     broadcast(ServerMsg::AgentStatus { status });
@@ -170,9 +204,9 @@ pub fn asks() -> Vec<Value> {
     })
 }
 
-/// The owner answered a question.
+/// The owner answered a question on this computer (the Glass app, the CLI).
 pub fn answer(id: u64, answer: Answer) {
-    answer_from(id, answer, false);
+    answer_from(id, answer, true);
 }
 
 /// When an agent under a grant last acted (ms since the epoch).
@@ -247,6 +281,8 @@ pub(crate) async fn may_act(look: bool) -> Result<(), Refused> {
                 "The user stopped the agent. Don't continue; tell them what you were doing.".into(),
             ));
         }
+        // Revoked while this waited (or just now): looking goes no further either.
+        crate::grants::check_live().map_err(Refused)?;
         let busy = !look && human_busy();
         if !status.paused && !busy {
             return Ok(());
@@ -330,9 +366,21 @@ pub(crate) fn announce(kind: &str, detail: String, at: Option<(u32, f32, f32)>) 
 /// Where the pointer was last put (global points), for checking what a click there reaches.
 static POINTER: Mutex<Option<(f64, f64)>> = Mutex::new(None);
 
+/// Stopped while a step of a longer action was coming: the rest of it doesn't happen.
+fn still_allowed() -> Result<(), Refused> {
+    if with(|s| s.status.stopped) {
+        return Err(Refused("The user stopped the agent. Don't continue; tell them what you were doing.".into()));
+    }
+    Ok(())
+}
+
 fn inject(events: impl IntoIterator<Item = InputEvent>) -> Result<(), Refused> {
     use crate::grants::{Target, check_input};
     let events: Vec<InputEvent> = events.into_iter().collect();
+    // Letting go is never refused: a button or key left down would stay down.
+    if events.iter().any(|e| !matches!(e, InputEvent::MouseUp { .. } | InputEvent::KeyUp { .. })) {
+        still_allowed()?;
+    }
     if events.iter().any(|e| matches!(e, InputEvent::KeyDown { .. })) {
         check_input(Target::Keys).map_err(Refused)?;
     }
@@ -353,6 +401,7 @@ fn inject(events: impl IntoIterator<Item = InputEvent>) -> Result<(), Refused> {
 }
 
 fn move_to(d: &DisplayInfo, x: f32, y: f32) -> Result<(), Refused> {
+    still_allowed()?;
     let at = (d.x + x as f64 * d.points_width, d.y + y as f64 * d.points_height);
     crate::grants::check_input(crate::grants::Target::Point(at.0, at.1)).map_err(Refused)?;
     *POINTER.lock().unwrap() = Some(at);
@@ -422,6 +471,17 @@ async fn follow(id: u32) -> Result<(), Refused> {
     tokio::task::spawn_blocking(move || crate::damage::follow(&shared.video, id)).await.map_err(|e| Refused(e.to_string()))
 }
 
+/// Runs its closure when dropped.
+struct OnDrop<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+
 fn button_code(name: Option<&str>) -> Result<u8, Refused> {
     Ok(match name.unwrap_or("left") {
         "left" => 0,
@@ -467,14 +527,19 @@ pub async fn drag(id: Option<u32>, from: [f64; 2], to: [f64; 2]) -> Result<Value
     let (tx, ty) = normalize(&d, to[0], to[1]);
     move_to(&d, fx, fy)?;
     inject([InputEvent::MouseDown { button: 0 }])?;
-    // In steps, so apps see a drag rather than a jump.
-    const STEPS: u32 = 12;
-    for i in 1..=STEPS {
-        let t = i as f32 / STEPS as f32;
-        tokio::time::sleep(Duration::from_millis(16)).await;
-        move_to(&d, fx + (tx - fx) * t, fy + (ty - fy) * t)?;
+    {
+        // However the drag ends (refused halfway, stopped, its request gone), the button comes up.
+        let _release = OnDrop(Some(|| {
+            let _ = inject([InputEvent::MouseUp { button: 0 }]);
+        }));
+        // In steps, so apps see a drag rather than a jump.
+        const STEPS: u32 = 12;
+        for i in 1..=STEPS {
+            let t = i as f32 / STEPS as f32;
+            tokio::time::sleep(Duration::from_millis(16)).await;
+            move_to(&d, fx + (tx - fx) * t, fy + (ty - fy) * t)?;
+        }
     }
-    inject([InputEvent::MouseUp { button: 0 }])?;
     announce("drag", format!("from {:.0}, {:.0} to {:.0}, {:.0}", from[0], from[1], to[0], to[1]), Some((d.id, tx, ty)));
     Ok(json!({ "ok": true }))
 }
@@ -594,6 +659,9 @@ struct Waiting {
     answer: Option<Option<Answer>>,
     /// Kept this long after the answer comes, for the agent to collect.
     until: Instant,
+    /// Calls waiting for the answer right now (an agent's retry and its first try): each gets
+    /// it, and the last one to collect it takes it away.
+    waiters: usize,
 }
 
 static WAITING: Mutex<Option<HashMap<u64, Waiting>>> = Mutex::new(None);
@@ -638,7 +706,7 @@ pub async fn ask(kind: &'static str, text: &str, wait: Option<Duration>) -> Resu
         return Err(Refused(format!("{open} of your questions are still waiting for the person; collect their answers with check_answer first.")));
     }
     let (id, rx) = post_ask(kind, &text, None);
-    waiting(|w| w.insert(id, Waiting { kind, asker: who, text: text.clone(), answer: None, until: Instant::now() + ASK_WAIT + KEEP_ANSWER }));
+    waiting(|w| w.insert(id, Waiting { kind, asker: who, text: text.clone(), answer: None, until: Instant::now() + ASK_WAIT + KEEP_ANSWER, waiters: 0 }));
     tokio::spawn(async move {
         let answer = collect(id, rx, ASK_WAIT).await;
         waiting(|w| {
@@ -668,11 +736,25 @@ pub async fn check_answer(id: u64, wait: Duration) -> Result<Value, Refused> {
 
 async fn wait_answer(id: u64, wait: Duration) -> Result<Value, Refused> {
     let start = Instant::now();
+    waiting(|w| w.get_mut(&id).map(|x| x.waiters += 1));
+    // Gone (its request ended) or done, this call isn't waiting any more.
+    let mut leave = OnDrop(Some(move || {
+        waiting(|w| w.get_mut(&id).map(|x| x.waiters = x.waiters.saturating_sub(1)));
+    }));
     loop {
         let state = waiting(|w| w.get(&id).map(|x| (x.kind, x.answer.clone())));
         match state {
             Some((kind, Some(answer))) => {
-                waiting(|w| w.remove(&id));
+                // Left and, if last, took it away: one step, so nobody finds it gone early.
+                leave.0 = None;
+                waiting(|w| {
+                    if let Some(x) = w.get_mut(&id) {
+                        x.waiters = x.waiters.saturating_sub(1);
+                        if x.waiters == 0 {
+                            w.remove(&id);
+                        }
+                    }
+                });
                 let answer = answer.ok_or_else(|| Refused("Nobody answered.".into()))?;
                 return Ok(match kind {
                     "confirm" => json!({ "kind": kind, "approved": answer.ok, "note": answer.note }),
@@ -984,7 +1066,13 @@ async fn http_act(peer: Peer, headers: HeaderMap, body: axum::body::Bytes) -> Re
         return r;
     }
     match serde_json::from_slice::<Action>(&body) {
-        Ok(action) => reply(act(action).await),
+        Ok(action) => {
+            // An agent on the owner's own tools can reach this computer's screen too.
+            AGENT_AT.store(epoch_ms(), std::sync::atomic::Ordering::Relaxed);
+            let result = act(action).await;
+            AGENT_AT.store(epoch_ms(), std::sync::atomic::Ordering::Relaxed);
+            reply(result)
+        }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
     }
 }
@@ -995,6 +1083,78 @@ mod tests {
 
     fn display(w: usize, h: usize) -> DisplayInfo {
         DisplayInfo { id: 99, width: w, height: h, x: 0.0, y: 0.0, points_width: w as f64, points_height: h as f64, main: true, builtin: false }
+    }
+
+    #[test]
+    fn stopped_stays_stopped_until_allowed() {
+        let stopped = Status { paused: false, stopped: true };
+        let paused = Status { paused: true, stopped: false };
+        let running = Status::default();
+        assert_eq!(next_status(stopped, "pause"), Some((stopped, false)), "never both");
+        assert_eq!(next_status(stopped, "resume"), Some((stopped, false)), "no fresh hour while stopped");
+        assert_eq!(next_status(stopped, "allow"), Some((running, true)));
+        assert_eq!(next_status(running, "pause"), Some((paused, false)));
+        assert_eq!(next_status(paused, "stop"), Some((stopped, false)));
+        assert_eq!(next_status(paused, "resume"), Some((running, true)));
+        assert_eq!(next_status(running, "resume"), Some((running, false)), "nothing to resume: no fresh hour");
+        assert_eq!(next_status(running, "allow"), Some((running, false)));
+        assert_eq!(next_status(running, "explode"), None);
+    }
+
+    #[test]
+    fn a_status_that_cant_be_read_counts_as_stopped() {
+        let stopped = Status { paused: false, stopped: true };
+        let missing = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(parse_status(missing), Status::default());
+        assert_eq!(parse_status(Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))), stopped);
+        assert_eq!(parse_status(Ok(b"{\"stopp".to_vec())), stopped);
+        assert_eq!(parse_status(Ok(b"null".to_vec())), stopped);
+        assert_eq!(parse_status(Ok(br#"{"paused":true,"stopped":false}"#.to_vec())), Status { paused: true, stopped: false });
+        assert_eq!(parse_status(Ok(br#"{"paused":true,"stopped":true}"#.to_vec())), stopped, "an old file with both");
+    }
+
+    #[test]
+    fn what_was_held_is_released_however_the_step_ends() {
+        let mut released = 0;
+        let mut refused = || -> Result<(), &'static str> {
+            let _up = OnDrop(Some(|| released += 1));
+            Err("refused halfway")
+        };
+        assert!(refused().is_err());
+        assert_eq!(released, 1);
+    }
+
+    #[tokio::test]
+    async fn a_retry_and_its_first_try_both_get_the_answer_then_it_is_gone() {
+        let id = new_ask_id();
+        waiting(|w| w.insert(id, Waiting { kind: "confirm", asker: "a".into(), text: "t".into(), answer: None, until: Instant::now() + Duration::from_secs(60), waiters: 0 }));
+        let first = tokio::spawn(wait_answer(id, Duration::from_secs(30)));
+        let retry = tokio::spawn(wait_answer(id, Duration::from_secs(30)));
+        while waiting(|w| w.get(&id).map_or(0, |x| x.waiters)) < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        waiting(|w| w.get_mut(&id).map(|x| x.answer = Some(Some(Answer { ok: true, note: None }))));
+        assert_eq!(first.await.unwrap().unwrap()["approved"], true);
+        assert_eq!(retry.await.unwrap().unwrap()["approved"], true);
+        assert!(wait_answer(id, Duration::ZERO).await.is_err(), "collected");
+    }
+
+    #[tokio::test]
+    async fn an_answer_nobody_was_there_for_stays_for_the_next_call() {
+        let id = new_ask_id();
+        waiting(|w| w.insert(id, Waiting { kind: "confirm", asker: "a".into(), text: "t".into(), answer: None, until: Instant::now() + Duration::from_secs(60), waiters: 0 }));
+        assert_eq!(wait_answer(id, Duration::ZERO).await.unwrap()["pending"], true);
+        assert_eq!(waiting(|w| w.get(&id).map(|x| x.waiters)), Some(0));
+        waiting(|w| w.get_mut(&id).map(|x| x.answer = Some(Some(Answer { ok: false, note: None }))));
+        assert_eq!(wait_answer(id, Duration::ZERO).await.unwrap()["approved"], false);
+        assert!(wait_answer(id, Duration::ZERO).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_revoked_agents_action_goes_no_further() {
+        // A grant the store has never heard of, as one revoked and dropped would be.
+        let actor = crate::grants::Actor::Agent(crate::grants::Grant::for_test(None));
+        assert!(crate::grants::ACTOR.scope(actor, may_act(true)).await.is_err());
     }
 
     #[test]

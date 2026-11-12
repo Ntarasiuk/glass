@@ -195,6 +195,35 @@ pub struct Access {
 }
 
 impl Grant {
+    /// A full-access grant for tests, optionally limited to some apps.
+    #[cfg(test)]
+    pub fn for_test(apps: Option<Vec<String>>) -> Grant {
+        Grant {
+            id: "t1".into(),
+            client_id: "c1".into(),
+            client_name: "Test".into(),
+            domain: "agent.example".into(),
+            subject: "user".into(),
+            scopes: vec![VIEW.into(), USE.into()],
+            apps,
+            created: 1000,
+            last_used: 1000,
+            approved_by: "test".into(),
+            revoked: false,
+            refresh: None,
+            retired: Vec::new(),
+            rotated: 0,
+            access: Vec::new(),
+        }
+    }
+
+    /// Ended for good: none of its tokens work, and it can't be refreshed.
+    fn end(&mut self) {
+        self.revoked = true;
+        self.refresh = None;
+        self.access.clear();
+    }
+
     pub fn live(&self, now: u64) -> bool {
         !self.revoked
             && now < self.created + MAX_SECS
@@ -340,25 +369,33 @@ pub fn create(mut g: Grant) -> Result<(Grant, Issued)> {
     let now = now();
     let issued = issue(&mut g, now);
     let out = g.clone();
-    let replaced = update(|s| {
-        s.grants.retain(|x| x.live(now));
-        // Approved again (or for more): this grant replaces the agent's earlier one.
-        let mut replaced = Vec::new();
-        for x in s.grants.iter_mut().filter(|x| x.client_id == g.client_id && x.subject == g.subject) {
-            x.revoked = true;
-            x.refresh = None;
-            x.access.clear();
-            replaced.push(x.clone());
-        }
-        s.grants.retain(|x| !x.revoked);
-        s.grants.push(g);
-        replaced
-    })?;
+    let replaced = update(|s| insert_new(s, g, now))?;
     for x in &replaced {
         audit(x, "revoked", "replaced by a new approval", None, true);
     }
     audit(&out, "granted", &out.summary(), None, true);
     Ok((out, issued))
+}
+
+/// Drops grants that are over. An app's grant running out ends its installation too: it asks
+/// the owner again, rather than getting a new grant by itself.
+fn prune(s: &mut Store, now: u64) {
+    let over: Vec<Grant> = s.grants.iter().filter(|g| !g.live(now) && !g.revoked).cloned().collect();
+    uninstall_apps(s, &over);
+    s.grants.retain(|x| x.live(now));
+}
+
+/// Adds a grant, ending the agent's earlier one (approved again, or for more); those it ended.
+fn insert_new(s: &mut Store, g: Grant, now: u64) -> Vec<Grant> {
+    prune(s, now);
+    let mut replaced = Vec::new();
+    for x in s.grants.iter_mut().filter(|x| x.client_id == g.client_id && x.subject == g.subject) {
+        x.end();
+        replaced.push(x.clone());
+    }
+    s.grants.retain(|x| !x.revoked);
+    s.grants.push(g);
+    replaced
 }
 
 pub enum Refreshed {
@@ -372,45 +409,65 @@ pub enum Refreshed {
 pub fn refresh(token: &str, client_id: &str) -> Result<Refreshed> {
     let h = hash(token);
     let now = now();
-    let out = update(|s| {
-        let Some(g) = s.grants.iter_mut().find(|g| g.client_id == client_id
-            && (g.refresh.as_deref() == Some(h.as_str()) || g.retired.contains(&h)))
-        else {
-            return Refreshed::Invalid;
-        };
-        if g.retired.contains(&h) {
-            if g.retired.last() == Some(&h) && now.saturating_sub(g.rotated) < REUSE_GRACE_SECS {
-                return Refreshed::Invalid;
-            }
-            g.revoked = true;
-            g.refresh = None;
-            g.access.clear();
-            return Refreshed::Reused(g.clone());
-        }
-        if !g.live(now) {
-            return Refreshed::Invalid;
-        }
-        let issued = issue(g, now);
-        Refreshed::Ok(g.clone(), issued)
-    })?;
+    let out = update(|s| refresh_in(s, &h, client_id, now))?;
     if let Refreshed::Reused(g) = &out {
         audit(g, "revoked", "a refresh token was used twice", None, false);
     }
     Ok(out)
 }
 
-/// Client credentials for an installed client: an access token (no refresh).
-pub fn app_token(client: &Client, domain: &str) -> Result<(Grant, Issued)> {
-    let now = now();
-    let existing = update(|s| {
-        let g = s.grants.iter_mut().find(|g| g.client_id == client.id && g.subject == "app" && g.live(now))?;
-        let issued = issue(g, now);
-        Some((g.clone(), issued))
-    })?;
-    if let Some(found) = existing {
-        return Ok(found);
+fn refresh_in(s: &mut Store, h: &str, client_id: &str, now: u64) -> Refreshed {
+    let Some(g) = s.grants.iter_mut().find(|g| g.client_id == client_id && (g.refresh.as_deref() == Some(h) || g.retired.iter().any(|r| r == h))) else {
+        return Refreshed::Invalid;
+    };
+    // Already over: said once, when it ended.
+    if g.revoked {
+        return Refreshed::Invalid;
     }
-    create(Grant {
+    if g.retired.iter().any(|r| r == h) {
+        if g.retired.last().is_some_and(|r| r == h) && now.saturating_sub(g.rotated) < REUSE_GRACE_SECS {
+            return Refreshed::Invalid;
+        }
+        g.end();
+        return Refreshed::Reused(g.clone());
+    }
+    if !g.live(now) {
+        return Refreshed::Invalid;
+    }
+    let issued = issue(g, now);
+    Refreshed::Ok(g.clone(), issued)
+}
+
+/// Client credentials for a client that's installed now, as the store says under its lock (a
+/// copy read before authenticating may be out of date): an access token (no refresh), or
+/// `None` when it isn't installed.
+pub fn app_token(client: &Client, domain: &str) -> Result<Option<(Grant, Issued)>> {
+    let now = now();
+    let Some((g, issued, replaced)) = update(|s| app_token_in(s, client, domain, now))? else {
+        return Ok(None);
+    };
+    if let Some(replaced) = replaced {
+        for x in &replaced {
+            audit(x, "revoked", "replaced by a new approval", None, true);
+        }
+        audit(&g, "granted", &g.summary(), None, true);
+    }
+    Ok(Some((g, issued)))
+}
+
+type AppTokens = (Grant, Issued, Option<Vec<Grant>>);
+
+/// `Some(replaced)` in the result when it made a new grant.
+fn app_token_in(s: &mut Store, client: &Client, domain: &str, now: u64) -> Option<AppTokens> {
+    prune(s, now);
+    if !s.clients.iter().any(|c| c.id == client.id && c.installed) {
+        return None;
+    }
+    if let Some(g) = s.grants.iter_mut().find(|g| g.client_id == client.id && g.subject == "app" && g.live(now)) {
+        let issued = issue(g, now);
+        return Some((g.clone(), issued, None));
+    }
+    let mut g = Grant {
         id: random("grant_")[..20].to_string(),
         client_id: client.id.clone(),
         client_name: client.name.clone(),
@@ -426,7 +483,83 @@ pub fn app_token(client: &Client, domain: &str) -> Result<(Grant, Issued)> {
         retired: Vec::new(),
         rotated: 0,
         access: Vec::new(),
+    };
+    let issued = issue(&mut g, now);
+    let replaced = insert_new(s, g.clone(), now);
+    Some((g, issued, Some(replaced)))
+}
+
+/// Registered clients kept.
+const MAX_CLIENTS: usize = 200;
+
+/// Room for one more client: at the limit, the oldest one nothing was ever granted to goes.
+/// False when none can.
+pub fn make_room(s: &mut Store, now: u64) -> bool {
+    if s.clients.len() < MAX_CLIENTS {
+        return true;
+    }
+    let used: Vec<&str> = s.grants.iter().map(|g| g.client_id.as_str()).collect();
+    let Some(i) = s.clients.iter().position(|x| !x.installed && !used.contains(&x.id.as_str()) && now.saturating_sub(x.created) > 3600) else {
+        return false;
+    };
+    s.clients.remove(i);
+    true
+}
+
+/// Lets a client use this computer unattended; its name, or `None` if there's no such client
+/// that can authenticate.
+pub fn install(id: &str) -> Result<Option<String>> {
+    update(|s| {
+        let c = s.clients.iter_mut().find(|c| c.id == id && c.auth_method != "none")?;
+        c.installed = true;
+        c.install_requested = false;
+        Some(c.name.clone())
     })
+}
+
+/// Takes unattended use back: the client's app grant ends and it can't get another. False if
+/// there's nothing to take back.
+pub fn uninstall(id: &str) -> Result<bool> {
+    let Some(ended) = update(|s| uninstall_in(s, id))? else { return Ok(false) };
+    for g in &ended {
+        audit(g, "revoked", "uninstalled by the owner", None, true);
+    }
+    Ok(true)
+}
+
+/// `None`: it wasn't installed and had no app grant.
+fn uninstall_in(s: &mut Store, id: &str) -> Option<Vec<Grant>> {
+    let client = s.clients.iter_mut().find(|c| c.id == id);
+    let was_installed = client.as_ref().is_some_and(|c| c.installed);
+    if let Some(c) = client {
+        c.installed = false;
+        c.install_requested = false;
+    }
+    let mut ended = Vec::new();
+    for g in s.grants.iter_mut().filter(|g| g.client_id == id && g.subject == "app" && !g.revoked) {
+        g.end();
+        ended.push(g.clone());
+    }
+    (was_installed || !ended.is_empty()).then_some(ended)
+}
+
+/// A client deleted itself (RFC 7592): it's gone, and so is whatever it was granted.
+pub fn delete_client(id: &str) -> Result<()> {
+    let ended = update(|s| delete_client_in(s, id))?;
+    for g in &ended {
+        audit(g, "revoked", "its client was deleted", None, true);
+    }
+    Ok(())
+}
+
+fn delete_client_in(s: &mut Store, id: &str) -> Vec<Grant> {
+    s.clients.retain(|c| c.id != id);
+    let mut ended = Vec::new();
+    for g in s.grants.iter_mut().filter(|g| g.client_id == id && !g.revoked) {
+        g.end();
+        ended.push(g.clone());
+    }
+    ended
 }
 
 /// Agents from other devices on or off. Off also stops publishing them with Funnel, since
@@ -461,28 +594,24 @@ pub fn by_access(token: &str) -> Option<Grant> {
 /// RFC 7009: a refresh token ends its grant; an access token ends just itself.
 pub fn revoke_token(token: &str, client_id: &str) -> Result<()> {
     let h = hash(token);
-    let ended = update(|s| {
-        // Any of the grant's tokens ends all of it: Vercel Connect revokes just the access
-        // token and forgets the connection, which would leave a live grant no one holds.
-        for g in s.grants.iter_mut().filter(|g| g.client_id == client_id && !g.revoked) {
-            if g.refresh.as_deref() == Some(h.as_str()) || g.retired.contains(&h) || g.access.iter().any(|a| a.hash == h) {
-                g.revoked = true;
-                g.refresh = None;
-                g.access.clear();
-                return Some(g.clone());
-            }
-        }
-        None
-    })?;
-    // An app's token revoked by its platform: it's uninstalled too.
-    if let Some(g) = ended.as_ref().filter(|g| g.subject == "app") {
-        let g = g.clone();
-        update(|s| uninstall_apps(s, std::slice::from_ref(&g)))?;
-    }
-    if let Some(g) = ended {
+    if let Some(g) = update(|s| revoke_token_in(s, &h, client_id))? {
         audit(&g, "revoked", "by the agent's platform", None, true);
     }
     Ok(())
+}
+
+fn revoke_token_in(s: &mut Store, h: &str, client_id: &str) -> Option<Grant> {
+    // Any of the grant's tokens ends all of it: Vercel Connect revokes just the access token
+    // and forgets the connection, which would leave a live grant no one holds.
+    let g = s.grants.iter_mut().find(|g| {
+        g.client_id == client_id && !g.revoked && (g.refresh.as_deref() == Some(h) || g.retired.iter().any(|r| r == h) || g.access.iter().any(|a| a.hash == h))
+    })?;
+    g.end();
+    let g = g.clone();
+    // An app's token revoked by its platform: it's uninstalled too, in the same step, so it
+    // can't get a new grant in between.
+    uninstall_apps(s, std::slice::from_ref(&g));
+    Some(g)
 }
 
 /// Ends grants by id (or all of them, for `None`); how many ended.
@@ -492,21 +621,27 @@ pub fn revoke(id: Option<&str>) -> Result<usize> {
 
 /// Ends grants by id (or all), saying why in the audit log.
 pub fn revoke_because(id: Option<&str>, why: &str) -> Result<usize> {
-    let ended = update(|s| {
-        let mut ended = Vec::new();
-        for g in s.grants.iter_mut().filter(|g| !g.revoked && id.is_none_or(|id| g.id == id)) {
-            g.revoked = true;
-            g.refresh = None;
-            g.access.clear();
-            ended.push(g.clone());
-        }
-        uninstall_apps(s, &ended);
-        ended
-    })?;
+    let ended = update(|s| revoke_in(s, id))?;
     for g in &ended {
         audit(g, "revoked", why, None, true);
     }
     Ok(ended.len())
+}
+
+fn revoke_in(s: &mut Store, id: Option<&str>) -> Vec<Grant> {
+    let mut ended = Vec::new();
+    for g in s.grants.iter_mut().filter(|g| !g.revoked && id.is_none_or(|id| g.id == id)) {
+        g.end();
+        ended.push(g.clone());
+    }
+    uninstall_apps(s, &ended);
+    // All of them: an installed client with no live grant could otherwise mint a new one.
+    if id.is_none() {
+        for c in &mut s.clients {
+            c.installed = false;
+        }
+    }
+    ended
 }
 
 /// An app's grant ended: it's no longer installed, so it can't simply get a new one.
@@ -640,21 +775,21 @@ pub fn cli(action: &str, id: Option<&str>, json_out: bool) -> Result<()> {
         "revoke" => {
             let id = id.context("which grant? `glass agents` lists them (or `all`)")?;
             let n = revoke((id != "all").then_some(id))?;
-            anyhow::ensure!(n > 0, "no live grant {id}");
+            // All: installed clients went too, whether or not they held a grant yet.
+            anyhow::ensure!(n > 0 || id == "all", "no live grant {id}");
             println!("Revoked {n} grant{}.", if n == 1 { "" } else { "s" });
         }
         "install" => {
             let id = id.context("which client? `glass agents` lists those asking")?;
-            let name = update(|s| {
-                let c = s.clients.iter_mut().find(|c| c.id == id && c.auth_method != "none")?;
-                c.installed = true;
-                c.install_requested = false;
-                Some(c.name.clone())
-            })?
-            .with_context(|| format!("no client {id} that can authenticate"))?;
+            let name = install(id)?.with_context(|| format!("no client {id} that can authenticate"))?;
             println!(
-                "{name} ({id}) can now use this computer unattended: see and use it, no app limits. Its name is its own claim; Glass hasn't verified who runs it. Undo: glass agents revoke <grant>"
+                "{name} ({id}) can now use this computer unattended: see and use it, no app limits. Its name is its own claim; Glass hasn't verified who runs it. Undo: glass agents uninstall {id}"
             );
+        }
+        "uninstall" => {
+            let id = id.context("which client? `glass agents` lists those installed")?;
+            anyhow::ensure!(uninstall(id)?, "client {id} isn't installed");
+            println!("{id} can't use this computer unattended any more.");
         }
         "on" | "off" => {
             set_enabled(action == "on")?;
@@ -698,6 +833,7 @@ pub fn cli(action: &str, id: Option<&str>, json_out: bool) -> Result<()> {
             let store = load();
             let live: Vec<&Grant> = store.grants.iter().filter(|g| g.live(now)).collect();
             let asking: Vec<&Client> = store.clients.iter().filter(|c| c.install_requested && !c.installed).collect();
+            let installed: Vec<&Client> = store.clients.iter().filter(|c| c.installed).collect();
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&json!({
                     "enabled": store.enabled,
@@ -705,6 +841,7 @@ pub fn cli(action: &str, id: Option<&str>, json_out: bool) -> Result<()> {
                         "subject": g.subject, "scopes": g.scopes, "apps": g.apps, "created": g.created,
                         "last_used": g.last_used, "approved_by": g.approved_by })).collect::<Vec<_>>(),
                     "install_requests": asking.iter().map(|c| json!({ "client_id": c.id, "name": c.name })).collect::<Vec<_>>(),
+                    "installed": installed.iter().map(|c| json!({ "client_id": c.id, "name": c.name })).collect::<Vec<_>>(),
                 }))?);
                 return Ok(());
             }
@@ -734,6 +871,9 @@ pub fn cli(action: &str, id: Option<&str>, json_out: bool) -> Result<()> {
                     g.approved_by,
                     ago(now.saturating_sub(g.last_used)),
                 );
+            }
+            for c in installed {
+                println!("{} is installed for unattended use: glass agents uninstall {}", c.name, c.id);
             }
             for c in asking {
                 println!(
@@ -776,17 +916,27 @@ pub enum Target {
     App(i32),
 }
 
+/// The grant is still in force, as the store says now: agents on, and not revoked or over.
+fn in_force(store: &Store, id: &str, now: u64) -> bool {
+    store.enabled && store.grants.iter().any(|x| x.id == id && x.live(now))
+}
+
+/// An agent under a grant whose grant ended (while its action waited, or ran) goes no further:
+/// a token is only checked as a request arrives. The owner's own tools have no grant to lose.
+pub fn check_live() -> Result<(), String> {
+    let Actor::Agent(g) = current() else { return Ok(()) };
+    if !in_force(&load(), &g.id, now()) {
+        return Err("This agent's access was revoked.".into());
+    }
+    Ok(())
+}
+
 /// Before input reaches the computer: an agent under a grant drives only allowed apps (as
 /// Accessibility sees what's actually under the pointer or has the keyboard), and never
 /// the protected ones or a password field.
 pub fn check_input(target: Target) -> Result<(), String> {
     let Actor::Agent(g) = current() else { return Ok(()) };
-    // Revoked (or stopped) while this action waited: nothing more goes through.
-    let now = now();
-    let store = load();
-    if !store.enabled || !store.grants.iter().any(|x| x.id == g.id && x.live(now)) {
-        return Err("This agent's access was revoked.".into());
-    }
+    check_live()?;
     if matches!(target, Target::Keys) && secure_input() {
         return Err("A password field has the keyboard (secure input is on). Ask the person to type it with request_help.".into());
     }
@@ -962,6 +1112,157 @@ mod tests {
         let mut revoked = grant();
         revoked.revoked = true;
         assert!(!revoked.live(1001));
+    }
+
+    fn client(id: &str, installed: bool) -> Client {
+        Client {
+            id: id.into(),
+            name: id.into(),
+            redirect_uris: Vec::new(),
+            auth_method: "client_secret_basic".into(),
+            grant_types: Vec::new(),
+            secret_hash: None,
+            jwks_uri: None,
+            jwks: None,
+            logo_uri: None,
+            registration_hash: String::new(),
+            created: 1000,
+            installed,
+            install_requested: false,
+        }
+    }
+
+    fn app_grant(client_id: &str) -> Grant {
+        Grant { id: format!("app-{client_id}"), client_id: client_id.into(), subject: "app".into(), ..grant() }
+    }
+
+    fn store(clients: Vec<Client>, grants: Vec<Grant>) -> Store {
+        Store { enabled: true, public: false, clients, grants }
+    }
+
+    #[test]
+    fn revoking_everything_uninstalls_even_a_client_with_no_grant_yet() {
+        let mut s = store(vec![client("never-used", true), client("in-use", true)], vec![app_grant("in-use")]);
+        let ended = revoke_in(&mut s, None);
+        assert_eq!(ended.len(), 1);
+        assert!(s.clients.iter().all(|c| !c.installed));
+        assert!(app_token_in(&mut s, &client("never-used", true), "x", 2000).is_none(), "it can't mint a new grant");
+    }
+
+    #[test]
+    fn revoking_one_grant_uninstalls_only_its_client() {
+        let mut s = store(vec![client("a", true), client("b", true)], vec![app_grant("a")]);
+        assert_eq!(revoke_in(&mut s, Some("app-a")).len(), 1);
+        assert!(!s.clients[0].installed);
+        assert!(s.clients[1].installed);
+    }
+
+    #[test]
+    fn an_app_token_goes_by_the_store_not_a_copy_read_earlier() {
+        // Installed when it authenticated; the owner revoked it before the token was made.
+        let stale = client("a", true);
+        let mut s = store(vec![client("a", false)], Vec::new());
+        assert!(app_token_in(&mut s, &stale, "x", 2000).is_none());
+        assert!(s.grants.is_empty());
+        // Still installed: a grant, then its tokens from the same grant.
+        let mut s = store(vec![client("a", true)], Vec::new());
+        let (first, _, made) = app_token_in(&mut s, &stale, "x", 2000).unwrap();
+        assert!(made.is_some());
+        let (again, _, made) = app_token_in(&mut s, &stale, "x", 2001).unwrap();
+        assert!(made.is_none());
+        assert_eq!(first.id, again.id);
+    }
+
+    #[test]
+    fn an_app_grant_running_out_ends_the_installation() {
+        let mut s = store(vec![client("a", true)], vec![app_grant("a")]);
+        assert!(app_token_in(&mut s, &client("a", true), "x", 1000 + IDLE_SECS).is_none(), "it asks again");
+        assert!(!s.clients[0].installed);
+        assert!(s.grants.is_empty());
+        // Even when another agent's approval is what notices.
+        let mut s = store(vec![client("a", true)], vec![app_grant("a")]);
+        insert_new(&mut s, grant(), 1000 + IDLE_SECS);
+        assert!(!s.clients[0].installed);
+    }
+
+    #[test]
+    fn revoking_an_apps_token_uninstalls_it_in_one_step() {
+        let mut g = app_grant("a");
+        issue(&mut g, 1000);
+        let token = g.access[0].hash.clone();
+        let mut s = store(vec![client("a", true)], vec![g]);
+        assert!(revoke_token_in(&mut s, &token, "other").is_none(), "only the client's own");
+        assert!(revoke_token_in(&mut s, &token, "a").is_some());
+        assert!(s.grants[0].revoked && s.grants[0].access.is_empty());
+        assert!(!s.clients[0].installed);
+    }
+
+    #[test]
+    fn uninstalling_takes_back_a_client_with_or_without_a_grant() {
+        let mut s = store(vec![client("a", true), client("b", true), client("c", false)], vec![app_grant("a")]);
+        assert_eq!(uninstall_in(&mut s, "a").unwrap().len(), 1);
+        assert!(s.grants[0].revoked);
+        assert!(uninstall_in(&mut s, "b").unwrap().is_empty());
+        assert!(s.clients.iter().all(|c| !c.installed));
+        assert!(uninstall_in(&mut s, "c").is_none(), "nothing to take back");
+        assert!(uninstall_in(&mut s, "nobody").is_none());
+    }
+
+    #[test]
+    fn deleting_a_client_ends_what_it_was_granted() {
+        let mut s = store(vec![client("a", true)], vec![grant_for("a"), app_grant("a"), grant_for("b")]);
+        assert_eq!(delete_client_in(&mut s, "a").len(), 2);
+        assert!(s.clients.is_empty());
+        assert!(s.grants[0].revoked && s.grants[0].refresh.is_none());
+        assert!(!s.grants[2].revoked);
+    }
+
+    fn grant_for(client_id: &str) -> Grant {
+        Grant { id: format!("user-{client_id}"), client_id: client_id.into(), ..grant() }
+    }
+
+    #[test]
+    fn a_refresh_token_used_twice_ends_the_grant_and_says_so_once() {
+        let mut g = grant();
+        let old = hash(&issue(&mut g, 2000).refresh.unwrap());
+        issue(&mut g, 2001);
+        let mut s = store(Vec::new(), vec![g]);
+        // Right after rotating: a retry, refused, nothing else.
+        assert!(matches!(refresh_in(&mut s, &old, "c1", 2002), Refreshed::Invalid));
+        assert!(!s.grants[0].revoked);
+        assert!(matches!(refresh_in(&mut s, &old, "c1", 2002 + REUSE_GRACE_SECS), Refreshed::Reused(_)));
+        assert!(s.grants[0].revoked);
+        assert!(matches!(refresh_in(&mut s, &old, "c1", 2003 + REUSE_GRACE_SECS), Refreshed::Invalid), "already over");
+    }
+
+    #[test]
+    fn a_full_store_makes_room_only_with_what_was_never_used() {
+        let mut s = store((0..MAX_CLIENTS).map(|i| client(&format!("c{i}"), false)).collect(), Vec::new());
+        assert!(make_room(&mut s, 1000 + 3601));
+        assert_eq!(s.clients.len(), MAX_CLIENTS - 1);
+        let mut s = store((0..MAX_CLIENTS).map(|i| client(&format!("c{i}"), true)).collect(), Vec::new());
+        assert!(!make_room(&mut s, 1000 + 3601), "all installed");
+        let mut s = store((0..MAX_CLIENTS).map(|i| client(&format!("c{i}"), false)).collect(), Vec::new());
+        assert!(!make_room(&mut s, 1000), "too new");
+    }
+
+    #[test]
+    fn a_grant_is_in_force_only_while_live_and_agents_are_on() {
+        let mut s = store(Vec::new(), vec![grant()]);
+        assert!(in_force(&s, "g1", 2000));
+        assert!(!in_force(&s, "other", 2000));
+        assert!(!in_force(&s, "g1", 1000 + IDLE_SECS));
+        s.enabled = false;
+        assert!(!in_force(&s, "g1", 2000));
+        s.enabled = true;
+        s.grants[0].end();
+        assert!(!in_force(&s, "g1", 2000));
+    }
+
+    #[test]
+    fn an_older_store_still_loads() {
+        let s: Store = serde_json::from_str(r#"{"clients":[{"id":"a","name":"A","redirect_uris":[],"auth_method":"none","registration_hash":"","created":1}]}"#).unwrap();
+        assert!(!s.clients[0].installed && !s.clients[0].install_requested);
     }
 
     #[test]

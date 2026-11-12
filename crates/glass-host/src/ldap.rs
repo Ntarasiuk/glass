@@ -326,18 +326,18 @@ async fn sign_in_route(
 /// A guest pass for a directory account the rules allow; `None` if they don't (or SCIM
 /// deactivated it).
 pub fn grant(person: &Person) -> Result<Option<crate::access::Granted>> {
-    let mut groups = person.groups.clone();
-    match crate::scim::account(&person.email) {
-        crate::scim::Account::Inactive => return Ok(None),
-        crate::scim::Account::Active(g) => groups.extend(g),
-        crate::scim::Account::Unknown => {}
-    }
-    let Some((scope, duration)) = crate::acl::decide(&crate::acl::effective(), &person.email, &groups) else {
+    let Some((scope, duration)) = crate::acl::allowed(&crate::scim::load(), &crate::acl::effective(), &person.email, &person.groups) else {
         return Ok(None);
     };
     let shared = crate::server::shared().context("host not ready")?;
     let file = crate::access::file_for(&shared.token_file);
-    Ok(Some(crate::access::grant_pass(&file, duration, scope, &person.email)?))
+    let granted = crate::access::grant_pass(&file, duration, scope, &person.email)?;
+    // Deactivated meanwhile: its passes may have been cut off before this one existed.
+    if matches!(crate::scim::account(&person.email), crate::scim::Account::Inactive) {
+        crate::access::revoke_account(&file, &person.email)?;
+        return Ok(None);
+    }
+    Ok(Some(granted))
 }
 
 #[cfg(test)]

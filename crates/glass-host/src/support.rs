@@ -108,6 +108,8 @@ pub struct Session {
     cancel: Option<String>,
     /// The link the code stands for (works on its own too).
     pub url: String,
+    /// That link's own code, to retire it when a new one takes over.
+    link: Option<String>,
     /// The host's web port (tests reach its /test hooks there).
     pub http_port: u16,
     /// Why there's no code, if there isn't.
@@ -119,14 +121,14 @@ pub struct Session {
     /// service, where `dir` is the service's real config: never deleted, however many
     /// times `stop` runs (it runs again on drop).
     owns_dir: bool,
+    /// It has ended: nothing more can start from it.
+    stopped: bool,
 }
 
 /// A session riding on the running background service: what to undo when it ends.
 struct Service {
     /// The codes of the links made for the helper (one per code handed out).
     links: Vec<String>,
-    /// Remote access was off before, so it goes off again.
-    remote_was_off: bool,
 }
 
 impl Service {
@@ -138,6 +140,68 @@ impl Service {
         }
         Ok(())
     }
+}
+
+/// Says quick support turned remote access on (a file, so it holds if `glass support` is
+/// killed): it goes off again with the last session, unless the owner has wanted it since.
+fn remote_marker() -> PathBuf {
+    crate::config_dir().join("support-remote-on")
+}
+
+/// The owner turned remote access on (or off) themselves: it's theirs now.
+pub fn owner_chose_remote() {
+    let _ = std::fs::remove_file(remote_marker());
+}
+
+/// Quick support turned remote access on and no session is left: back off it goes.
+fn restore_remote(access_file: &Path) {
+    if remote_marker().exists() && !crate::access::has_owned_links(access_file) {
+        owner_chose_remote();
+        if let Err(e) = crate::remote::set_enabled(false) {
+            tracing::warn!("support: couldn't turn remote access back off: {e:#}");
+        }
+    }
+}
+
+/// A lock `glass support` holds for as long as it runs. A process id alone can come back as
+/// someone else's process, which would keep a helper's access alive.
+fn owner_lock(pid: u32) -> PathBuf {
+    crate::config_dir().join(format!("support-{pid}.lock"))
+}
+
+/// Takes this process's lock, once, until it ends.
+fn hold_owner_lock() {
+    static HELD: std::sync::OnceLock<Option<std::fs::File>> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| {
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(owner_lock(std::process::id())).ok()?;
+        file.lock().ok()?;
+        Some(file)
+    });
+}
+
+/// Something still holds this lock. No such file: a process from before these, or one that
+/// couldn't make it, so there's nothing to go on but its process id.
+fn lock_held(path: &Path) -> bool {
+    let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) else { return true };
+    !matches!(file.try_lock(), Ok(()))
+}
+
+fn owner_alive(pid: u32) -> bool {
+    let path = owner_lock(pid);
+    let alive = crate::platform::process_alive(pid) && lock_held(&path);
+    if !alive {
+        let _ = std::fs::remove_file(path);
+    }
+    alive
+}
+
+/// The running host's safety net: helper links, and the access they gave, go once the `glass
+/// support` they belong to is gone, and remote access if that session turned it on. How many
+/// links went.
+pub fn reap_orphans(access_file: &Path) -> Result<usize> {
+    let n = crate::access::reap_orphaned_support(access_file, owner_alive)?;
+    restore_remote(access_file);
+    Ok(n)
 }
 
 /// Glass's background service is running here, for this user. Called before
@@ -177,14 +241,18 @@ impl Session {
             code: None,
             cancel: None,
             url: String::new(),
+            link: None,
             http_port,
             code_error: None,
             service: None,
             owns_dir: true,
+            stopped: false,
         };
         session.runner = Some(spawn_host(&dir, http_port, wt_port, test)?);
         session.wait_for_host()?;
-        session.url = new_link(&key)?.0;
+        let (url, code) = new_link(&key)?;
+        session.url = url;
+        session.link = Some(code);
         session.register();
         Ok(session)
     }
@@ -206,10 +274,13 @@ impl Session {
             .unwrap_or(0);
         let (url, code) = new_link(&key)?;
         // Last, once nothing else can fail, so a failed start never leaves it switched on.
-        let remote_was_off = !crate::remote::enabled();
-        if let Err(e) = crate::remote::set_enabled(true) {
-            let _ = crate::access::revoke_link(&crate::access::file_for(&crate::default_token_file()), &code, true);
-            return Err(e);
+        if !crate::remote::enabled() {
+            let turned_on = std::fs::write(remote_marker(), b"").map_err(anyhow::Error::from).and_then(|_| crate::remote::set_enabled(true));
+            if let Err(e) = turned_on {
+                owner_chose_remote();
+                let _ = crate::access::revoke_link(&crate::access::file_for(&crate::default_token_file()), &code, true);
+                return Err(e);
+            }
         }
         let mut session = Self {
             dir: crate::config_dir(),
@@ -218,10 +289,12 @@ impl Session {
             code: None,
             cancel: None,
             url,
+            link: Some(code.clone()),
             http_port,
             code_error: None,
-            service: Some(Service { links: vec![code], remote_was_off }),
+            service: Some(Service { links: vec![code] }),
             owns_dir: false,
+            stopped: false,
         };
         session.register();
         Ok(session)
@@ -261,8 +334,13 @@ impl Session {
 
     /// A new code (and link), say after the first was used or mistyped too often.
     pub fn new_code(&mut self) -> Result<()> {
+        anyhow::ensure!(!self.stopped, "this session has ended");
         self.revoke_code();
         let (url, code) = new_link(&crate::remote::HostKey::load_or_create()?)?;
+        // The old link goes with the old code; a helper it already let in stays.
+        if let Some(old) = self.link.replace(code.clone()) {
+            crate::access::retire_link(&crate::access::file_for(&crate::default_token_file()), &old)?;
+        }
         self.url = url;
         if let Some(service) = &mut self.service {
             service.links.push(code);
@@ -314,15 +392,16 @@ impl Session {
 
     /// Ends everything: the code, the host, and the session's files.
     pub fn stop(&mut self) {
+        if std::mem::replace(&mut self.stopped, true) {
+            return;
+        }
         self.revoke_code();
         if let Some(service) = self.service.take() {
             // The service's own config: undo what the session added, never delete it.
             if let Err(e) = service.revoke(true) {
                 tracing::warn!("support: couldn't revoke the helper's link: {e:#}");
             }
-            if service.remote_was_off {
-                let _ = crate::remote::set_enabled(false);
-            }
+            restore_remote(&crate::access::file_for(&crate::default_token_file()));
             return;
         }
         match self.runner.take() {
@@ -388,6 +467,7 @@ fn free_port(udp: bool) -> Result<u16> {
 fn new_link(key: &crate::remote::HostKey) -> Result<(String, String)> {
     let scope = crate::access::Scope { ask: true, support: true, ..Default::default() };
     // Owned by this process: if it ends without cleaning up, the host removes the link.
+    hold_owner_lock();
     let link = crate::access::create_owned_link(&crate::access::file_for(&crate::default_token_file()), CODE_TTL, GRANT, scope, Some(std::process::id()))?;
     Ok((crate::remote::link_url(key, &link.code), link.code))
 }
@@ -666,15 +746,49 @@ mod stop_tests {
             code: None,
             cancel: None,
             url: String::new(),
+            link: None,
             http_port: 0,
             code_error: None,
-            service: Some(Service { links: vec![], remote_was_off: false }),
+            service: Some(Service { links: vec![] }),
             owns_dir: false,
+            stopped: false,
         };
         session.stop();
         session.stop();
         drop(session);
         assert!(dir.join("token").exists(), "the service's config was deleted");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn nothing_starts_from_a_stopped_session() {
+        let mut session = Session {
+            dir: std::env::temp_dir(),
+            runner: None,
+            base: String::new(),
+            code: None,
+            cancel: None,
+            url: "the old one".into(),
+            link: None,
+            http_port: 0,
+            code_error: None,
+            service: None,
+            owns_dir: false,
+            stopped: true,
+        };
+        assert!(session.new_code().is_err());
+        assert_eq!(session.url, "the old one");
+    }
+
+    #[test]
+    fn a_lock_tells_a_running_owner_from_its_process_id_reused() {
+        let path = std::env::temp_dir().join(format!("glass-support-lock-{}", std::process::id()));
+        assert!(lock_held(&path), "no file: nothing to go on, so not called dead");
+        let holder = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).unwrap();
+        holder.lock().unwrap();
+        assert!(lock_held(&path), "its process is running");
+        drop(holder);
+        assert!(!lock_held(&path), "its process is gone; whatever has that id now isn't it");
+        std::fs::remove_file(&path).unwrap();
     }
 }

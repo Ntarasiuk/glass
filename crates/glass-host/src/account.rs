@@ -45,8 +45,10 @@ pub fn add() -> Result<Claim> {
     })
 }
 
-/// Takes this computer off every account it's on.
+/// Takes this computer off every account it's on. Whichever passkeys it pinned go first, even
+/// if the website can't be reached: it no longer takes commands from what it left.
 pub fn remove() -> Result<u64> {
+    crate::actions::forget_managers()?;
     let key = HostKey::load_or_create()?;
     let ts = now();
     let sig = key.sign(format!("glass-unclaim-v1\n{ts}").as_bytes())?;

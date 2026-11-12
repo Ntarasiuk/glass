@@ -81,7 +81,7 @@ pub async fn run(
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_secs(10));
-                match crate::access::reap_orphaned_support(&file, crate::platform::process_alive) {
+                match crate::support::reap_orphans(&file) {
                     Ok(0) => {}
                     Ok(n) => info!("support: removed {n} helper link(s) left by an ended glass support"),
                     Err(e) => warn!("support: couldn't clean up helper links: {e:#}"),
@@ -420,7 +420,7 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
     let keyed = Arc::new(std::sync::atomic::AtomicU8::new(0));
     // Its screen's size is known (or waited for long enough). A keyframe before that is the
     // wrong size: something else restarting the encoder as a viewer joins, say.
-    let sized = Arc::new(AtomicBool::new(false));
+    let sized = Arc::new(FirstSize::default());
     let perms = Arc::new(std::sync::OnceLock::new());
     let mic_on = Arc::new(AtomicBool::new(false));
     // Draws the pointer itself (crate::cursor): gets its position as datagrams. Who it is
@@ -479,9 +479,26 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                     }
                     flow.update(&mut link, now);
                 }
-                // While paused nothing's sent, so there's nothing to learn about the link.
-                _ = rate_tick.tick(), if acking.load(Ordering::Relaxed) && video_on.load(Ordering::Relaxed) => {
+                // Not before sign-in: someone not yet let in doesn't get to cap the shared encoders.
+                _ = rate_tick.tick(), if authed.load(Ordering::Relaxed) && acking.load(Ordering::Relaxed) => {
                     let now = std::time::Instant::now();
+                    // Said it acknowledges frames and doesn't: on its reports, like any viewer
+                    // that doesn't, rather than a cap with nothing behind it. (Acknowledging
+                    // after all brings it back.)
+                    let silent = link.acks_silent(now);
+                    if silent {
+                        info!("{peer}: frames aren't being acknowledged: pacing video by reports");
+                        link.stop_expecting_acks();
+                        acking.store(false, Ordering::Relaxed);
+                    }
+                    // Nor is a paused viewer's cap about anything: it isn't sent anything, so
+                    // nothing's learned about its link, and the others shouldn't wait on that.
+                    if silent || !video_on.load(Ordering::Relaxed) {
+                        if last_cap.take().is_some() {
+                            set_remote_cap(cap.0, None);
+                        }
+                        continue;
+                    }
                     let rate = ack_rate.get_or_insert_with(|| crate::rate::AckRate::new(shared.rate.lock().unwrap().max()));
                     let bps = rate.update(link.ack_sample(now), now);
                     link.set_pace(bps);
@@ -493,6 +510,16 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                 _ = quiet_check.tick() => {
                     if last_heard.elapsed() > QUIET_LIMIT {
                         bail!("viewer went quiet for {}s", QUIET_LIMIT.as_secs());
+                    }
+                    // Being there isn't being let in: a connection stays only while signing in.
+                    if !authed.load(Ordering::Relaxed) {
+                        let waited = session_started.elapsed();
+                        if ctl_rx.is_some() && waited > HELLO_WAIT {
+                            bail!("no control stream in {}s", HELLO_WAIT.as_secs());
+                        }
+                        if waited > SIGN_IN_LIMIT {
+                            bail!("not signed in after {}s", SIGN_IN_LIMIT.as_secs());
+                        }
                     }
                 }
                 frame = frames.recv() => {
@@ -519,7 +546,7 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                         if keyed.load(Ordering::Relaxed) & bit == 0 {
                             // The first display first: others wait for its first picture, then
                             // their viewer asks for theirs.
-                            if !frame.keyframe || !sized.load(Ordering::Relaxed) || (frame.stream != 0 && keyed.load(Ordering::Relaxed) & 1 == 0) {
+                            if !frame.keyframe || !sized.settled() || (frame.stream != 0 && keyed.load(Ordering::Relaxed) & 1 == 0) {
                                 *next_id = next_id.wrapping_add(1);
                                 continue;
                             }
@@ -604,7 +631,7 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                             }
                         }
                         Some(&KIND_MIC) if mic_on.load(Ordering::Relaxed) => crate::mic::packet(&dgram),
-                        Some(&glass_proto::KIND_FRAME_ACK) => {
+                        Some(&glass_proto::KIND_FRAME_ACK) if authed.load(Ordering::Relaxed) => {
                             if let Some((stream, id)) = glass_proto::read_frame_ack(&dgram) {
                                 if !acking.swap(true, Ordering::Relaxed) {
                                     info!("{peer}: frames acknowledged: pacing video by them");
@@ -638,10 +665,14 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                         driver,
                         acking: acking.clone(),
                     };
+                    // The control stream is the session: without it the viewer is off the list,
+                    // where nothing can disconnect it, so its video and input must end too.
+                    let conn = conn.clone();
                     tokio::spawn(async move {
                         if let Err(e) = control(ctx, send, recv, rx).await {
                             info!("{peer}: control ended: {e:#}");
                         }
+                        conn.close(0u32.into(), b"control stream ended");
                     });
                 }
                 stream = conn.accept_uni() => {
@@ -676,13 +707,6 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
     // Ending here (gone quiet, an error) must end the whole session: the control stream's
     // task holds the connection, and with it this viewer's place in the list.
     conn.close(0u32.into(), b"session ended");
-
-    // Anything still held, when no one else is giving input: another viewer may be holding
-    // Shift right now (each input stream lets go of its own keys when it ends).
-    if authed.load(Ordering::Relaxed) && INPUT_STREAMS.load(Ordering::Relaxed) == 0 {
-        shared.injector.lock().unwrap().release_all();
-        crate::gamepad::release_all();
-    }
     info!("client disconnected: {peer}");
     result
 }
@@ -696,7 +720,7 @@ struct SessionCtx {
     audio: Arc<crate::opus_audio::AudioTap>,
     video_on: Arc<AtomicBool>,
     keyed: Arc<std::sync::atomic::AtomicU8>,
-    sized: Arc<AtomicBool>,
+    sized: Arc<FirstSize>,
     /// The viewer asks for lost fragments again ("nack" in hello's codecs).
     nack_on: Arc<AtomicBool>,
     ctl_tx: mpsc::UnboundedSender<ServerMsg>,
@@ -711,6 +735,38 @@ struct SessionCtx {
     driver: u64,
     /// The viewer acknowledges frames: its bitrate comes from those, not its reports.
     acking: Arc<AtomicBool>,
+}
+
+/// Whether a new viewer's screen size has settled. Frames wait for it. It either says its size
+/// (and frames wait until that's in force, or a restart's keyframe goes out at the old one), or
+/// doesn't in time; once the viewer has said, the timer has no more say.
+#[derive(Default)]
+struct FirstSize(std::sync::atomic::AtomicU8);
+
+impl FirstSize {
+    const WAITING: u8 = 0;
+    const APPLYING: u8 = 1;
+    const SETTLED: u8 = 2;
+
+    /// Frames may go out.
+    fn settled(&self) -> bool {
+        self.0.load(Ordering::Relaxed) == Self::SETTLED
+    }
+
+    /// The viewer's viewport came: true if it's the first, which is for this caller to apply.
+    fn begin_first(&self) -> bool {
+        self.0.compare_exchange(Self::WAITING, Self::APPLYING, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    }
+
+    /// The first viewport is in force.
+    fn settle(&self) {
+        self.0.store(Self::SETTLED, Ordering::Relaxed);
+    }
+
+    /// Waited long enough: true if the viewer hadn't said anything by then.
+    fn give_up_waiting(&self) -> bool {
+        self.0.compare_exchange(Self::WAITING, Self::SETTLED, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    }
 }
 
 /// Bitrate-cap keys of viewers paced by frame acknowledgements, apart from the WebRTC
@@ -736,7 +792,10 @@ async fn control(
     mut ctl_rx: mpsc::UnboundedReceiver<ServerMsg>,
 ) -> Result<()> {
     let shared = &ctx.shared;
-    let hello = control::read_json::<ClientMsg>(&mut recv).await;
+    let Ok(hello) = tokio::time::timeout(HELLO_WAIT, control::read_json::<ClientMsg>(&mut recv)).await else {
+        info!("{}: no hello in {}s", ctx.conn.remote_address(), HELLO_WAIT.as_secs());
+        return Ok(());
+    };
     let peer = ctx
         .relayed
         .as_ref()
@@ -757,7 +816,7 @@ async fn control(
         return Ok(());
     }
     let hello_ok = matches!(hello, Ok(Some(ClientMsg::Hello { .. })));
-    let (token, link, pass, hello_device, codecs, ua, hello_cursor) = match hello {
+    let (token, link, pass, hello_device, codecs, ua, hello_cursor, hello_acks) = match hello {
         Ok(Some(ClientMsg::Hello {
             token,
             link,
@@ -767,13 +826,8 @@ async fn control(
             ua,
             cursor,
             acks,
-        })) => {
-            if acks {
-                ctx.acking.store(true, Ordering::Relaxed);
-            }
-            (token, link, pass, device, codecs, ua, cursor)
-        }
-        _ => (None, None, None, None, Vec::new(), None, false),
+        })) => (token, link, pass, device, codecs, ua, cursor, acks),
+        _ => (None, None, None, None, Vec::new(), None, false, false),
     };
     let mut device = crate::viewers::clean_device(hello_device.as_deref());
     let remote = ctx.relayed.is_some();
@@ -818,7 +872,7 @@ async fn control(
         if let Some(login) = tailscale::identity(peer).await {
             if owner.as_deref() == Some(login.as_str()) {
                 auth = Some(Auth::Tailnet);
-            } else if let Some(scope) = tailnet_guest_scope(&login) {
+            } else if let Some(scope) = crate::acl::tailnet_guest_scope(&login) {
                 // Someone else on the tailnet: the access rules name them, or the owner lets the
                 // whole tailnet in (tailnet-members).
                 auth = Some(Auth::TailnetGuest { login, scope });
@@ -852,7 +906,7 @@ async fn control(
     {
         refused(&device, "guest links are off by policy");
         let msg = "Guest links are turned off on this computer by its organization.".into();
-        control::write_json(&mut send, &ServerMsg::Denied { msg }).await?;
+        control::write_json(&mut send, &ServerMsg::Denied { msg, ended: false }).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
         ctx.conn.close(1u32.into(), b"links off");
         return Ok(());
@@ -955,7 +1009,7 @@ async fn control(
             refused(&device, "passkey check failed");
             // Denied, not an error: retrying on its own would only prompt again (and again).
             let msg = "This link needs a passkey, and it didn't check out. Try again, or ask for a new link.".into();
-            control::write_json(&mut send, &ServerMsg::Denied { msg }).await?;
+            control::write_json(&mut send, &ServerMsg::Denied { msg, ended: false }).await?;
             tokio::time::sleep(Duration::from_millis(200)).await;
             ctx.conn.close(1u32.into(), b"passkey required");
             return Ok(());
@@ -1010,7 +1064,7 @@ async fn control(
         warn!("{peer}: refused by device posture: {why}");
         refused(&device, &format!("posture: {why}"));
         let msg = format!("Not allowed: {why}.");
-        control::write_json(&mut send, &ServerMsg::Denied { msg }).await?;
+        control::write_json(&mut send, &ServerMsg::Denied { msg, ended: false }).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
         ctx.conn.close(1u32.into(), b"device posture");
         return Ok(());
@@ -1027,10 +1081,28 @@ async fn control(
         if let Some(cut) = who.rfind(" · ") {
             who.truncate(cut); // drop "· just now"
         }
-        if !crate::approval::ask(who).await {
+        let answer = crate::approval::ask(who).await;
+        if answer != crate::approval::Answer::Allowed {
+            // A guest told no doesn't get to ask again with the same pass; and whoever isn't
+            // the owner doesn't get to keep asking.
+            let mut ended = false;
+            if let (crate::approval::Answer::Denied, Auth::Guest { pass, .. }) = (answer, &auth) {
+                match crate::access::revoke_pass(&access_file, pass) {
+                    Ok(_) => ended = true,
+                    Err(e) => warn!("{peer}: couldn't revoke a refused guest's pass: {e:#}"),
+                }
+            }
+            if asked {
+                record_auth_failure(shared, peer);
+            }
             refused(&device, "not allowed");
-            let msg = "The person at this computer didn't let you in.".into();
-            control::write_json(&mut send, &ServerMsg::Denied { msg }).await?;
+            let msg = if ended {
+                "The person at this computer didn't let you in. To try again, ask them for a new link."
+            } else {
+                "The person at this computer didn't let you in."
+            }
+            .into();
+            control::write_json(&mut send, &ServerMsg::Denied { msg, ended }).await?;
             tokio::time::sleep(Duration::from_millis(200)).await;
             ctx.conn.close(1u32.into(), b"not allowed");
             return Ok(());
@@ -1038,6 +1110,9 @@ async fn control(
     }
 
     let _ = ctx.perms.set(perms);
+    if hello_acks {
+        ctx.acking.store(true, Ordering::Relaxed);
+    }
     ctx.authed.store(true, Ordering::Relaxed);
     if let Some(r) = &ctx.relayed {
         crate::remote::bridge_authed(r.bridge);
@@ -1045,18 +1120,6 @@ async fn control(
     // A viewer far away may be on a slow link: size the first keyframe for one.
     if ctx.relayed.is_none() && ctx.conn.rtt() > FAR_RTT {
         cautious_start();
-    }
-    // The first keyframe goes out at this viewer's size: it sends its viewport as soon as
-    // it's welcome (a viewer that doesn't, or an old one, gets it after a moment).
-    {
-        let (keyed, sized, shared) = (ctx.keyed.clone(), ctx.sized.clone(), shared.clone());
-        tokio::spawn(async move {
-            tokio::time::sleep(FIRST_VIEWPORT_WAIT).await;
-            let waited_for_it = !sized.swap(true, Ordering::Relaxed);
-            if waited_for_it && keyed.load(Ordering::Relaxed) == 0 {
-                shared.video.request_keyframe(None);
-            }
-        });
     }
     match &auth {
         Auth::Token => info!("{peer}: authenticated via token"),
@@ -1136,7 +1199,7 @@ async fn control(
     let _viewing = crate::viewers::joined(viewer, ctx.conn.clone());
     // Recording every session (glass config record on), or when an owner asks.
     let mut recording = if settings.record {
-        match crate::recording::start(&device) {
+        match start_recording(&ctx, &device) {
             Ok(r) => Some(r),
             Err(e) => {
                 warn!("{peer}: recording: {e:#}");
@@ -1146,22 +1209,18 @@ async fn control(
     } else {
         None
     };
-    if let Auth::Guest { pass, .. } = &auth {
-        // A guest is cut off when its pass expires or is revoked (`glass link --revoke`).
-        let (conn, pass, file) = (ctx.conn.clone(), pass.clone(), access_file.clone());
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = conn.closed() => return,
-                    _ = tokio::time::sleep(GUEST_RECHECK) => {}
-                }
-                if crate::access::pass_expiry(&file, &pass).is_none() {
-                    info!("{}: guest access ended", conn.remote_address());
-                    conn.close(1u32.into(), b"access ended");
-                    return;
-                }
-            }
-        });
+    // A guest is cut off when what let it in ends: its pass expires or is revoked (`glass link
+    // --revoke`), or the access rules or the directory stop naming it, or name it for less.
+    match &auth {
+        Auth::Guest { pass, .. } => {
+            let (pass, file) = (pass.clone(), access_file.clone());
+            recheck_guest(ctx.conn.clone(), move || crate::access::pass_expiry(&file, &pass).is_some());
+        }
+        Auth::TailnetGuest { login, scope } => {
+            let (login, scope) = (login.clone(), *scope);
+            recheck_guest(ctx.conn.clone(), move || crate::acl::tailnet_guest_scope(&login) == Some(scope));
+        }
+        Auth::Token | Auth::Tailnet => {}
     }
 
     let displays = {
@@ -1192,6 +1251,7 @@ async fn control(
         browse: perms.owner && perms.files,
         nack: true,
         extend: cfg!(target_os = "macos") || crate::testmode::enabled(),
+        extend_ack: true,
         fit: cfg!(target_os = "macos") || crate::testmode::enabled(),
         support: crate::support::is_host()
             || matches!(&auth, Auth::Guest { scope, .. } if scope.support),
@@ -1224,6 +1284,18 @@ async fn control(
         codec: crate::codec::current(),
     };
     control::write_json(&mut send, &welcome).await?;
+    // The first keyframe goes out at this viewer's size: it sends its viewport as soon as
+    // it's welcome (a viewer that doesn't, or an old one, gets it after a moment). No frame
+    // goes before that, so none can get to it ahead of its welcome.
+    {
+        let (keyed, sized, shared) = (ctx.keyed.clone(), ctx.sized.clone(), shared.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(FIRST_VIEWPORT_WAIT).await;
+            if sized.give_up_waiting() && keyed.load(Ordering::Relaxed) == 0 {
+                shared.video.request_keyframe(None);
+            }
+        });
+    }
     let bps = shared.rate.lock().unwrap().target();
     control::write_json(&mut send, &ServerMsg::Bitrate { bps }).await?;
     if crate::privacy::active() {
@@ -1291,6 +1363,8 @@ async fn control(
     });
 
     let mut term = crate::terminal::Session::default();
+    // This viewer's microphone: let go of however the session ends.
+    let mut mic = crate::mic::Session::new(ctx.mic_on.clone());
     let refuse = |msg: &str| {
         let _ = ctx.ctl_tx.send(ServerMsg::Error { msg: msg.into() });
     };
@@ -1322,7 +1396,7 @@ async fn control(
             ClientMsg::Clipboard { .. } if !perms.clipboard => {
                 warn!("{peer}: clipboard is off for this link; ignored")
             }
-            ClientMsg::ClipboardImage if !perms.clipboard => {}
+            ClientMsg::ClipboardImage { .. } if !perms.clipboard => {}
             ClientMsg::Clipboard { text, html, paste } => {
                 match crate::clip::html_for_viewer(html) {
                     Some(html) => shared.clipboard.set(&crate::clip::Clip { text, html: Some(html), image: None }),
@@ -1332,13 +1406,13 @@ async fn control(
                     shared.injector.lock().unwrap().paste();
                 }
             }
-            ClientMsg::ClipboardImage => {
+            ClientMsg::ClipboardImage { id } => {
                 let (clipboard, conn) = (shared.clipboard.clone(), ctx.conn.clone());
                 let ctl = ctx.ctl_tx.clone();
                 tokio::spawn(async move {
                     let png = tokio::task::spawn_blocking(move || clipboard.image_png()).await.ok().flatten();
                     let result = match png {
-                        Some(png) if png.len() <= crate::clip::MAX_IMAGE => crate::clip::send_image(&conn, &png).await,
+                        Some(png) if png.len() <= crate::clip::MAX_IMAGE => crate::clip::send_image(&conn, &png, id).await,
                         Some(_) => Err(anyhow::anyhow!("The image on the clipboard is too big to send (over 8 MB).")),
                         None => Err(anyhow::anyhow!("There's no image on the clipboard any more.")),
                     };
@@ -1369,7 +1443,13 @@ async fn control(
             }
             ClientMsg::PushSubscribe { subscription } => {
                 let (device, owner) = (device.clone(), perms.owner);
-                let reply = match tokio::task::spawn_blocking(move || crate::push::subscribe(subscription, &device, owner)).await? {
+                let credential = match &auth {
+                    Auth::Token => crate::push::Credential::Token(crate::grants::hash(&expected)),
+                    Auth::Tailnet => crate::push::Credential::Tailnet,
+                    Auth::TailnetGuest { login, .. } => crate::push::Credential::TailnetGuest(login.clone()),
+                    Auth::Guest { pass, .. } => crate::push::Credential::Pass(crate::access::pass_id(pass)),
+                };
+                let reply = match tokio::task::spawn_blocking(move || crate::push::subscribe(subscription, &device, owner, credential)).await? {
                     Ok(key) => {
                         info!("{peer}: notifications on");
                         ServerMsg::Push { key: Some(key), owner }
@@ -1397,8 +1477,16 @@ async fn control(
                 refuse("Only this computer's owner can change its display shape.")
             }
             ClientMsg::Fit { size } => fit(&ctx, viewport_id, size).await?,
-            ClientMsg::Extend { .. } if guest => refuse("Only this computer's owner can add a display."),
-            ClientMsg::Extend { size, hidpi } => extend(&ctx, viewport_id, size, hidpi).await?,
+            ClientMsg::Extend { .. } if guest => {
+                refuse("Only this computer's owner can add a display.");
+                let _ = ctx.ctl_tx.send(ServerMsg::Extended { on: false });
+            }
+            ClientMsg::Extend { size, hidpi } => {
+                let up = extend(&ctx, viewport_id, size, hidpi).await?;
+                if size.is_some() {
+                    let _ = ctx.ctl_tx.send(ServerMsg::Extended { on: up });
+                }
+            }
             // Sharp text keeps this viewer at native size, whatever its screen.
             ClientMsg::Viewport { .. } if sharp_on => {}
             ClientMsg::LosslessReset => lossless_reset.store(true, Ordering::Relaxed),
@@ -1419,15 +1507,19 @@ async fn control(
                     .take(MAX_STREAMS)
                     .map(|s| s.map(|[w, h]| [w.min(16_384), h.min(16_384)]))
                     .collect();
-                if ctx.sized.load(Ordering::Relaxed) {
-                    crate::resolution::set(viewport_id, Some(streams));
-                } else {
+                if ctx.sized.begin_first() {
                     info!("{peer}: first viewport {streams:?}");
-                    crate::resolution::set_now(viewport_id, streams).await;
+                    // (Not forever: a capture that won't restart shouldn't cost it the picture.)
+                    let applied = crate::resolution::set_now(viewport_id, streams);
+                    if tokio::time::timeout(FIRST_SIZE_LIMIT, applied).await.is_err() {
+                        warn!("{peer}: its first size is taking a while; going on");
+                    }
                     // Frames may go out from here. A new size's restart has just made a
                     // keyframe, which they missed: ask for one in the size now in force.
-                    ctx.sized.store(true, Ordering::Relaxed);
+                    ctx.sized.settle();
                     shared.video.request_keyframe(None);
+                } else {
+                    crate::resolution::set(viewport_id, Some(streams));
                 }
             }
             ClientMsg::Log { lines } => {
@@ -1475,10 +1567,10 @@ async fn control(
             {
                 refuse("The file browser is for the computer's owner.")
             }
-            ClientMsg::FilesList { path, hidden } => {
+            ClientMsg::FilesList { path, hidden, req } => {
                 let tx = ctx.ctl_tx.clone();
                 tokio::task::spawn_blocking(move || {
-                    let _ = tx.send(files_listing(&path, hidden));
+                    let _ = tx.send(files_listing(&path, hidden, req));
                 });
             }
             ClientMsg::FilesFetch { path } => {
@@ -1686,8 +1778,7 @@ async fn control(
             }
             ClientMsg::Mic { .. } if !perms.input => refuse("This link is view only."),
             ClientMsg::Mic { on } => {
-                ctx.mic_on.store(on, Ordering::Relaxed);
-                crate::mic::active(on);
+                mic.set(on);
                 info!("{peer}: microphone {}", if on { "on" } else { "off" });
             }
             ClientMsg::Term(_) if guest => refuse(OWNER_ONLY),
@@ -1699,8 +1790,9 @@ async fn control(
             }
             ClientMsg::Record { .. } if guest => refuse(OWNER_ONLY),
             ClientMsg::Record { on } => {
-                if on && recording.is_none() {
-                    match crate::recording::start(&device) {
+                // (One that stopped by itself, on a full disk say, doesn't count.)
+                if on && !recording.as_ref().is_some_and(|r| r.running()) {
+                    match start_recording(&ctx, &device) {
                         Ok(r) => {
                             let path = Some(r.path.display().to_string());
                             recording = Some(r);
@@ -1716,10 +1808,16 @@ async fn control(
             }
         }
     }
-    if ctx.mic_on.load(Ordering::Relaxed) {
-        crate::mic::active(false);
-    }
     Ok(())
+}
+
+/// Starts a recording of what's streamed for a viewer, who's told if it stops by itself.
+fn start_recording(ctx: &SessionCtx, device: &str) -> Result<crate::recording::Recording> {
+    let tx = ctx.ctl_tx.clone();
+    crate::recording::start(device, move |path, why| {
+        let _ = tx.send(ServerMsg::Error { msg: format!("Recording stopped: {why}") });
+        let _ = tx.send(ServerMsg::Recording { on: false, path: Some(path.display().to_string()) });
+    })
 }
 
 /// Chat messages and drawings are capped (characters / serialized bytes).
@@ -1748,10 +1846,10 @@ pub fn host_chat(text: &str) -> Result<usize> {
 }
 
 /// A folder for the file browser, or why it can't be shown.
-fn files_listing(path: &str, hidden: bool) -> ServerMsg {
+fn files_listing(path: &str, hidden: bool, req: Option<u32>) -> ServerMsg {
     match crate::browse::list(&crate::browse::root(), path, hidden) {
-        Ok(l) => ServerMsg::Files { path: l.path, entries: l.entries, truncated: l.truncated, ticket: crate::browse::ticket(), error: None },
-        Err(e) => ServerMsg::Files { path: path.into(), entries: Vec::new(), truncated: false, ticket: String::new(), error: Some(format!("{e:#}")) },
+        Ok(l) => ServerMsg::Files { path: l.path, entries: l.entries, truncated: l.truncated, ticket: crate::browse::ticket(), error: None, req },
+        Err(e) => ServerMsg::Files { path: path.into(), entries: Vec::new(), truncated: false, ticket: String::new(), error: Some(format!("{e:#}")), req },
     }
 }
 
@@ -1760,7 +1858,7 @@ fn files_changed(tx: &mpsc::UnboundedSender<ServerMsg>, folder: &str, result: Re
     if let Err(e) = result {
         let _ = tx.send(ServerMsg::Error { msg: format!("{e:#}") });
     }
-    let _ = tx.send(files_listing(folder, false));
+    let _ = tx.send(files_listing(folder, false, None));
 }
 
 fn parent_of(path: &str) -> String {
@@ -1805,6 +1903,11 @@ struct Fit {
 #[cfg(target_os = "macos")]
 static FIT: Mutex<Option<Fit>> = Mutex::new(None);
 
+/// One display being fitted or added at a time: `FIT` is empty while one is being replaced,
+/// and two viewers at it together would each make a display, with one left to be dropped.
+#[cfg(target_os = "macos")]
+static DISPLAY_CHANGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(target_os = "macos")]
 async fn fit(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>) -> Result<()> {
     if crate::testmode::enabled() {
@@ -1812,6 +1915,7 @@ async fn fit(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>) -> Result<(
         return Ok(());
     }
     let peer = ctx.conn.remote_address();
+    let _one = DISPLAY_CHANGE.lock().await;
     // Put any current one back first (dropping it unmirrors and removes it).
     let old = FIT.lock().unwrap().take();
     // The display to reshape: the one this fit replaces mirrored, else the one being
@@ -1880,6 +1984,10 @@ async fn fit(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>) -> Result<(
             warn!("{peer}: fit {w}×{h} failed: {e:#}");
             let msg = format!("Couldn't fit this device: {e:#}");
             let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
+            // The display it replaces is gone, and what was streaming it needs somewhere to go.
+            if had {
+                set_layout(ctx, Layout::Single(target)).await?;
+            }
             return Ok(());
         }
     };
@@ -1947,10 +2055,10 @@ async fn fit(ctx: &SessionCtx, _session: u64, size: Option<[u32; 2]>) -> Result<
 #[cfg(target_os = "macos")]
 static EXTENDED: Mutex<Vec<(u64, crate::platform::virtual_display::VirtualDisplay)>> = Mutex::new(Vec::new());
 
-async fn extend(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>, hidpi: bool) -> Result<()> {
+async fn extend(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>, hidpi: bool) -> Result<bool> {
     if crate::testmode::enabled() {
         crate::testmode::record("extend", serde_json::json!({ "size": size, "hidpi": hidpi }));
-        return Ok(());
+        return Ok(size.is_some());
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1959,11 +2067,12 @@ async fn extend(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>, hidpi: b
             let msg = "Using this device as a second display isn't available on Linux yet.".into();
             let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
         }
-        Ok(())
+        Ok(false)
     }
     #[cfg(target_os = "macos")]
     {
         let peer = ctx.conn.remote_address();
+        let _one = DISPLAY_CHANGE.lock().await;
         // This viewer's earlier one goes first (dropping it removes the display).
         let old: Vec<_> = {
             let mut list = EXTENDED.lock().unwrap();
@@ -1980,7 +2089,7 @@ async fn extend(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>, hidpi: b
                 info!("{peer}: second display removed");
                 set_layout(ctx, Layout::Single(None)).await?;
             }
-            return Ok(());
+            return Ok(false);
         };
         // Even sizes (and even points, for Retina).
         let (w, h) = if hidpi { (w & !3, h & !3) } else { (w & !1, h & !1) };
@@ -1996,7 +2105,11 @@ async fn extend(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>, hidpi: b
                 warn!("{peer}: second display {w}×{h} failed: {e:#}");
                 let msg = format!("Couldn't add a display: {e:#}");
                 let _ = ctx.ctl_tx.send(ServerMsg::Error { msg });
-                return Ok(());
+                // Its earlier one is gone, and it may have been streaming that.
+                if had {
+                    set_layout(ctx, Layout::Single(None)).await?;
+                }
+                return Ok(false);
             }
         };
         let id = display.id;
@@ -2013,7 +2126,7 @@ async fn extend(ctx: &SessionCtx, session: u64, size: Option<[u32; 2]>, hidpi: b
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        set_layout(ctx, Layout::Single(Some(id))).await
+        try_layout(ctx, Layout::Single(Some(id))).await
     }
 }
 
@@ -2030,17 +2143,13 @@ fn end_extend(session: u64, shared: Arc<Shared>) {
         if mine.is_empty() {
             return;
         }
-        WINDOW_WATCH.fetch_add(1, Ordering::Relaxed);
         tokio::task::spawn_blocking(move || {
             let gone: Vec<u32> = mine.iter().map(|(_, d)| d.id).collect();
             drop(mine);
             // Only move the others off it if it was what they were watching.
             let streaming_it = shared.video.streams().iter().any(|d| gone.contains(&d.id));
-            if streaming_it && let Ok(streams) = shared.video.set_layout(Layout::Single(None)) {
-                let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
-                shared.injector.lock().unwrap().set_displays(&ids);
-                let displays = shared.video.displays().ok();
-                let _ = shared.events.send(ServerMsg::Layout { streams, displays });
+            if streaming_it {
+                let _ = apply_layout(&shared, Layout::Single(None), None);
             }
             info!("second display removed (its viewer left)");
         });
@@ -2056,15 +2165,9 @@ fn end_fit(session: u64, shared: Arc<Shared>) {
         let mut fit = FIT.lock().unwrap();
         if fit.as_ref().is_some_and(|f| f.owner == session) {
             let old = fit.take();
-            WINDOW_WATCH.fetch_add(1, Ordering::Relaxed);
             tokio::task::spawn_blocking(move || {
                 drop(old);
-                if let Ok(streams) = shared.video.set_layout(Layout::Single(None)) {
-                    let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
-                    shared.injector.lock().unwrap().set_displays(&ids);
-                    let displays = shared.video.displays().ok();
-                    let _ = shared.events.send(ServerMsg::Layout { streams, displays });
-                }
+                let _ = apply_layout(&shared, Layout::Single(None), None);
                 info!("displays restored (the viewer who fitted them left)");
             });
         }
@@ -2075,6 +2178,37 @@ fn end_fit(session: u64, shared: Arc<Shared>) {
 
 /// Bumped on every layout change, so a streamed window's watcher knows it's done.
 static WINDOW_WATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One layout change at a time, so what's captured, what input maps to and what viewers were
+/// told all end up describing the same one.
+static LAYOUT: Mutex<()> = Mutex::new(());
+
+/// Changes what's streamed, and all that goes with it. `Some`: done, with the new generation
+/// of [`WINDOW_WATCH`]. `None`: `only_at` was given and the layout has changed since then, so
+/// that change stands. Blocks on capture.
+fn apply_layout(shared: &Shared, layout: Layout, only_at: Option<u64>) -> Result<Option<u64>> {
+    let _one = LAYOUT.lock().unwrap_or_else(|e| e.into_inner());
+    if only_at.is_some_and(|at| WINDOW_WATCH.load(Ordering::Relaxed) != at) {
+        return Ok(None);
+    }
+    let streams = shared.video.set_layout(layout)?;
+    let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
+    info!("now streaming displays {ids:?}");
+    {
+        let mut injector = shared.injector.lock().unwrap();
+        injector.set_displays(&ids);
+        // A window: absolute coordinates on stream 0 land inside it.
+        let rect = match (layout, streams.first()) {
+            (Layout::Window(_), Some(d)) => Some([d.x, d.y, d.points_width, d.points_height]),
+            _ => None,
+        };
+        injector.set_window_rect(rect);
+    }
+    let generation = WINDOW_WATCH.fetch_add(1, Ordering::Relaxed) + 1;
+    let displays = shared.video.displays().ok();
+    let _ = shared.events.send(ServerMsg::Layout { streams, displays });
+    Ok(Some(generation))
+}
 
 /// While a window is streamed: follow it when it moves (input mapping), and go back to the
 /// main display when it closes.
@@ -2103,21 +2237,11 @@ async fn watch_window(shared: Arc<Shared>, id: u32, generation: u64) {
             }
             None => {
                 info!("window {id} closed; back to the main display");
-                WINDOW_WATCH.fetch_add(1, Ordering::Relaxed);
                 let video = shared.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    let streams = video.video.set_layout(Layout::Single(None))?;
-                    anyhow::Ok((streams, video.video.displays().ok()))
-                })
-                .await;
-                if let Ok(Ok((streams, displays))) = result {
-                    let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
-                    {
-                        let mut injector = shared.injector.lock().unwrap();
-                        injector.set_displays(&ids);
-                        injector.set_window_rect(None);
-                    }
-                    let _ = shared.events.send(ServerMsg::Layout { streams, displays });
+                let result = tokio::task::spawn_blocking(move || apply_layout(&video, Layout::Single(None), Some(generation))).await;
+                // Someone chose something else just then: nothing's left to come back from.
+                if matches!(result, Ok(Ok(None))) {
+                    return;
                 }
                 let msg = "The window you were viewing closed, so here's the main display.".into();
                 let _ = shared.events.send(ServerMsg::Error { msg });
@@ -2128,41 +2252,30 @@ async fn watch_window(shared: Arc<Shared>, id: u32, generation: u64) {
 }
 
 async fn set_layout(ctx: &SessionCtx, layout: Layout) -> Result<()> {
+    try_layout(ctx, layout).await.map(drop)
+}
+
+/// `set_layout`, saying whether the layout took (the viewer has been told if it didn't).
+async fn try_layout(ctx: &SessionCtx, layout: Layout) -> Result<bool> {
     let worker = ctx.shared.clone();
     let peer = ctx.conn.remote_address();
     info!("{peer}: layout {layout:?}");
-    let listed = tokio::task::spawn_blocking(move || {
-        let streams = worker.video.set_layout(layout)?;
-        anyhow::Ok((streams, worker.video.displays().ok()))
-    });
-    match listed.await? {
-        Ok((streams, displays)) => {
-            let ids: Vec<u32> = streams.iter().map(|d| d.id).collect();
-            info!("{peer}: now streaming displays {ids:?}");
-            {
-                let mut injector = ctx.shared.injector.lock().unwrap();
-                injector.set_displays(&ids);
-                // A window: absolute coordinates on stream 0 land inside it.
-                let rect = match (layout, streams.first()) {
-                    (Layout::Window(_), Some(d)) => Some([d.x, d.y, d.points_width, d.points_height]),
-                    _ => None,
-                };
-                injector.set_window_rect(rect);
-            }
-            let generation = WINDOW_WATCH.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Layout::Window(id) = layout {
+    let applied = tokio::task::spawn_blocking(move || apply_layout(&worker, layout, None));
+    match applied.await? {
+        Ok(generation) => {
+            if let (Layout::Window(id), Some(generation)) = (layout, generation) {
                 tokio::spawn(watch_window(ctx.shared.clone(), id, generation));
             }
-            let _ = ctx.shared.events.send(ServerMsg::Layout { streams, displays });
+            Ok(true)
         }
         Err(e) => {
             warn!("{peer}: switch display failed: {e:#}");
             let _ = ctx.ctl_tx.send(ServerMsg::Error {
                 msg: format!("switch display: {e:#}"),
             });
+            Ok(false)
         }
     }
-    Ok(())
 }
 
 /// Failed sign-ins allowed per address within `AUTH_WINDOW` before it's locked out.
@@ -2185,17 +2298,25 @@ enum Auth {
     },
 }
 
-/// What someone else on the tailnet (`login`) may do: the access rules' first match, else a
-/// guest's default if the owner lets the whole tailnet in; `None`: they need the token.
-fn tailnet_guest_scope(login: &str) -> Option<crate::access::Scope> {
-    if let Some((scope, _)) = crate::acl::decide(&crate::acl::effective(), login, &[]) {
-        return Some(scope);
-    }
-    crate::settings::load().tailnet_members.then(crate::access::Scope::default)
-}
-
-/// How often a guest session re-checks that its pass is still valid.
+/// How often a guest session re-checks that what let it in still does.
 const GUEST_RECHECK: Duration = Duration::from_secs(10);
+
+/// Ends the session the first time `still` says what let it in no longer does.
+fn recheck_guest(conn: wtransport::Connection, still: impl Fn() -> bool + Send + 'static) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = conn.closed() => return,
+                _ = tokio::time::sleep(GUEST_RECHECK) => {}
+            }
+            if !still() {
+                info!("{}: guest access ended", conn.remote_address());
+                conn.close(1u32.into(), b"access ended");
+                return;
+            }
+        }
+    });
+}
 
 /// A client's keyframe requests are honoured at most this often (per stream).
 const KEYFRAME_REQUEST_SPACING: Duration = Duration::from_millis(500);
@@ -2223,10 +2344,16 @@ fn record_auth_failure(shared: &Shared, peer: std::net::IpAddr) {
 }
 
 /// How long a stream opened before sign-in finishes waits for it. Covers the person at the
-/// computer answering "let them in?" (up to `approval::TIMEOUT`), not just a tailnet whois:
+/// computer answering "let them in?" and a passkey, not just a tailnet whois:
 /// a viewer's input stream opens right after hello, and dropping it after a shorter wait
 /// left an approved viewer seeing the screen with no mouse or keyboard.
-const AUTH_WAIT: Duration = Duration::from_secs(crate::approval::TIMEOUT.as_secs() + 10);
+const AUTH_WAIT: Duration = SIGN_IN_LIMIT;
+
+/// A connection that hasn't said hello by now isn't a viewer's: its page says it right away.
+const HELLO_WAIT: Duration = Duration::from_secs(15);
+/// The longest sign-in can take: a passkey (`passkey::ANSWER_TIMEOUT`, each way) and the person
+/// at the computer answering (`approval::TIMEOUT`), with room for a whois and a posture check.
+const SIGN_IN_LIMIT: Duration = Duration::from_secs(300);
 
 /// Types text a viewer sent (IME, emoji, accented letters), in order with its keys: the
 /// next event isn't read until it's typed. Hosts without a text path press US keys for
@@ -2258,8 +2385,10 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
     stream.read_exact(&mut tag).await?;
     // Streams opened right after hello can arrive while auth is still in progress
     // (a tailnet whois takes tens of ms); wait for it rather than dropping them.
+    // (On its permissions, not `authed`: those are what's about to be read, and once they
+    // can be seen they're there.)
     let signed_in = async {
-        while !ctx.authed.load(Ordering::Relaxed) {
+        while ctx.perms.get().is_none() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     };
@@ -2281,7 +2410,10 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
     match tag[0] {
         STREAM_INPUT => {
             info!("{}: input stream open", ctx.conn.remote_address());
-            INPUT_STREAMS.fetch_add(1, Ordering::Relaxed);
+            // (A view-only link's input goes nowhere, so it holds nothing down.)
+            if perms.input {
+                INPUT_STREAMS.fetch_add(1, Ordering::Relaxed);
+            }
             let mut buf = [0u8; INPUT_EVENT_LEN];
             let mut events = 0u64;
             // What this viewer is holding down, to let go of when it leaves.
@@ -2296,7 +2428,7 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
                 }
                 match InputEvent::read(&buf) {
                     Some(ev @ InputEvent::Gamepad { .. }) if !crate::testmode::enabled() => {
-                        crate::gamepad::handle(ev)
+                        crate::gamepad::handle(ctx.driver, ev)
                     }
                     Some(ev @ InputEvent::Text { .. }) => {
                         if let Some(text) = text.push(&ev) {
@@ -2333,8 +2465,13 @@ async fn uni_stream(ctx: SessionCtx, mut stream: RecvStream) -> Result<()> {
                 for button in buttons {
                     injector.handle(InputEvent::MouseUp { button });
                 }
+                // The last one giving input: anything else still held. (Not sooner: another
+                // viewer may be holding Shift right now.)
+                if perms.input && INPUT_STREAMS.fetch_sub(1, Ordering::Relaxed) == 1 {
+                    injector.release_all();
+                }
             }
-            INPUT_STREAMS.fetch_sub(1, Ordering::Relaxed);
+            crate::gamepad::release(ctx.driver);
             info!(
                 "{}: input stream closed after {events} events",
                 ctx.conn.remote_address()
@@ -2778,7 +2915,7 @@ fn apply_rate_report(shared: &Shared, report: crate::rate::Report) {
         .unwrap()
         .report(report, std::time::Instant::now());
     if changed.is_some() {
-        apply_bitrate(shared);
+        apply_bitrate_soon();
     }
 }
 
@@ -2807,7 +2944,8 @@ pub fn set_remote_cap(viewer: u64, bps: Option<u32>) {
 
 /// Applies the bitrate off the caller's thread: changing it takes the streams' lock (held for
 /// as long as a capture restart takes) and calls into the encoders, and the callers are the
-/// tasks that send video and answer the viewer's pings, which mustn't wait on that.
+/// tasks that send video and answer the viewer's pings, which mustn't wait on that. One thread,
+/// so the newest rate is the last one the encoders hear.
 fn apply_bitrate_soon() {
     static WORKER: std::sync::OnceLock<std::sync::mpsc::Sender<()>> = std::sync::OnceLock::new();
     let worker = WORKER.get_or_init(|| {
@@ -2817,7 +2955,7 @@ fn apply_bitrate_soon() {
                 // However many came meanwhile, once covers them.
                 while rx.try_recv().is_ok() {}
                 if let Some(shared) = SHARED.get() {
-                    apply_bitrate(shared);
+                    apply_bitrate(shared, REAPPLY.swap(false, Ordering::Relaxed));
                 }
             }
         });
@@ -2828,7 +2966,7 @@ fn apply_bitrate_soon() {
 
 /// The encoders' bitrate: the tailnet clients' adaptive target, capped by every remote
 /// viewer's estimate (they share the encoders, so the slowest link sets the rate).
-fn apply_bitrate(shared: &Shared) {
+fn apply_bitrate(shared: &Shared, again: bool) {
     let aimd = shared.rate.lock().unwrap().target();
     let cap = REMOTE_CAPS
         .lock()
@@ -2838,7 +2976,7 @@ fn apply_bitrate(shared: &Shared) {
     let bps = cap.map_or(aimd, |c| c.min(aimd));
     let last = APPLIED_BPS.load(Ordering::Relaxed);
     // Ignore wiggles under 3% so encoders aren't poked twice a second.
-    if last != 0 && (bps as f64 - last as f64).abs() < last as f64 * 0.03 {
+    if !again && last != 0 && (bps as f64 - last as f64).abs() < last as f64 * 0.03 {
         return;
     }
     APPLIED_BPS.store(bps, Ordering::Relaxed);
@@ -2860,14 +2998,12 @@ fn apply_bitrate(shared: &Shared) {
 
 /// Re-applies the current bitrate, so encoders pick up a changed policy (sharp text).
 pub fn reapply_policy() {
-    if let Some(shared) = SHARED.get() {
-        let bps = match APPLIED_BPS.load(Ordering::Relaxed) {
-            0 => shared.rate.lock().unwrap().target(),
-            b => b,
-        };
-        shared.video.set_bitrate(bps);
-    }
+    REAPPLY.store(true, Ordering::Relaxed);
+    apply_bitrate_soon();
 }
+
+/// The next bitrate applied goes to the encoders even if it hasn't changed.
+static REAPPLY: AtomicBool = AtomicBool::new(false);
 
 pub fn shared() -> Option<Arc<Shared>> {
     SHARED.get().cloned()
@@ -2898,6 +3034,8 @@ const CAUTIOUS_START_BPS: u32 = 2_000_000;
 const FAR_RTT: Duration = Duration::from_millis(40);
 /// How long frames wait for a new viewer's size before going out at the current one.
 const FIRST_VIEWPORT_WAIT: Duration = Duration::from_millis(600);
+/// How long they wait for that size to be in force, once said.
+const FIRST_SIZE_LIMIT: Duration = Duration::from_secs(5);
 
 /// A viewer arrived over the internet (WebRTC): start the stream at a rate such links
 /// usually take, instead of the LAN maximum, so the first keyframe isn't lost.
@@ -2907,13 +3045,15 @@ pub fn remote_viewer_joined() {
 
 fn cautious_start() {
     if let Some(shared) = SHARED.get() {
+        // (Asked as it joins, before it's on the list: anyone there is someone else.)
+        let others = !crate::viewers::subscribe().borrow().is_empty();
         let changed = shared
             .rate
             .lock()
             .unwrap()
-            .start_cautiously(CAUTIOUS_START_BPS, std::time::Instant::now());
+            .start_cautiously(CAUTIOUS_START_BPS, others, std::time::Instant::now());
         if changed.is_some() {
-            apply_bitrate(shared);
+            apply_bitrate_soon();
         }
     }
 }
@@ -2957,6 +3097,28 @@ mod tests {
     fn identity() -> Identity {
         let _ = rustls::crypto::ring::default_provider().install_default();
         Identity::self_signed(["localhost"]).unwrap()
+    }
+
+    #[test]
+    fn a_first_viewport_being_applied_isnt_overtaken_by_the_timer() {
+        let size = FirstSize::default();
+        assert!(!size.settled());
+        assert!(size.begin_first());
+        // The timer goes off while the size is being applied: frames keep waiting.
+        assert!(!size.give_up_waiting());
+        assert!(!size.settled(), "a keyframe now would be the wrong size");
+        size.settle();
+        assert!(size.settled());
+        assert!(!size.begin_first(), "only the first is applied at once");
+        assert!(!size.give_up_waiting());
+    }
+
+    #[test]
+    fn a_viewer_that_says_nothing_gets_frames_after_a_moment() {
+        let size = FirstSize::default();
+        assert!(size.give_up_waiting());
+        assert!(size.settled());
+        assert!(!size.begin_first(), "too late to be the first: an ordinary change");
     }
 
     #[tokio::test]

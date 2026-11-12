@@ -30,8 +30,6 @@ const CONSENT_WAIT: Duration = Duration::from_secs(600);
 const CODE_SECS: u64 = 60;
 /// Requests waiting for the owner at once (more are refused: nobody gets to flood them).
 const MAX_PENDING: usize = 5;
-/// Registered clients kept.
-const MAX_CLIENTS: usize = 200;
 /// Client metadata documents and key sets are fetched again after this long.
 const FETCH_TTL: Duration = Duration::from_secs(600);
 /// What a fetched document may weigh.
@@ -125,6 +123,14 @@ pub fn serve_public() {
     if crate::support::is_host() {
         return;
     }
+    if !crate::testmode::enabled() {
+        tokio::spawn(async {
+            loop {
+                let _ = tokio::task::spawn_blocking(reconcile_funnel).await;
+                tokio::time::sleep(FUNNEL_CHECK).await;
+            }
+        });
+    }
     tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
             Ok(l) => l,
@@ -186,7 +192,7 @@ pub fn publish(on: bool) -> anyhow::Result<Option<String>> {
     let out = child.wait_with_output()?;
     let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     let enable_link = said.split_whitespace().find(|w| w.starts_with("https://login.tailscale.com/")).map(String::from);
-    let funneled = funnel_on();
+    let funneled = funnel_on().unwrap_or(false);
     if on != funneled {
         let _ = grants::update(|s| s.public = funneled);
         match (on, enable_link) {
@@ -205,14 +211,56 @@ pub fn publish(on: bool) -> anyhow::Result<Option<String>> {
     Ok(host.filter(|_| on).map(|host| format!("https://{host}:{FUNNEL_PORT}/mcp")))
 }
 
-/// Funnel publishes the agents' port, per `tailscale funnel status`.
-fn funnel_on() -> bool {
-    std::process::Command::new(crate::tailscale::cli())
-        .args(["funnel", "status", "--json"])
-        .output()
-        .ok()
-        .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
-        .is_some_and(|v| v["AllowFunnel"].as_object().is_some_and(|m| m.iter().any(|(k, on)| k.ends_with(&format!(":{FUNNEL_PORT}")) && on == true)))
+/// Funnel publishes the agents' port, per `tailscale funnel status`; `None` when it doesn't say.
+fn funnel_on() -> Option<bool> {
+    let out = std::process::Command::new(crate::tailscale::cli()).args(["funnel", "status", "--json"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = serde_json::from_slice::<Value>(&out.stdout).ok()?;
+    Some(v["AllowFunnel"].as_object().is_some_and(|m| m.iter().any(|(k, on)| k.ends_with(&format!(":{FUNNEL_PORT}")) && on == true)))
+}
+
+/// How often publishing is checked against what's wanted.
+const FUNNEL_CHECK: Duration = Duration::from_secs(60);
+
+/// What it takes to bring the store and Tailscale in step.
+#[derive(Debug, PartialEq)]
+enum FunnelStep {
+    /// Published, but agents are off (a policy, or an unpublish that failed): stop publishing.
+    Unpublish,
+    /// Something else stopped publishing: the store says so now.
+    NoteOff,
+    Nothing,
+}
+
+fn funnel_step(enabled: bool, public: bool, on: bool) -> FunnelStep {
+    match (enabled, public, on) {
+        (false, true, true) => FunnelStep::Unpublish,
+        (_, true, false) => FunnelStep::NoteOff,
+        _ => FunnelStep::Nothing,
+    }
+}
+
+/// Keeps `public` true to what Tailscale is doing, and agents that are off unpublished. Only
+/// while it's said to be published: anything else on that port isn't Glass's to touch.
+fn reconcile_funnel() {
+    let store = grants::load();
+    if !store.public {
+        return;
+    }
+    let Some(on) = funnel_on() else { return };
+    match funnel_step(store.enabled, store.public, on) {
+        FunnelStep::Unpublish => {
+            if let Err(e) = publish(false) {
+                warn!("agents: still published with Funnel while agents are off: {e:#}");
+            }
+        }
+        FunnelStep::NoteOff => {
+            let _ = grants::update(|s| s.public = false);
+        }
+        FunnelStep::Nothing => {}
+    }
 }
 
 // ---- Who we are ----
@@ -694,15 +742,8 @@ async fn register(headers: HeaderMap, body: axum::body::Bytes) -> Response<Body>
         install_requested: false,
     };
     let saved = grants::update(|s| {
-        if s.clients.len() >= MAX_CLIENTS {
-            // Make room: the oldest client nothing was ever granted to goes.
-            let used: Vec<String> = s.grants.iter().map(|g| g.client_id.clone()).collect();
-            let now = grants::now();
-            if let Some(i) = s.clients.iter().position(|x| !x.installed && !used.contains(&x.id) && now.saturating_sub(x.created) > 3600) {
-                s.clients.remove(i);
-            } else {
-                return false;
-            }
+        if !grants::make_room(s, grants::now()) {
+            return false;
         }
         s.clients.push(c.clone());
         true
@@ -799,15 +840,7 @@ async fn client_delete(headers: HeaderMap, Path(id): Path<String>) -> Response<B
     if registered_client(&id, &headers).is_none() {
         return bad_registration_token();
     }
-    let done = grants::update(|s| {
-        s.clients.retain(|c| c.id != id);
-        for g in s.grants.iter_mut().filter(|g| g.client_id == id) {
-            g.revoked = true;
-            g.refresh = None;
-            g.access.clear();
-        }
-    });
-    match done {
+    match grants::delete_client(&id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", &e.to_string()),
     }
@@ -1010,6 +1043,11 @@ async fn authorize(peer: Peer, headers: HeaderMap, Query(q): Query<HashMap<Strin
         // Glass can't tell apps apart here, so a limit to some apps couldn't be kept.
         return redirect_error(&redirect_uri, "invalid_request", state.as_deref(), &iss);
     }
+    // After a wrong number nobody gets a new number to try: registering again makes a new
+    // client, so holding back only the one that asked would stop nothing.
+    if !owner_here && blocked(ANY_CLIENT) {
+        return page(StatusCode::TOO_MANY_REQUESTS, "Try again later", "<p>An agent's last request was denied. Agents can ask again in a few minutes.</p>", None);
+    }
     let id = grants::random("")[..22].to_string();
     let cookie = grants::random("");
     let number = format!("{:02}", 10 + random_below(90));
@@ -1098,9 +1136,16 @@ async fn authorize(peer: Peer, headers: HeaderMap, Query(q): Query<HashMap<Strin
 
 static BLOCKED: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
-/// After a wrong number, an agent waits 10 minutes before it can ask again (no guessing).
+/// Stands for every client in `BLOCKED` (client ids are never this).
+const ANY_CLIENT: &str = "*";
+
+/// After a wrong number, an agent waits 10 minutes before it can ask again (no guessing), and
+/// so does anyone not on one of the owner's devices.
 fn block(client_id: &str) {
-    BLOCKED.lock().unwrap().get_or_insert_with(HashMap::new).insert(client_id.to_string(), Instant::now());
+    let mut b = BLOCKED.lock().unwrap();
+    let b = b.get_or_insert_with(HashMap::new);
+    b.insert(client_id.to_string(), Instant::now());
+    b.insert(ANY_CLIENT.to_string(), Instant::now());
 }
 
 fn blocked(client_id: &str) -> bool {
@@ -1147,18 +1192,24 @@ fn own_consent(headers: &HeaderMap, id: &str) -> Option<Consent> {
     consents(|m| m.get(id).cloned()).filter(|c| crate::control::token_matches(&c.cookie_hash, &grants::hash(&cookie)))
 }
 
-/// Where the browser goes once decided: back to the agent with a code, or an error.
-fn finish(id: &str, c: &Consent) -> Option<String> {
+/// Takes a decided consent out, in one step: one decision is acted on once, however many
+/// requests come for it at the same moment.
+fn take_decided(m: &mut HashMap<String, Consent>, id: &str) -> Option<Consent> {
+    if m.get(id)?.decision == Decision::Waiting {
+        return None;
+    }
+    m.remove(id)
+}
+
+/// Where the browser goes once decided: back to the agent with a code, or an error. `None`
+/// when it's still waiting, or someone else's request already took it.
+fn finish(id: &str) -> Option<String> {
+    let c = consents(|m| take_decided(m, id))?;
+    crate::computer::withdraw(&c.ask_text);
     match &c.decision {
         Decision::Waiting => None,
-        Decision::Denied => {
-            consents(|m| m.remove(id));
-            crate::computer::withdraw(&c.ask_text);
-            Some(with_query(&c.redirect_uri, &[("error", "access_denied"), ("state", c.state.as_deref().unwrap_or("")), ("iss", &c.issuer)]))
-        }
+        Decision::Denied => Some(with_query(&c.redirect_uri, &[("error", "access_denied"), ("state", c.state.as_deref().unwrap_or("")), ("iss", &c.issuer)])),
         Decision::Approved(_) => {
-            consents(|m| m.remove(id));
-            crate::computer::withdraw(&c.ask_text);
             let code = grants::random("glcode_");
             codes(|m| m.insert(grants::hash(&code), Code { consent: c.clone(), expires: grants::now() + CODE_SECS, used: false, replayed: false, grant: None }));
             Some(with_query(&c.redirect_uri, &[("code", &code), ("state", c.state.as_deref().unwrap_or("")), ("iss", &c.issuer)]))
@@ -1178,9 +1229,14 @@ async fn decide(peer: Peer, headers: HeaderMap, axum::Form(f): axum::Form<HashMa
     if headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()).is_some_and(|o| o != iss) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let Some(_) = own_consent(&headers, id) else {
+    let Some(mine) = own_consent(&headers, id) else {
         return page(StatusCode::FORBIDDEN, "Request expired", "<p>Start again from the agent.</p>", None);
     };
+    if mine.created.elapsed() > CONSENT_WAIT {
+        consents(|m| m.remove(id));
+        crate::computer::withdraw(&mine.ask_text);
+        return page(StatusCode::FORBIDDEN, "Request expired", "<p>Start again from the agent.</p>", None);
+    }
     if !owner_device(peer.0.ip(), &headers).await {
         return page(StatusCode::FORBIDDEN, "Approve in Glass", "<p>Approve agents from one of your other devices, or tap the number in Glass.</p>", None);
     }
@@ -1189,14 +1245,14 @@ async fn decide(peer: Peer, headers: HeaderMap, axum::Form(f): axum::Form<HashMa
     }
     let allow = f.get("allow").map(String::as_str) == Some("yes");
     let who = crate::tailscale::device_name(peer.0.ip()).await.unwrap_or_else(|| "this computer's owner".into());
-    let c = consents(|m| {
-        let c = m.get_mut(id)?;
-        if c.decision == Decision::Waiting {
+    consents(|m| {
+        if let Some(c) = m.get_mut(id)
+            && c.decision == Decision::Waiting
+        {
             c.decision = if allow { Decision::Approved(who) } else { Decision::Denied };
         }
-        Some(c.clone())
     });
-    match c.and_then(|c| finish(id, &c)) {
+    match finish(id) {
         Some(to) => redirect_to(&to),
         None => StatusCode::CONFLICT.into_response(),
     }
@@ -1213,7 +1269,7 @@ async fn wait(headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> R
         consents(|m| m.remove(id));
         return Json(json!({ "state": "expired" })).into_response();
     }
-    match finish(id, &c) {
+    match finish(id) {
         None => Json(json!({ "state": "waiting" })).into_response(),
         Some(to) => Json(json!({ "state": "done", "to": to })).into_response(),
     }
@@ -1465,48 +1521,57 @@ async fn token(headers: HeaderMap, axum::Form(f): axum::Form<HashMap<String, Str
             if c.auth_method == "none" {
                 return oauth_error(StatusCode::BAD_REQUEST, "unauthorized_client", "client credentials need a client that authenticates (a secret or keys)");
             }
-            let Some(stored) = c.stored.clone().filter(|s| s.installed) else {
-                // Not installed: ask the owner once (a stub keeps a metadata-document client's
-                // place, so `glass agents install <its URL>` works).
-                let stub = grants::Client {
-                    id: c.id.clone(),
-                    name: c.name.clone(),
-                    redirect_uris: c.redirect_uris.clone(),
-                    auth_method: c.auth_method.clone(),
-                    grant_types: vec!["client_credentials".into()],
-                    secret_hash: None,
-                    jwks_uri: c.jwks_uri.clone(),
-                    jwks: c.jwks.clone(),
-                    logo_uri: None,
-                    registration_hash: String::new(),
-                    created: grants::now(),
-                    installed: false,
-                    install_requested: true,
-                };
-                let first = grants::update(|s| match s.clients.iter_mut().find(|x| x.id == c.id) {
-                    Some(x) => !std::mem::replace(&mut x.install_requested, true),
-                    None => {
-                        s.clients.push(stub);
-                        true
-                    }
-                })
-                .unwrap_or(false);
-                if first && install_push_due() {
-                    crate::push::activity(
-                        &format!("An agent asks for unattended access: {}", c.name),
-                        &format!("From {} (not verified by Glass). See glass agents on this computer.", c.domain),
-                        "agent-install",
-                    );
-                }
-                return oauth_error(
-                    StatusCode::BAD_REQUEST,
-                    "unauthorized_client",
-                    "not installed on this computer; its owner can allow it with glass agents install",
-                );
+            // Whether it's installed is decided under the store's lock, by what's there now: an
+            // owner who revoked it while this request was authenticating has the last word.
+            let issued = match c.stored.as_ref().filter(|s| s.installed) {
+                Some(stored) => grants::app_token(stored, &c.domain),
+                None => Ok(None),
             };
-            match grants::app_token(&stored, &c.domain) {
-                Ok((g, issued)) => token_response(&g, issued),
+            match issued {
+                Ok(Some((g, issued))) => token_response(&g, issued),
                 Err(e) => oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", &e.to_string()),
+                Ok(None) => {
+                    // Not installed: ask the owner once (a stub keeps a metadata-document client's
+                    // place, so `glass agents install <its URL>` works).
+                    let stub = grants::Client {
+                        id: c.id.clone(),
+                        name: c.name.clone(),
+                        redirect_uris: c.redirect_uris.clone(),
+                        auth_method: c.auth_method.clone(),
+                        grant_types: vec!["client_credentials".into()],
+                        secret_hash: None,
+                        jwks_uri: c.jwks_uri.clone(),
+                        jwks: c.jwks.clone(),
+                        logo_uri: None,
+                        registration_hash: String::new(),
+                        created: grants::now(),
+                        installed: false,
+                        install_requested: true,
+                    };
+                    let first = grants::update(|s| {
+                        if let Some(x) = s.clients.iter_mut().find(|x| x.id == c.id) {
+                            return !std::mem::replace(&mut x.install_requested, true);
+                        }
+                        let room = grants::make_room(s, grants::now());
+                        if room {
+                            s.clients.push(stub);
+                        }
+                        room
+                    })
+                    .unwrap_or(false);
+                    if first && install_push_due() {
+                        crate::push::activity(
+                            &format!("An agent asks for unattended access: {}", c.name),
+                            &format!("From {} (not verified by Glass). See glass agents on this computer.", c.domain),
+                            "agent-install",
+                        );
+                    }
+                    oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        "unauthorized_client",
+                        "not installed on this computer; its owner can allow it with glass agents install",
+                    )
+                }
             }
         }
         _ => oauth_error(StatusCode::BAD_REQUEST, "unsupported_grant_type", "authorization_code, refresh_token or client_credentials"),
@@ -1833,6 +1898,51 @@ fn consent_response(body: &str, id: &str, redirect_uri: &str) -> Response<Body> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn consent(decision: Decision) -> Consent {
+        Consent {
+            client: ClientInfo { id: "c".into(), name: "C".into(), domain: "c.example".into(), redirect_uris: Vec::new(), auth_method: "none".into(), jwks_uri: None, jwks: None, stored: None },
+            redirect_uri: "https://c.example/cb".into(),
+            state: None,
+            challenge: String::new(),
+            scopes: Vec::new(),
+            apps: None,
+            cookie_hash: String::new(),
+            number: "10".into(),
+            created: Instant::now(),
+            decision,
+            issuer: "https://h".into(),
+            ask_text: String::new(),
+            last_poll: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn a_decision_is_taken_once() {
+        let mut m = HashMap::from([("a".to_string(), consent(Decision::Approved("me".into()))), ("w".to_string(), consent(Decision::Waiting))]);
+        assert!(take_decided(&mut m, "a").is_some());
+        assert!(take_decided(&mut m, "a").is_none(), "one approval, one code");
+        assert!(take_decided(&mut m, "w").is_none(), "not decided yet");
+        assert!(m.contains_key("w"));
+    }
+
+    #[test]
+    fn a_wrong_number_holds_back_new_clients_too() {
+        assert!(!blocked("not-blocked-yet"));
+        block("wrong-number-client");
+        assert!(blocked("wrong-number-client"));
+        assert!(blocked(ANY_CLIENT));
+        assert!(!blocked("another-client"), "only the wildcard speaks for other clients");
+    }
+
+    #[test]
+    fn funnel_follows_what_is_wanted() {
+        assert_eq!(funnel_step(false, true, true), FunnelStep::Unpublish);
+        assert_eq!(funnel_step(true, true, false), FunnelStep::NoteOff);
+        assert_eq!(funnel_step(false, true, false), FunnelStep::NoteOff);
+        assert_eq!(funnel_step(true, true, true), FunnelStep::Nothing);
+        assert_eq!(funnel_step(true, false, true), FunnelStep::Nothing, "not ours to touch");
+    }
 
     #[test]
     fn redirect_uris() {

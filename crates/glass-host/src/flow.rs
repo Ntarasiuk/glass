@@ -100,6 +100,9 @@ pub struct Link {
     delivered_at: Option<Instant>,
     /// When a frame was last acknowledged.
     last_ack: Option<Instant>,
+    /// When the newest frame acknowledged so far was sent: anything sent before that and
+    /// still unconfirmed isn't queueing (see [`Link::oldest`]).
+    acked_sent: Option<Instant>,
     /// The bitrate frames are being made at, to tell how long one takes just to send.
     pace_bps: f64,
 }
@@ -108,6 +111,13 @@ pub struct Link {
 const REST: Duration = Duration::from_millis(250);
 /// No acknowledgement for this long: what they said no longer describes the link.
 const NO_NEWS: Duration = Duration::from_secs(1);
+/// A frame overtaken by one sent after it is forgotten this long after it was sent. Lost, most
+/// likely, or of a stream nothing more will come for (a display no longer streamed), and
+/// nothing else would ever confirm it. The wait is for a late one being repaired.
+const OVERTAKEN_FOR: Duration = Duration::from_secs(1);
+/// Frames out for this long and none acknowledged in that time: the viewer said it
+/// acknowledges them, but it doesn't.
+const ACKS_SILENT: Duration = Duration::from_secs(15);
 
 /// Wrapping frame-id order: `a` is `b` or before it.
 fn id_le(a: u32, b: u32) -> bool {
@@ -215,6 +225,7 @@ impl Link {
         let pace = self.pace();
         let mut bytes = 0;
         let mut took = None;
+        let mut sent_at = None;
         self.inflight.retain(|f| {
             let gone = f.stream == stream && id_le(f.id, id);
             if gone {
@@ -222,10 +233,16 @@ impl Link {
                 if f.id == id {
                     let sending = (f.ahead + f.bytes as u64) as f64 / pace;
                     took = Some((now.duration_since(f.at), Duration::from_secs_f64(sending)));
+                    sent_at = Some(f.at);
                 }
             }
             !gone
         });
+        if let Some(at) = sent_at {
+            let newest = self.acked_sent.map_or(at, |was| was.max(at));
+            self.acked_sent = Some(newest);
+            self.inflight.retain(|f| f.at >= newest || now.saturating_duration_since(f.at) < OVERTAKEN_FOR);
+        }
         if let Some((took, sending)) = took {
             self.sample(took, now);
             let base = self.base.map_or(0.0, |(b, _)| b);
@@ -267,6 +284,30 @@ impl Link {
         }
     }
 
+    /// The viewer said it acknowledges frames, and hasn't for a long while with frames out.
+    pub fn acks_silent(&self, now: Instant) -> bool {
+        self.acks
+            && self.last_ack.is_none_or(|at| now.saturating_duration_since(at) >= ACKS_SILENT)
+            && self.inflight.front().is_some_and(|f| now.saturating_duration_since(f.at) >= ACKS_SILENT)
+    }
+
+    /// Back to counting frames gone when they leave the send buffer (an acknowledgement
+    /// after all goes back to [`Link::expect_acks`]).
+    pub fn stop_expecting_acks(&mut self) {
+        self.acks = false;
+        self.base = None;
+        self.window = None;
+        self.acked_sent = None;
+    }
+
+    /// The oldest frame still on its way. One sent before a frame already acknowledged was
+    /// overtaken: it's lost, or late for its own reasons, not waiting in a queue, and read as
+    /// one it would hold capture and cut the bitrate for as long as it stays unconfirmed. A
+    /// still display's last frame, lost, is never confirmed.
+    fn oldest(&self) -> Option<&Sent> {
+        self.inflight.iter().find(|f| self.acked_sent.is_none_or(|at| f.at >= at))
+    }
+
     /// The bitrate frames are being made at (see [`Link::acked`]).
     pub fn set_pace(&mut self, bps: u32) {
         self.pace_bps = bps as f64;
@@ -285,7 +326,7 @@ impl Link {
         crate::rate::AckSample {
             // Nothing on its way: whatever queue there was, the last frames came through it.
             queue_ms: if self.busy() && heard { self.queue_ms } else { 0.0 },
-            oldest_ms: self.inflight.front().map_or(0.0, |f| {
+            oldest_ms: self.oldest().map_or(0.0, |f| {
                 let sending = (f.ahead + f.bytes as u64) as f64 / pace;
                 (now.duration_since(f.at).as_secs_f64() - sending).max(0.0) * 1000.0
             }),
@@ -295,7 +336,7 @@ impl Link {
             // hidden tab, a lost last frame or a decoder sitting on one.
             delivered_bps: if heard { self.delivered * 8.0 } else { 0.0 },
             held: self.full(now),
-            waited_ms: self.inflight.front().map_or(0.0, |f| {
+            waited_ms: self.oldest().map_or(0.0, |f| {
                 (now.duration_since(f.at).as_secs_f64() - f.bytes as f64 / pace).max(0.0) * 1000.0
             }),
             in_flight_bits: self.inflight.iter().map(|f| f.bytes as f64 * 8.0).sum(),
@@ -336,10 +377,10 @@ impl Link {
     /// after a backlog clears, nothing in flight is old, and a burst of frames would fill
     /// the queue again before the oldest got old.)
     pub fn full(&mut self, now: Instant) -> bool {
-        let Some(oldest) = self.inflight.front() else {
+        let Some(oldest) = self.oldest().map(|f| f.at) else {
             return false;
         };
-        let age = now.duration_since(oldest.at);
+        let age = now.saturating_duration_since(oldest);
         if age > STUCK && !self.stalled {
             tracing::info!(
                 "video link stuck ({} frames, oldest {} ms): not holding capture for it",
@@ -347,6 +388,10 @@ impl Link {
                 age.as_millis()
             );
             self.stalled = true;
+        } else if age <= STUCK {
+            // What was stuck has gone. Waiting for nothing to be in flight wouldn't do: frames
+            // keep going meanwhile, and on a moving screen there's always one on its way.
+            self.stalled = false;
         }
         if self.stalled || self.last_sent.is_none_or(|at| now.saturating_duration_since(at) >= MAX_HOLD) {
             return false;
@@ -859,6 +904,88 @@ pub(crate) mod tests {
         assert!(!l.busy());
         assert!(!v.update(&mut l, t0 + ms(20)));
         assert!(!held(1));
+    }
+
+    #[test]
+    fn a_frame_lost_on_a_still_display_isnt_a_queue() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut l = Link::default();
+        l.expect_acks();
+        l.set_rtt(ms(20), t0);
+        let mut rate = crate::rate::AckRate::new(30_000_000);
+        // The other display's last frame, never confirmed.
+        l.sent(1, 0, 1_000, t0);
+        // A moving display goes on being acknowledged, using all it's given.
+        let bytes = (crate::rate::ACK_START_BPS / 8 / 30) as usize;
+        let lowest = (1..300u64).fold(u32::MAX, |lowest, n| {
+            let sent = t0 + ms(n * 33);
+            l.sent(0, n as u32, bytes, sent);
+            l.acked(0, n as u32, sent + ms(25));
+            let sample = l.ack_sample(sent + ms(26));
+            assert_eq!(sample.oldest_ms, 0.0, "frame {n}");
+            assert!(!sample.held, "frame {n}");
+            lowest.min(rate.update(sample, sent + ms(26)))
+        });
+        assert!(lowest >= crate::rate::ACK_START_BPS, "{lowest} bps");
+        assert_eq!(l.streams(), 0, "forgotten, once overtaken for a while");
+        assert!(!l.stalled);
+    }
+
+    #[test]
+    fn an_overtaken_frame_may_still_turn_up() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut l = Link::default();
+        l.sent(1, 0, 1_000, t0);
+        l.sent(0, 0, 1_000, t0 + ms(10));
+        l.acked(0, 0, t0 + ms(50));
+        assert_eq!(l.streams(), 0b10, "not given up on yet");
+        l.acked(1, 0, t0 + ms(200));
+        assert!(!l.busy());
+    }
+
+    #[test]
+    fn frames_acknowledged_again_end_a_stall_even_with_one_always_on_its_way() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut l = Link::default();
+        l.sent(0, 0, 1_000, t0);
+        l.acked(0, 0, t0 + ms(20));
+        l.sent(0, 1, 1_000, t0 + ms(100));
+        assert!(!l.full(t0 + ms(4200)), "stuck: holds no one");
+        assert!(l.stalled);
+        // It recovers; frames never stop, so nothing is ever empty.
+        l.sent(0, 2, 1_000, t0 + ms(4300));
+        l.acked(0, 1, t0 + ms(4400));
+        assert!(!l.full(t0 + ms(4310) + ms(100)));
+        assert!(!l.stalled, "counts again");
+        assert!(l.full(t0 + ms(4300) + ms(300)), "and is held once old again");
+    }
+
+    #[test]
+    fn a_viewer_that_never_acknowledges_goes_back_to_the_send_buffer() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut l = Link::default();
+        l.expect_acks();
+        assert!(!l.acks_silent(t0 + s(60)), "nothing sent, nothing to acknowledge");
+        l.sent(0, 0, 1_000, t0);
+        assert!(!l.acks_silent(t0 + s(14)));
+        assert!(l.acks_silent(t0 + s(15)));
+        l.stop_expecting_acks();
+        assert!(!l.acks_silent(t0 + s(15)));
+        l.drained(0, t0 + s(15));
+        assert!(!l.busy(), "gone when out of the buffer again");
+        // An acknowledgement after all: back to them.
+        l.sent(0, 1, 1_000, t0 + s(16));
+        l.acked(0, 1, t0 + s(16));
+        l.sent(0, 2, 1_000, t0 + s(17));
+        l.drained(0, t0 + s(17));
+        assert!(l.busy(), "gone only when acknowledged");
+        // Heard lately: a slow frame isn't silence.
+        assert!(!l.acks_silent(t0 + s(30)));
+        assert!(l.acks_silent(t0 + s(32)));
     }
 
     #[test]

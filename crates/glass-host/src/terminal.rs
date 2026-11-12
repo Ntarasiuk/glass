@@ -26,7 +26,14 @@ use conpty::{Child, login_shell};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum ClientTerm {
-    Open { cols: u16, rows: u16 },
+    Open {
+        cols: u16,
+        rows: u16,
+        /// The viewer's number for this shell, repeated on what comes from it, so it can tell
+        /// an old shell's last words from the new one's. (Older viewers don't send one.)
+        #[serde(default)]
+        shell: u64,
+    },
     /// Keystrokes, base64.
     Input { data: String },
     Resize { cols: u16, rows: u16 },
@@ -37,8 +44,21 @@ pub enum ClientTerm {
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum ServerTerm {
     /// Output, base64.
-    Output { data: String },
-    Exit { code: Option<i32> },
+    Output {
+        data: String,
+        #[serde(skip_serializing_if = "is_zero")]
+        shell: u64,
+    },
+    Exit {
+        code: Option<i32>,
+        #[serde(skip_serializing_if = "is_zero")]
+        shell: u64,
+    },
+}
+
+/// A viewer that didn't number its shell gets the messages it always did.
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// A pty on Unix, a ConPTY on Windows.
@@ -52,6 +72,8 @@ const SHELL_ARGS: &[&str] = &["-NoLogo"];
 
 /// Output is sent in pieces of at most this many bytes.
 const CHUNK: usize = 16 << 10;
+/// How often a shell whose terminal has closed is looked at, until it exits.
+const EXIT_CHECK: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// A shell in a pseudo-terminal.
 struct Shell {
@@ -169,14 +191,14 @@ fn login_shell() -> String {
 }
 
 /// Reads the pty until the shell exits, then reports its exit code.
-fn pump(mut reader: File, child: Arc<Mutex<Child>>, out: UnboundedSender<ServerMsg>) {
+fn pump(mut reader: File, child: Arc<Mutex<Child>>, out: UnboundedSender<ServerMsg>, shell: u64) {
     let mut buf = vec![0u8; CHUNK];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 let data = B64.encode(&buf[..n]);
-                if out.send(ServerMsg::Term(ServerTerm::Output { data })).is_err() {
+                if out.send(ServerMsg::Term(ServerTerm::Output { data, shell })).is_err() {
                     return;
                 }
             }
@@ -185,8 +207,18 @@ fn pump(mut reader: File, child: Arc<Mutex<Child>>, out: UnboundedSender<ServerM
             Err(_) => break,
         }
     }
-    let code = child.lock().unwrap().wait().ok().and_then(|s| s.code());
-    let _ = out.send(ServerMsg::Term(ServerTerm::Exit { code }));
+    // A shell can close its terminal and go on running. The lock isn't held while it does:
+    // ending that shell (`Drop for Shell`) needs it, on the task reading the viewer's messages.
+    let code = loop {
+        let status = child.lock().unwrap().try_wait();
+        match status {
+            Ok(Some(status)) => break status.code(),
+            Ok(None) if out.is_closed() => return,
+            Ok(None) => std::thread::sleep(EXIT_CHECK),
+            Err(_) => break None,
+        }
+    };
+    let _ = out.send(ServerMsg::Term(ServerTerm::Exit { code, shell }));
 }
 
 /// One session's shell, if it opened one. Dropping it ends the shell.
@@ -199,13 +231,13 @@ impl Session {
     /// Handles one message; output goes to `out`.
     pub fn handle(&mut self, msg: ClientTerm, out: UnboundedSender<ServerMsg>) -> Result<()> {
         match msg {
-            ClientTerm::Open { cols, rows } => {
+            ClientTerm::Open { cols, rows, shell: id } => {
                 // One shell per session: opening again starts a fresh one.
                 self.shell = None;
                 let shell = login_shell();
                 let (s, reader) = Shell::spawn(&shell, SHELL_ARGS, cols, rows)?;
                 let child = s.child.clone();
-                std::thread::spawn(move || pump(reader, child, out));
+                std::thread::spawn(move || pump(reader, child, out, id));
                 tracing::info!("terminal: started {shell}");
                 self.shell = Some(s);
             }
@@ -236,10 +268,10 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             match rx.try_recv() {
-                Ok(ServerMsg::Term(ServerTerm::Output { data })) => {
+                Ok(ServerMsg::Term(ServerTerm::Output { data, .. })) => {
                     text.extend(B64.decode(data).unwrap())
                 }
-                Ok(ServerMsg::Term(ServerTerm::Exit { code })) => {
+                Ok(ServerMsg::Term(ServerTerm::Exit { code, .. })) => {
                     return (String::from_utf8_lossy(&text).into_owned(), code);
                 }
                 Ok(_) => {}
@@ -261,7 +293,7 @@ mod tests {
         )
         .unwrap();
         let child = shell.child.clone();
-        std::thread::spawn(move || pump(reader, child, tx));
+        std::thread::spawn(move || pump(reader, child, tx, 0));
         let (text, code) = collect(&mut rx);
         assert!(text.contains("30 100"), "{text:?}");
         assert!(text.contains("glass-ok"), "{text:?}");
@@ -275,7 +307,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (mut shell, reader) = Shell::spawn("/bin/sh", &[], 80, 24).unwrap();
         let child = shell.child.clone();
-        std::thread::spawn(move || pump(reader, child, tx));
+        std::thread::spawn(move || pump(reader, child, tx, 0));
         shell.resize(120, 40).unwrap();
         shell
             .master
@@ -322,7 +354,7 @@ mod tests {
         )
         .unwrap();
         let child = shell.child.clone();
-        std::thread::spawn(move || pump(reader, child, tx));
+        std::thread::spawn(move || pump(reader, child, tx, 0));
         let (text, code) = collect(&mut rx);
         let text = plain(&text);
         assert!(text.contains("Lines:30"), "{text:?}");
@@ -338,7 +370,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (mut shell, reader) = Shell::spawn("cmd.exe", &[], 80, 24).unwrap();
         let child = shell.child.clone();
-        std::thread::spawn(move || pump(reader, child, tx));
+        std::thread::spawn(move || pump(reader, child, tx, 0));
         shell.resize(120, 40).unwrap();
         // Enter is a carriage return, as a terminal sends it.
         shell
@@ -356,9 +388,59 @@ mod tests {
     #[test]
     fn messages_parse() {
         let m: ClientTerm = serde_json::from_str(r#"{"op":"open","cols":80,"rows":24}"#).unwrap();
-        assert!(matches!(m, ClientTerm::Open { cols: 80, rows: 24 }));
+        assert!(matches!(m, ClientTerm::Open { cols: 80, rows: 24, shell: 0 }), "as older viewers send it");
         let s =
-            serde_json::to_string(&ServerMsg::Term(ServerTerm::Exit { code: Some(0) })).unwrap();
-        assert_eq!(s, r#"{"t":"term","op":"exit","code":0}"#);
+            serde_json::to_string(&ServerMsg::Term(ServerTerm::Exit { code: Some(0), shell: 0 })).unwrap();
+        assert_eq!(s, r#"{"t":"term","op":"exit","code":0}"#, "as older viewers read it");
+        let m: ClientTerm = serde_json::from_str(r#"{"op":"open","cols":80,"rows":24,"shell":7}"#).unwrap();
+        assert!(matches!(m, ClientTerm::Open { shell: 7, .. }));
+        let s =
+            serde_json::to_string(&ServerMsg::Term(ServerTerm::Exit { code: None, shell: 7 })).unwrap();
+        assert_eq!(s, r#"{"t":"term","op":"exit","code":null,"shell":7}"#);
+    }
+
+    /// Reads what a numbered shell says until it exits; the number on all of it.
+    fn numbers_on(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ServerMsg>) -> Vec<u64> {
+        let mut seen = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(ServerMsg::Term(ServerTerm::Output { shell, .. })) => seen.push(shell),
+                Ok(ServerMsg::Term(ServerTerm::Exit { shell, .. })) => {
+                    seen.push(shell);
+                    return seen;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        panic!("no exit; got {seen:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn each_shell_says_which_it_is() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (shell, reader) = Shell::spawn("/bin/sh", &["-c", "printf hi"], 80, 24).unwrap();
+        let child = shell.child.clone();
+        std::thread::spawn(move || pump(reader, child, tx, 7));
+        let seen = numbers_on(&mut rx);
+        assert!(seen.len() >= 2 && seen.iter().all(|&n| n == 7), "{seen:?}");
+        drop(shell);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_shell_that_closed_its_terminal_doesnt_hold_up_ending_it() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (shell, reader) = Shell::spawn("/bin/sh", &["-c", "exec 0<&- 1>&- 2>&-; exec sleep 30"], 80, 24).unwrap();
+        let child = shell.child.clone();
+        std::thread::spawn(move || pump(reader, child, tx, 3));
+        // Long enough for the pump to see its terminal close and start waiting.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let start = std::time::Instant::now();
+        drop(shell);
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
+        assert_eq!(numbers_on(&mut rx).last(), Some(&3), "and its exit is still reported");
     }
 }

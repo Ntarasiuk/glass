@@ -41,14 +41,16 @@ pub fn set(session: u64, request: Option<Request>) {
             return; // a newer request will apply
         }
         if let Some(shared) = crate::server::shared() {
-            let streams = shared.video.streams();
-            let widths = widths(&streams, &snapshot());
-            tracing::info!("resolution: encoding widths {widths:?} (None = native)");
-            // Restarting capture blocks on ScreenCaptureKit.
-            let _ =
-                tokio::task::spawn_blocking(move || shared.video.set_target_widths(&widths)).await;
+            crate::media::reconfigure(move || apply(&shared));
         }
     });
+}
+
+/// What everyone wants now, to the encoders. Restarting capture blocks on ScreenCaptureKit.
+fn apply(shared: &crate::server::Shared) {
+    let widths = widths(&shared.video.streams(), &snapshot());
+    tracing::info!("resolution: encoding widths {widths:?} (None = native)");
+    shared.video.set_target_widths(&widths);
 }
 
 /// A new viewer's first size, at once: its first keyframe waits for this, and it would
@@ -57,9 +59,12 @@ pub async fn set_now(session: u64, request: Request) {
     REQUESTS.lock().unwrap().get_or_insert_with(Default::default).insert(session, request);
     GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Some(shared) = crate::server::shared() {
-        let widths = widths(&shared.video.streams(), &snapshot());
-        tracing::info!("resolution: encoding widths {widths:?} (None = native)");
-        let _ = tokio::task::spawn_blocking(move || shared.video.set_target_widths(&widths)).await;
+        let (done, applied) = tokio::sync::oneshot::channel();
+        crate::media::reconfigure(move || {
+            apply(&shared);
+            let _ = done.send(());
+        });
+        let _ = applied.await;
     }
 }
 

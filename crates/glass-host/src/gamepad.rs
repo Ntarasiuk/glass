@@ -109,19 +109,19 @@ fn windows_supported() -> bool {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{handle, release_all};
+pub use linux::{handle, release};
 
 #[cfg(windows)]
-pub use vigem::{handle, release_all};
+pub use vigem::{handle, release};
 
 #[cfg(not(any(target_os = "linux", windows)))]
-pub fn handle(ev: glass_proto::InputEvent) {
-    let _ = ev;
+pub fn handle(owner: u64, ev: glass_proto::InputEvent) {
+    let _ = (owner, ev);
 }
 
-/// A session ended: let go of its pads.
+/// `owner`'s input ended: let go of its pads.
 #[cfg(not(any(target_os = "linux", windows)))]
-pub fn release_all() {}
+pub fn release(_owner: u64) {}
 
 /// Xbox 360 controller (XUSB) reports, as the ViGEmBus driver takes them. Built from the
 /// same standard mapping as Linux, so both hosts treat a pad alike.
@@ -414,20 +414,23 @@ mod vigem {
     #[derive(Default)]
     struct State {
         bus: Option<Bus>,
-        pads: HashMap<u8, Pad>,
+        /// By the session they belong to and the browser's number: every viewer's first pad
+        /// is its pad 0, and they aren't the same controller.
+        pads: HashMap<(u64, u8), Pad>,
     }
 
     static PADS: Mutex<Option<State>> = Mutex::new(None);
 
-    pub fn handle(ev: glass_proto::InputEvent) {
+    pub fn handle(owner: u64, ev: glass_proto::InputEvent) {
         let glass_proto::InputEvent::Gamepad { pad, kind, index, value } = ev else { return };
         if pad >= MAX_PADS {
             return;
         }
+        let key = (owner, pad);
         let mut state = PADS.lock().unwrap();
         let state = state.get_or_insert_with(State::default);
         if kind == GAMEPAD_CONNECTED && value == 0.0 {
-            if let Some(p) = state.pads.remove(&pad) {
+            if let Some(p) = state.pads.remove(&key) {
                 if let Some(bus) = &state.bus {
                     bus.unplug(p.serial);
                 }
@@ -438,7 +441,7 @@ mod vigem {
             }
             return;
         }
-        if !state.pads.contains_key(&pad) {
+        if !state.pads.contains_key(&key) {
             if state.bus.is_none() {
                 match Bus::open() {
                     Ok(bus) => state.bus = Some(bus),
@@ -452,7 +455,7 @@ mod vigem {
             match bus.plug() {
                 Ok(serial) => {
                     tracing::info!("gamepad {pad}: virtual Xbox 360 controller ready");
-                    state.pads.insert(pad, Pad { serial, state: xusb::Pad::default() });
+                    state.pads.insert(key, Pad { serial, state: xusb::Pad::default() });
                 }
                 Err(e) => {
                     tracing::warn!("gamepad {pad}: can't plug in a ViGEmBus controller ({e})");
@@ -460,7 +463,7 @@ mod vigem {
                 }
             }
         }
-        let (Some(bus), Some(p)) = (&state.bus, state.pads.get_mut(&pad)) else { return };
+        let (Some(bus), Some(p)) = (&state.bus, state.pads.get_mut(&key)) else { return };
         if p.state.apply(kind, index, value)
             && let Err(e) = bus.call(xusb::SUBMIT_REPORT, &xusb::submit(p.serial, p.state.report))
         {
@@ -468,19 +471,25 @@ mod vigem {
         }
     }
 
-    pub fn release_all() {
+    pub fn release(owner: u64) {
         let mut state = PADS.lock().unwrap();
         let Some(state) = state.as_mut() else { return };
-        if !state.pads.is_empty() {
-            tracing::info!("gamepads: released {}", state.pads.len());
-        }
-        if let Some(bus) = &state.bus {
-            for p in state.pads.values() {
+        let before = state.pads.len();
+        let bus = state.bus.as_ref();
+        state.pads.retain(|(o, _), p| {
+            if *o == owner
+                && let Some(bus) = bus
+            {
                 bus.unplug(p.serial);
             }
+            *o != owner
+        });
+        if before != state.pads.len() {
+            tracing::info!("gamepads: released {}", before - state.pads.len());
         }
-        state.pads.clear();
-        state.bus = None;
+        if state.pads.is_empty() {
+            state.bus = None;
+        }
     }
 }
 
@@ -507,9 +516,11 @@ mod linux {
         dpad: [bool; 4],
     }
 
-    static PADS: Mutex<Option<HashMap<u8, Pad>>> = Mutex::new(None);
+    /// By the session they belong to and the browser's number: every viewer's first pad is its
+    /// pad 0, and they aren't the same controller.
+    static PADS: Mutex<Option<HashMap<(u64, u8), Pad>>> = Mutex::new(None);
 
-    pub fn handle(ev: glass_proto::InputEvent) {
+    pub fn handle(owner: u64, ev: glass_proto::InputEvent) {
         let glass_proto::InputEvent::Gamepad {
             pad,
             kind,
@@ -522,20 +533,21 @@ mod linux {
         if pad >= MAX_PADS {
             return;
         }
+        let key = (owner, pad);
         let mut pads = PADS.lock().unwrap();
         let pads = pads.get_or_insert_with(HashMap::new);
         if kind == GAMEPAD_CONNECTED && value == 0.0 {
-            if pads.remove(&pad).is_some() {
+            if pads.remove(&key).is_some() {
                 tracing::info!("gamepad {pad}: disconnected");
             }
             return;
         }
-        if !pads.contains_key(&pad) {
+        if !pads.contains_key(&key) {
             match build(pad) {
                 Ok(device) => {
                     tracing::info!("gamepad {pad}: virtual controller ready");
                     pads.insert(
-                        pad,
+                        key,
                         Pad {
                             device,
                             dpad: [false; 4],
@@ -548,7 +560,7 @@ mod linux {
                 }
             }
         }
-        let Some(p) = pads.get_mut(&pad) else { return };
+        let Some(p) = pads.get_mut(&key) else { return };
         let events = match kind {
             GAMEPAD_BUTTON => match map_button(index) {
                 Some(Button::Key(c)) => vec![InputEvent::new(
@@ -591,12 +603,13 @@ mod linux {
         }
     }
 
-    pub fn release_all() {
-        if let Some(pads) = PADS.lock().unwrap().as_mut()
-            && !pads.is_empty()
-        {
-            tracing::info!("gamepads: released {}", pads.len());
-            pads.clear();
+    pub fn release(owner: u64) {
+        if let Some(pads) = PADS.lock().unwrap().as_mut() {
+            let before = pads.len();
+            pads.retain(|(o, _), _| *o != owner);
+            if before != pads.len() {
+                tracing::info!("gamepads: released {}", before - pads.len());
+            }
         }
     }
 

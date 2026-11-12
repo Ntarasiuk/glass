@@ -122,8 +122,11 @@ pub enum ClientMsg {
         #[serde(default)]
         paste: bool,
     },
-    /// Send the host clipboard's image (a `STREAM_CLIPBOARD` stream back).
-    ClipboardImage,
+    /// Send the host clipboard's image (a `STREAM_CLIPBOARD` stream back, with this `id`).
+    ClipboardImage {
+        #[serde(default)]
+        id: Option<u32>,
+    },
     /// Opens a file chooser on the Mac; chosen files are streamed back.
     PickFiles,
     /// Start or stop sending system audio to this session.
@@ -162,6 +165,9 @@ pub enum ClientMsg {
         path: String,
         #[serde(default)]
         hidden: bool,
+        /// Comes back on the listing: they can answer out of order.
+        #[serde(default)]
+        req: Option<u32>,
     },
     /// Send this file (as a file stream, like picked files).
     FilesFetch { path: String },
@@ -199,8 +205,15 @@ pub enum ServerMsg {
     },
     /// Waiting for the person at the computer to allow this connection.
     Waiting { msg: String },
-    /// Not let in; the client stops retrying until the user asks again.
-    Denied { msg: String },
+    /// Not let in; the client stops retrying until the user asks again. `ended`: its pass
+    /// went with the answer, so asking again can't work.
+    Denied {
+        msg: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        ended: bool,
+    },
+    /// The answer to asking for a second display: `on` if it's up and showing.
+    Extended { on: bool },
     /// Something worth a (non-error) toast.
     Notice { msg: String },
     /// A folder in the file browser (`error` instead when it can't be read). `ticket`
@@ -211,6 +224,9 @@ pub enum ServerMsg {
         truncated: bool,
         ticket: String,
         error: Option<String>,
+        /// The request this answers; none when a change in the folder prompted it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req: Option<u32>,
     },
     FilesThumb { path: String, data: Option<String> },
     /// The microphone driver just got installed: the mic works now.
@@ -369,6 +385,8 @@ pub struct Features {
     pub browse: bool,
     /// The viewer can become a second display ("Use as a second display").
     pub extend: bool,
+    /// It answers `Extend` with `Extended`, so an unrelated error doesn't read as a failure.
+    pub extend_ack: bool,
     /// The host's desktop can be reshaped to the viewer's screen ("Fit this device", macOS).
     pub fit: bool,
     /// A quick-support session (`glass support`): the viewer is someone helping.
@@ -530,6 +548,28 @@ pub fn unique_path(dir: &Path, name: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answers_stay_the_same_for_older_viewers_unless_they_asked() {
+        let v = |m: &ServerMsg| serde_json::to_value(m).unwrap();
+        let denied = v(&ServerMsg::Denied { msg: "no".into(), ended: false });
+        assert_eq!(denied, serde_json::json!({ "t": "denied", "msg": "no" }));
+        assert_eq!(v(&ServerMsg::Denied { msg: "no".into(), ended: true })["ended"], true);
+        let files = |req| ServerMsg::Files { path: "a".into(), entries: Vec::new(), truncated: false, ticket: String::new(), error: None, req };
+        assert!(v(&files(None)).get("req").is_none());
+        assert_eq!(v(&files(Some(3)))["req"], 3);
+        assert_eq!(v(&ServerMsg::Extended { on: false }), serde_json::json!({ "t": "extended", "on": false }));
+    }
+
+    #[test]
+    fn requests_without_an_id_still_parse() {
+        let image: ClientMsg = serde_json::from_str(r#"{"t":"clipboardImage"}"#).unwrap();
+        assert!(matches!(image, ClientMsg::ClipboardImage { id: None }));
+        let image: ClientMsg = serde_json::from_str(r#"{"t":"clipboardImage","id":4}"#).unwrap();
+        assert!(matches!(image, ClientMsg::ClipboardImage { id: Some(4) }));
+        let list: ClientMsg = serde_json::from_str(r#"{"t":"filesList","path":"a"}"#).unwrap();
+        assert!(matches!(list, ClientMsg::FilesList { req: None, .. }));
+    }
 
     #[test]
     fn token_validation() {

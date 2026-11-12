@@ -81,8 +81,11 @@ impl RateControl {
 
     /// Starts low for a link of unknown size (a new viewer over the internet): the first
     /// keyframe is sized for it, then the rate climbs as the link proves it can take more.
-    pub fn start_cautiously(&mut self, bps: u32, now: Instant) -> Option<u32> {
-        if bps >= self.target {
+    /// `others_watching`: the encoders are shared, and what's been learned about the link the
+    /// others are on (and their picture) isn't given up for a newcomer. A viewer that
+    /// acknowledges frames gets its own cap anyway.
+    pub fn start_cautiously(&mut self, bps: u32, others_watching: bool, now: Instant) -> Option<u32> {
+        if others_watching || bps >= self.target {
             return None;
         }
         self.target = bps;
@@ -263,7 +266,6 @@ impl AckRate {
         let obeyed = s.delivered_bps <= self.target * 1.1;
         if congested && settled && (used || s.held) {
             if obeyed && since(self.last_decrease) >= Duration::from_millis(300) {
-                self.ceiling = Some((s.delivered_bps, now));
                 let mut next = self.target * 0.85;
                 // What got through is the link's rate only when the stream was pressing against
                 // the target; one big frame among few would pin it at a trickle.
@@ -276,7 +278,8 @@ impl AckRate {
                 self.last_decrease = Some(now);
             }
         } else if self.slow_start && !congested && clear {
-            if used && since(self.last_increase) >= Duration::from_millis(250) {
+            // (A cut that didn't end slow start isn't undone at once: let the queue drain.)
+            if used && since(self.last_increase) >= Duration::from_millis(250) && since(self.last_decrease) >= Duration::from_secs(1) {
                 self.target = (self.target * 1.5).min(self.max);
                 self.last_increase = Some(now);
             }
@@ -405,7 +408,7 @@ mod tests {
     fn a_cautious_start_climbs_fast_until_congestion() {
         let now = Instant::now();
         let mut rc = RateControl::new(30_000_000);
-        assert_eq!(rc.start_cautiously(2_000_000, now), Some(2_000_000));
+        assert_eq!(rc.start_cautiously(2_000_000, false, now), Some(2_000_000));
         let clean = || Report { dropped: 0, frames: 30, latency_ms: Some(80.0), received_bps: None };
         let mut t = now;
         for want in [3_000_000, 4_500_000, 6_750_000, 10_125_000] {
@@ -514,10 +517,25 @@ mod tests {
     fn a_cautious_start_never_raises_the_target() {
         let mut rc = RateControl::new(MAX);
         let t0 = Instant::now();
-        assert_eq!(rc.start_cautiously(6_000_000, t0), Some(6_000_000));
-        assert_eq!(rc.start_cautiously(9_000_000, t0), None, "never raises");
+        assert_eq!(rc.start_cautiously(6_000_000, false, t0), Some(6_000_000));
+        assert_eq!(rc.start_cautiously(9_000_000, false, t0), None, "never raises");
         rc.report(clean(), t0 + Duration::from_secs(2));
         assert_eq!(rc.target(), 9_000_000, "climbs from there");
+    }
+
+    #[test]
+    fn a_newcomer_doesnt_reset_what_others_are_watching() {
+        let mut rc = RateControl::new(MAX);
+        let t0 = Instant::now();
+        let dropped = Report { dropped: 3, ..clean() };
+        rc.report(dropped, t0);
+        let (target, ceiling) = (rc.target(), rc.ceiling);
+        assert!(ceiling.is_some());
+        assert_eq!(rc.start_cautiously(2_000_000, true, t0), None);
+        assert_eq!((rc.target(), rc.ceiling, rc.ramping), (target, ceiling, false));
+        // Alone, it does start low.
+        assert_eq!(rc.start_cautiously(2_000_000, false, t0), Some(2_000_000));
+        assert!(rc.ceiling.is_none() && rc.ramping);
     }
 
     #[test]
@@ -627,6 +645,25 @@ mod tests {
         assert!(settled(t0).update(stuck, t0) < ACK_START_BPS);
         // Not in the first seconds: that's QUIC's slow start.
         assert_eq!(AckRate::new(MAX).update(stuck, t0), ACK_START_BPS);
+    }
+
+    #[test]
+    fn a_cut_that_wasnt_pressing_against_the_target_says_nothing_about_the_link() {
+        let t0 = Instant::now();
+        let mut rate = settled(t0);
+        let t1 = t0 + Duration::from_secs(5);
+        // One big frame among few: capture waits, but little got through.
+        let held = AckSample { held: true, ..sample(200.0, 300_000.0) };
+        rate.update(held, t1);
+        assert!(rate.ceiling.is_none(), "a trickle isn't where the link chokes");
+        assert!(rate.slow_start, "and it isn't the link's limit, so slow start goes on");
+        let cut = rate.target();
+        assert_eq!(cut, (ACK_START_BPS as f64 * 0.85) as u32);
+        // Slow start doesn't undo the cut at once...
+        let clean = sample(0.0, cut as f64);
+        assert_eq!(rate.update(clean, t1 + Duration::from_millis(500)), cut);
+        // ...only once the queue has had a moment.
+        assert!(rate.update(clean, t1 + Duration::from_secs(1)) > cut);
     }
 
     #[test]

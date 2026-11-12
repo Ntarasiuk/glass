@@ -41,11 +41,13 @@ pub struct Setup {
     /// Asked for Screen Recording: restart the service until it applies.
     nudging: bool,
     link: Option<(String, String)>,
+    /// The step's latest background task, for telling when an older one finishes.
+    task: u64,
 }
 
 impl Default for Setup {
     fn default() -> Self {
-        Self { step: Step::Welcome, at_login: true, busy: false, nudging: false, link: None }
+        Self { step: Step::Welcome, at_login: true, busy: false, nudging: false, link: None, task: 0 }
     }
 }
 
@@ -61,6 +63,18 @@ impl Setup {
         };
         Self { step, ..Self::default() }
     }
+
+    /// A background task from `step`, numbered `task`, is still what setup is waiting for: the
+    /// person hasn't moved on (Skip) or started another.
+    fn current(&self, step: Step, task: u64) -> bool {
+        self.step == step && self.task == task
+    }
+}
+
+/// Whether setup takes the window now: first run (never set up), once the first read is in,
+/// and not dismissed, on disk or just now if that couldn't be written.
+pub fn should_open(loaded: bool, open: bool, installed: bool, dismissed_on_disk: bool, dismissed_here: bool) -> bool {
+    loaded && !open && !installed && !dismissed_on_disk && !dismissed_here
 }
 
 fn marker() -> std::path::PathBuf {
@@ -90,7 +104,10 @@ impl GlassApp {
 
     fn finish_setup(&mut self, cx: &mut Context<Self>) {
         let _ = std::fs::create_dir_all(crate::config_dir());
-        let _ = std::fs::write(marker(), b"");
+        if let Err(e) = std::fs::write(marker(), b"") {
+            tracing::warn!("setup: can't save that it's done: {e}");
+        }
+        self.setup_dismissed = true;
         self.setup = None;
         cx.notify();
     }
@@ -103,19 +120,26 @@ impl GlassApp {
         f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
         then: impl FnOnce(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
     ) {
-        if let Some(s) = self.setup_mut() {
+        let Some((step, task)) = self.setup_mut().map(|s| {
             s.busy = true;
-        }
+            s.task += 1;
+            (s.step, s.task)
+        }) else {
+            return;
+        };
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let r = cx.background_executor().spawn(async move { f() }).await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if let Some(s) = this.setup_mut() {
-                    s.busy = false;
-                }
-                match r {
-                    Ok(v) => then(this, v, window, cx),
-                    Err(e) => super::toast(window, cx, Err(e)),
+                // Moved on while it ran: its result doesn't move setup anywhere.
+                if this.setup.as_ref().is_some_and(|s| s.current(step, task)) {
+                    if let Some(s) = this.setup_mut() {
+                        s.busy = false;
+                    }
+                    match r {
+                        Ok(v) => then(this, v, window, cx),
+                        Err(e) => super::toast(window, cx, Err(e)),
+                    }
                 }
                 Store::refresh(cx);
                 cx.notify();
@@ -136,8 +160,9 @@ impl GlassApp {
         cx.spawn_in(window, async move |this, cx| {
             for _ in 0..MAX_NUDGES {
                 cx.background_executor().timer(NUDGE_EVERY).await;
-                let Ok(granted) = this.update(cx, |this, cx| this.store.read(cx).snap.permissions().0) else { return };
-                if granted {
+                // Setup over (the person may be connecting by now): no more restarts.
+                let Ok(done) = this.update(cx, |this, cx| this.setup.is_none() || this.store.read(cx).snap.permissions().0) else { return };
+                if done {
                     break;
                 }
                 let _ = cx.background_executor().spawn(async { crate::agent::restart() }).await;
@@ -568,5 +593,33 @@ impl GlassApp {
                         .on_click(cx.listener(|this, _, _, cx| this.finish_setup(cx))),
                 ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Setup, Step, should_open};
+
+    #[test]
+    fn a_slow_task_doesnt_move_setup_once_the_person_has() {
+        let mut s = Setup { step: Step::Tailscale, task: 1, ..Setup::default() };
+        assert!(s.current(Step::Tailscale, 1));
+        // Skip: on to the next step, while the certificate is still being fetched.
+        s.step = Step::Service;
+        assert!(!s.current(Step::Tailscale, 1));
+        // A second task at the same step: the first one's result is out of date too.
+        s.task = 2;
+        assert!(!s.current(Step::Service, 1));
+        assert!(s.current(Step::Service, 2));
+    }
+
+    #[test]
+    fn setup_stays_dismissed_even_if_that_couldnt_be_saved() {
+        assert!(should_open(true, false, false, false, false));
+        assert!(!should_open(false, false, false, false, false), "not read yet");
+        assert!(!should_open(true, true, false, false, false), "already open");
+        assert!(!should_open(true, false, true, false, false), "installed");
+        assert!(!should_open(true, false, false, true, false), "dismissed");
+        assert!(!should_open(true, false, false, false, true), "dismissed, but the file couldn't be written");
     }
 }

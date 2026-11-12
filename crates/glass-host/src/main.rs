@@ -233,9 +233,9 @@ enum Command {
     /// list the ones you approved, revoke them, install one for unattended use, or read
     /// what they did.
     Agents {
-        #[arg(value_parser = ["list", "revoke", "install", "log", "verify", "on", "off", "public"], default_value = "list")]
+        #[arg(value_parser = ["list", "revoke", "install", "uninstall", "log", "verify", "on", "off", "public"], default_value = "list")]
         action: String,
-        /// A grant's id (revoke; `all` for every one), a client's id (install), or on/off (public).
+        /// A grant's id (revoke; `all` for every one), a client's id (install, uninstall), or on/off (public).
         id: Option<String>,
         #[arg(long)]
         json: bool,
@@ -477,6 +477,7 @@ pub(crate) fn make_link(
     let link = access::create_link(&access::file_for(&default_token_file()), grant, scope)?;
     let url = if anywhere {
         remote::set_enabled(true)?;
+        support::owner_chose_remote();
         remote::link_url(&remote::HostKey::load_or_create()?, &link.code)
     } else {
         format!("{}/#l={}", base.trim_end_matches('/'), link.code)
@@ -722,10 +723,12 @@ fn remote_cli(action: &str) -> Result<()> {
     match action {
         "on" => {
             remote::set_enabled(true)?;
+            support::owner_chose_remote();
             println!("Remote access is on. Make a link with: glass link --anywhere");
         }
         "off" => {
             remote::set_enabled(false)?;
+            support::owner_chose_remote();
             println!(
                 "Remote access is off. Links made with --anywhere stop working within seconds; tailnet access is unaffected."
             );
@@ -783,6 +786,11 @@ fn fleet_cli(action: &str, arg: Option<&str>, json: bool) -> Result<()> {
         }
         "off" => {
             fleet::set_enabled(false)?;
+            // Nothing on the website says it takes commands any more: it doesn't.
+            let forgotten = actions::forget_managers()?;
+            if forgotten > 0 {
+                println!("Stopped taking actions. {forgotten} passkey{} forgotten.", if forgotten == 1 { "" } else { "s" });
+            }
             let deleted = fleet::send(true).is_ok();
             println!("{}", if deleted { "Stopped. What was sent has been deleted." } else { "Stopped. (Couldn't reach glassdesk.dev to delete what was sent; it goes when you run glass account remove.)" });
         }
@@ -818,6 +826,12 @@ fn fleet_manage(arg: Option<&str>, json: bool) -> Result<()> {
         Some("off") => {
             let n = actions::forget_managers()?;
             println!("Stopped taking actions. {n} passkey{} forgotten.", if n == 1 { "" } else { "s" });
+            // So the account stops offering them now, not at the next report.
+            if fleet::enabled()
+                && let Err(e) = fleet::send(false)
+            {
+                println!("Your account may offer actions here until the next report: {e:#}");
+            }
         }
         Some("status") => {
             let recent = actions::recent(5);
