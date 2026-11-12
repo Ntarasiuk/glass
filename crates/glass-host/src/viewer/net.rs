@@ -454,7 +454,7 @@ async fn once(target: &Target, viewer: &Arc<Viewer>, rx: &mut mpsc::UnboundedRec
                         #[cfg(any(target_os = "macos", windows))]
                         {
                             if player.is_none() {
-                                match super::audio::Player::new() {
+                                match super::audio::Player::new(viewer.volume.clone()) {
                                     Ok(p) => player = Some(p),
                                     Err(e) => {
                                         tracing::warn!("viewer: no sound: {e:#}");

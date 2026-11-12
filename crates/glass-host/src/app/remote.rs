@@ -9,6 +9,8 @@ use std::time::Duration;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent as FieldEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -134,6 +136,9 @@ pub struct RemoteView {
     #[cfg(windows)]
     shown: HashMap<usize, Arc<RenderImage>>,
     _tasks: Vec<Task<()>>,
+    /// How loud the computer's sound plays here (0..100).
+    volume: Entity<SliderState>,
+    sound_open: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -142,6 +147,9 @@ impl RemoteView {
         let prefs = crate::viewer::prefs::load(&target.dns);
         let session = Session::start(rt, target);
         session.viewer.audio_on.store(prefs.audio.unwrap_or(true), Ordering::Relaxed);
+        let level = prefs.volume.unwrap_or(1.0).clamp(0.0, 1.0);
+        session.viewer.volume.store(level.to_bits(), Ordering::Relaxed);
+        let volume = cx.new(|_| SliderState::new().min(0.).max(100.).step(1.).default_value(level * 100.));
         let viewer = session.viewer.clone();
         // Redraw when there's a new frame, message or status, at most once per change.
         let frames = cx.spawn_in(window, async move |this, cx| {
@@ -201,6 +209,15 @@ impl RemoteView {
         let focus = cx.focus_handle();
         let chat_input = cx.new(|cx| InputState::new(window, cx).placeholder("Message everyone on this computer…"));
         let subs = vec![
+            cx.subscribe(&volume, |this, _, ev: &SliderEvent, cx| {
+                let (SliderEvent::Change(v) | SliderEvent::Release(v)) = ev;
+                let level = (v.start() / 100.).clamp(0.0, 1.0);
+                // Heard as it moves; remembered once it's let go.
+                this.session.viewer.volume.store(level.to_bits(), Ordering::Relaxed);
+                if matches!(ev, SliderEvent::Release(_)) {
+                    crate::viewer::prefs::update(&this.session.target.dns, |p| p.volume = Some(level));
+                }
+            }),
             cx.on_focus(&focus, window, |this, window, cx| this.sync_capture(window, cx)),
             cx.on_blur(&focus, window, |this, window, cx| this.sync_capture(window, cx)),
             cx.observe_window_activation(window, |this, window, cx| this.sync_capture(window, cx)),
@@ -263,6 +280,8 @@ impl RemoteView {
             #[cfg(windows)]
             shown: HashMap::new(),
             _tasks: vec![frames, clip, fade, pads, previews],
+            volume,
+            sound_open: false,
             _subs: subs,
         }
     }
@@ -358,6 +377,7 @@ impl RemoteView {
                         self.toggle_terminal(window, cx);
                     }
                     self.drawing |= open.contains("draw");
+                    self.sound_open |= open.contains("sound");
                     if open.contains("keys-off") {
                         self.capture_on = false;
                         self.capture = None;
@@ -768,7 +788,9 @@ impl RemoteView {
             .small()
             .ghost()
             .icon(I::Monitor)
-            .label(if streams.len() > 1 { format!("{} displays", streams.len()) } else { "Display".into() })
+            // Just the icon once big text would push End off the toolbar.
+            .when(!compact_toolbar(), |b| b.label(if streams.len() > 1 { format!("{} displays", streams.len()) } else { "Display".into() }))
+            .tooltip("Displays")
             .dropdown_menu(move |mut menu, _, _| {
                 for (i, d) in displays.iter().enumerate() {
                     let id = d["id"].as_u64().unwrap_or(0) as u32;
@@ -932,7 +954,7 @@ impl RemoteView {
         let has_audio = self.welcome()["audio"].as_bool().unwrap_or(false);
         h_flex()
             .flex_none()
-            .h(px(40.))
+            .h(super::text_size::pt(40.))
             .px_3()
             .gap_1()
             .border_b_1()
@@ -945,15 +967,8 @@ impl RemoteView {
                 let pct = t.total.filter(|&n| n > 0).map_or(String::new(), |n| format!(" {}%", t.done * 100 / n));
                 div().text_xs().text_color(theme.muted_foreground).child(format!("{} {}{pct}", if t.up { "↑" } else { "↓" }, t.name))
             }))
-            .children(self.now_playing.as_ref().map(|np| self.media(np, cx)))
             .when(self.session.viewer.displays().len() > 1 || !self.windows.is_empty(), |d| d.child(self.displays_menu(cx)))
-            .when(has_audio, |d| {
-                d.child(Button::new("remote-sound").small().ghost().icon(if audio { I::Volume2 } else { I::VolumeX }).on_click(cx.listener(move |this, _, _, cx| {
-                    this.session.audio(!audio);
-                    crate::viewer::prefs::update(&this.session.target.dns, |p| p.audio = Some(!audio));
-                    cx.notify();
-                })))
-            })
+            .when(has_audio || self.now_playing.is_some(), |d| d.child(self.sound_menu(has_audio, audio, cx)))
             .child(
                 Button::new("remote-chat")
                     .small()
@@ -993,7 +1008,10 @@ impl RemoteView {
                     .small()
                     .map(|b| if captured { b.primary() } else { b.ghost() })
                     .icon(I::Keyboard)
-                    .label(if captured { format!("{} to release", crate::viewer::sys::RELEASE_HINT) } else { "Capture keys".into() })
+                    .map(|b| {
+                        let text = if captured { format!("{} to release", crate::viewer::sys::RELEASE_HINT) } else { "Capture keys".into() };
+                        if compact_toolbar() { b.tooltip(text) } else { b.label(text) }
+                    })
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_capture(window, cx))),
             )
             .child(Button::new("remote-full").small().ghost().icon(if self.full_screen { I::Minimize } else { I::Maximize }).on_click(cx.listener(|this, _, window, cx| this.toggle_full_screen(window, cx))))
@@ -1001,21 +1019,72 @@ impl RemoteView {
     }
 
     /// What the computer is playing, with its controls.
-    fn media(&self, np: &Value, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The speaker: a dropdown with what's playing there, its controls, the volume and mute.
+    fn sound_menu(&self, has_audio: bool, audio: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity();
+        let playing = self.now_playing.as_ref().is_some_and(|np| np["playing"].as_bool().unwrap_or(false));
+        let icon = if has_audio && !audio { I::VolumeX } else { I::Volume2 };
+        Popover::new("remote-sound")
+            .anchor(Anchor::TopRight)
+            .open(self.sound_open)
+            .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                this.sound_open = *open;
+                cx.notify();
+            }))
+            .trigger(Button::new("remote-sound-btn").small().ghost().icon(icon).when(playing, |b| b.primary()))
+            .content(move |_, _, cx| {
+                let v = view.read(cx);
+                Self::sound_panel(v, view.clone(), has_audio, cx)
+            })
+    }
+
+    fn sound_panel(v: &Self, view: Entity<Self>, has_audio: bool, cx: &App) -> Div {
         let theme = cx.theme();
-        let title = np["title"].as_str().unwrap_or_default();
-        let artist = np["artist"].as_str().unwrap_or_default();
-        let playing = np["playing"].as_bool().unwrap_or(false);
+        let audio = v.session.viewer.audio_on.load(Ordering::Relaxed);
         let ctl = |id: &'static str, icon: I, action: &'static str| {
-            Button::new(id).xsmall().ghost().icon(icon).on_click(cx.listener(move |this, _, _, _| this.session.control(json!({ "t": "media", "action": action }))))
+            let view = view.clone();
+            Button::new(id).small().ghost().icon(icon).on_click(move |_, _, cx| view.update(cx, |v, _| v.session.control(json!({ "t": "media", "action": action }))))
         };
-        h_flex()
-            .gap_0p5()
-            .max_w(px(260.))
-            .child(div().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(if artist.is_empty() { title.to_string() } else { format!("{title} — {artist}") }))
-            .child(ctl("media-prev", I::SkipBack, "previous"))
-            .child(ctl("media-play", if playing { I::Pause } else { I::Play }, "toggle"))
-            .child(ctl("media-next", I::SkipForward, "next"))
+        v_flex()
+            .w(super::text_size::pt(260.))
+            .gap_3()
+            .children(v.now_playing.as_ref().map(|np| {
+                let title = np["title"].as_str().unwrap_or_default().to_string();
+                let artist = np["artist"].as_str().unwrap_or_default().to_string();
+                let playing = np["playing"].as_bool().unwrap_or(false);
+                v_flex()
+                    .gap_1()
+                    .child(div().text_xs().text_color(theme.muted_foreground).child("Playing there"))
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(title))
+                    .when(!artist.is_empty(), |d| d.child(div().text_xs().text_color(theme.muted_foreground).truncate().child(artist)))
+                    .child(
+                        h_flex()
+                            .justify_center()
+                            .gap_1()
+                            .child(ctl("media-prev", I::SkipBack, "previous"))
+                            .child(ctl("media-play", if playing { I::Pause } else { I::Play }, "toggle"))
+                            .child(ctl("media-next", I::SkipForward, "next")),
+                    )
+            }))
+            .when(has_audio, |d| {
+                d.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(Button::new("remote-mute").small().ghost().icon(if audio { I::Volume2 } else { I::VolumeX }).tooltip(if audio { "Mute" } else { "Unmute" }).on_click({
+                            let view = view.clone();
+                            move |_, _, cx| {
+                                view.update(cx, |v, cx| {
+                                    let on = !v.session.viewer.audio_on.load(Ordering::Relaxed);
+                                    v.session.audio(on);
+                                    crate::viewer::prefs::update(&v.session.target.dns, |p| p.audio = Some(on));
+                                    cx.notify();
+                                })
+                            }
+                        }))
+                        .child(div().flex_1().child(Slider::new(&v.volume).horizontal().disabled(!audio))),
+                )
+            })
     }
 
     fn toggle_full_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1041,13 +1110,13 @@ impl RemoteView {
     fn chat_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         v_flex()
-            .w(px(280.))
+            .w(super::text_size::pt(280.))
             .flex_none()
             .h_full()
             .border_l_1()
             .border_color(theme.border)
             .bg(theme.background)
-            .child(h_flex().h(px(36.)).px_3().text_sm().font_weight(FontWeight::MEDIUM).child("Chat"))
+            .child(h_flex().h(super::text_size::pt(36.)).px_3().text_sm().font_weight(FontWeight::MEDIUM).child("Chat"))
             .child(
                 v_flex()
                     .id("remote-chat-lines")
@@ -1139,7 +1208,7 @@ impl RemoteView {
                 h_flex()
                     .id(SharedString::from(format!("file-{i}")))
                     .px_2()
-                    .h(px(28.))
+                    .h(super::text_size::pt(28.))
                     .gap_2()
                     .rounded(px(6.))
                     .hover(|d| d.bg(theme.secondary_hover))
@@ -1172,7 +1241,7 @@ impl RemoteView {
         }
         let here = path.clone();
         v_flex()
-            .w(px(320.))
+            .w(super::text_size::pt(320.))
             .flex_none()
             .h_full()
             .border_l_1()
@@ -1180,7 +1249,7 @@ impl RemoteView {
             .bg(theme.background)
             .child(
                 h_flex()
-                    .h(px(36.))
+                    .h(super::text_size::pt(36.))
                     .px_2()
                     .gap_1()
                     .child(Button::new("files-up").xsmall().ghost().icon(I::ChevronLeft).disabled(path.is_empty()).on_click(cx.listener(move |this, _, _, _| this.list_files(up.clone()))))
@@ -1204,7 +1273,7 @@ impl RemoteView {
     fn agent_asks(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let owner = self.owner();
-        v_flex().absolute().top_3().left_3().w(px(340.)).gap_2().children(self.asks.iter().map(|a| {
+        v_flex().absolute().top_3().left_3().w(super::text_size::pt(340.)).gap_2().children(self.asks.iter().map(|a| {
             let id = a["id"].as_u64().unwrap_or(0);
             let kind = a["kind"].as_str().unwrap_or("confirm").to_string();
             let text = a["text"].as_str().unwrap_or_default();
@@ -1544,7 +1613,7 @@ impl Render for RemoteView {
                     .justify_center()
                     .gap_2()
                     .p_8()
-                    .child(div().max_w(px(460.)).text_center().text_sm().text_color(color).child(text)),
+                    .child(div().max_w(super::text_size::pt(460.)).text_center().text_sm().text_color(color).child(text)),
             );
         }
 
@@ -1628,4 +1697,9 @@ impl EntityInputHandler for RemoteView {
     fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
         None
     }
+}
+
+/// Text big enough that the toolbar's labels wouldn't all fit: icons only (with tooltips).
+fn compact_toolbar() -> bool {
+    super::text_size::scale() > 1.15
 }

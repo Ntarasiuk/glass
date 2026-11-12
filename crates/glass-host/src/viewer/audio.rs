@@ -3,6 +3,7 @@
 //! around 40 ms: enough to ride out jitter, short enough to stay with the picture.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -31,7 +32,7 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new() -> Result<Self> {
+    pub fn new(volume: Arc<AtomicU32>) -> Result<Self> {
         let ring = Arc::new(Mutex::new(Ring { samples: VecDeque::new(), primed: false }));
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let (ready_tx, ready) = std::sync::mpsc::channel::<Result<()>>();
@@ -52,6 +53,7 @@ impl Player {
                 let stream = device.build_output_stream::<f32, _, _>(
                     config,
                     move |out, _| {
+                        let gain = f32::from_bits(volume.load(Ordering::Relaxed)).clamp(0.0, 1.0);
                         let mut ring = for_device.lock().unwrap();
                         if !ring.primed && ring.samples.len() as f64 >= PRIME_SECS * RATE * 2.0 {
                             ring.primed = true;
@@ -74,7 +76,7 @@ impl Player {
                                 (0.0, 0.0)
                             };
                             for (c, x) in frame.iter_mut().enumerate() {
-                                *x = if mute { 0.0 } else if c % 2 == 0 { l } else { r };
+                                *x = if mute { 0.0 } else if c % 2 == 0 { l * gain } else { r * gain };
                             }
                             if ring.primed {
                                 PLAYED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

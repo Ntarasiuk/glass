@@ -98,7 +98,7 @@ impl GlassApp {
     /// A text setting's row.
     pub(super) fn field(&self, key: &'static str, title: &str, detail: &str, cx: &App) -> AnyElement {
         let locked = self.store.read(cx).snap.policy.locked(key);
-        let input = Input::new(&self.fields[key]).small().w(px(250.)).disabled(locked).when(secret(key), |i| i.mask_toggle());
+        let input = Input::new(&self.fields[key]).small().w(super::text_size::pt(250.)).disabled(locked).when(secret(key), |i| i.mask_toggle());
         ui::row(title.to_string(), ui::managed(detail, locked), input, cx)
     }
 
@@ -259,7 +259,7 @@ impl GlassApp {
                 "At least 16 characters.",
                 h_flex()
                     .gap_2()
-                    .child(Input::new(&self.token_input).small().w(px(200.)).mask_toggle())
+                    .child(Input::new(&self.token_input).small().w(super::text_size::pt(200.)).mask_toggle())
                     .child(Button::new("set-token").small().label("Set").on_click(cx.listener(|this, _, window, cx| {
                         let t = this.token_input.read(cx).value().to_string();
                         this.token_input.update(cx, |s, cx| s.set_value("", window, cx));
@@ -390,7 +390,21 @@ impl GlassApp {
             notify.push(ui::note("None yet. On your phone or iPad, open Glass and tap the bell in its toolbar.", cx));
         }
 
+        let size = super::text_size::get();
+        let (smallest, largest) = (super::text_size::STEPS[0], *super::text_size::STEPS.last().unwrap_or(&size));
+        let appearance = vec![ui::row(
+            "Text size",
+            format!("{size:.0} pt. Everything in the window grows with it. {m}+ and {m}− change it too, {m}0 puts it back.", m = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" }),
+            h_flex()
+                .gap_1()
+                .child(Button::new("text-smaller").small().ghost().label("A−").tooltip("Smaller text").disabled(size <= smallest).on_click(|_, _, cx| super::text_size::step(false, cx)))
+                .child(Button::new("text-bigger").small().ghost().label("A+").tooltip("Bigger text").disabled(size >= largest).on_click(|_, _, cx| super::text_size::step(true, cx)))
+                .child(Button::new("text-reset").small().ghost().label("Reset").disabled(size == super::text_size::DEFAULT).on_click(|_, _, cx| super::text_size::set(super::text_size::DEFAULT, cx))),
+            cx,
+        )];
+
         ui::page("Settings", "How Glass behaves, your access token, and the background service.", cx)
+            .child(ui::section("Appearance", appearance, cx))
             .child(ui::section("Connections", connections, cx))
             .child(ui::section("AI agents", agents, cx))
             .child(ui::section("Notifications on your devices", notify, cx))

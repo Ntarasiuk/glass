@@ -66,8 +66,8 @@ pub fn dot(color: Hsla) -> impl IntoElement {
 
 pub fn count(n: usize, bg: Hsla, fg: Hsla) -> impl IntoElement {
     div()
-        .min_w(px(18.))
-        .h(px(18.))
+        .min_w(super::text_size::pt(18.))
+        .h(super::text_size::pt(18.))
         .px_1p5()
         .flex()
         .items_center()
@@ -82,7 +82,7 @@ pub fn count(n: usize, bg: Hsla, fg: Hsla) -> impl IntoElement {
 
 /// A page: a title, a line saying what it's for, then its sections.
 pub fn page(title: &str, subtitle: &str, cx: &App) -> Div {
-    v_flex().w_full().max_w(px(760.)).px(px(36.)).pt_1().pb(px(40.)).gap(px(26.)).child(
+    v_flex().w_full().max_w(super::text_size::pt(760.)).px(super::text_size::pt(36.)).pt_1().pb(super::text_size::pt(40.)).gap(super::text_size::pt(26.)).child(
         v_flex()
             .gap_1()
             .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child(title.to_string()))
@@ -129,7 +129,7 @@ pub fn managed(detail: impl Into<String>, locked: bool) -> String {
 pub fn row(title: impl Into<SharedString>, detail: impl Into<SharedString>, control: impl IntoElement, cx: &App) -> AnyElement {
     let detail: SharedString = detail.into();
     h_flex()
-        .min_h(px(52.))
+        .min_h(super::text_size::pt(52.))
         .px_4()
         .py_2p5()
         .gap_4()
@@ -157,7 +157,7 @@ pub fn icon_row(
 ) -> AnyElement {
     let detail: SharedString = detail.into();
     h_flex()
-        .min_h(px(56.))
+        .min_h(super::text_size::pt(56.))
         .px_4()
         .py_2p5()
         .gap_3()
@@ -179,7 +179,7 @@ pub fn icon_row(
 /// A rounded square with an icon, tinted.
 pub fn tile(icon: I, tint: Hsla) -> impl IntoElement {
     div()
-        .size(px(30.))
+        .size(super::text_size::pt(30.))
         .flex_none()
         .flex()
         .items_center()

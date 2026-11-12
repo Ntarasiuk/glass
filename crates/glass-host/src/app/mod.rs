@@ -23,6 +23,7 @@ mod sessions;
 mod setup;
 mod support;
 mod teams;
+pub(crate) mod text_size;
 mod ui;
 
 use std::collections::HashMap;
@@ -115,7 +116,23 @@ pub fn run(rt: tokio::runtime::Runtime) -> anyhow::Result<()> {
         .detach();
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-w", Close, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.set_menus([Menu { name: "Glass".into(), items: vec![MenuItem::action("Quit Glass", Quit)], disabled: false }]);
+        cx.bind_keys([
+            KeyBinding::new("secondary-=", Bigger, None),
+            KeyBinding::new("secondary-+", Bigger, None),
+            KeyBinding::new("secondary--", Smaller, None),
+            KeyBinding::new("secondary-0", ActualSize, None),
+        ]);
+        cx.on_action(|_: &Bigger, cx| text_size::step(true, cx));
+        cx.on_action(|_: &Smaller, cx| text_size::step(false, cx));
+        cx.on_action(|_: &ActualSize, cx| text_size::set(text_size::DEFAULT, cx));
+        cx.set_menus([
+            Menu { name: "Glass".into(), items: vec![MenuItem::action("Quit Glass", Quit)], disabled: false },
+            Menu {
+                name: "View".into(),
+                items: vec![MenuItem::action("Bigger Text", Bigger), MenuItem::action("Smaller Text", Smaller), MenuItem::action("Actual Size", ActualSize)],
+                disabled: false,
+            },
+        ]);
 
         let store = cx.new(|cx| Store::new(handle, cx));
         cx.set_global(StoreHandle(store.clone()));
@@ -148,7 +165,7 @@ pub fn run(rt: tokio::runtime::Runtime) -> anyhow::Result<()> {
     Ok(())
 }
 
-actions!(glass, [Quit, Close]);
+actions!(glass, [Quit, Close, Bigger, Smaller, ActualSize]);
 
 /// Where Glass's icon lives: the menu bar on a Mac, the notification area on Windows.
 pub const ICON_PLACE: &str = if cfg!(windows) { "notification area" } else { "menu bar" };
@@ -206,7 +223,7 @@ fn restyle(t: &mut Theme, dark: bool) {
         t.secondary_active = hsla(0., 0., 0., 0.09);
         t.sidebar = hsla(220. / 360., 0.2, 0.96, 0.7);
     }
-    t.font_size = px(14.);
+    t.font_size = px(text_size::get());
 }
 
 // ---- Shared state ----
@@ -767,7 +784,7 @@ impl GlassApp {
             rows.push(
                 h_flex()
                     .id(SharedString::from(format!("screen-{i}")))
-                    .h(px(32.))
+                    .h(text_size::pt(32.))
                     .px_2p5()
                     .gap_2p5()
                     .rounded(px(8.))
@@ -818,7 +835,7 @@ impl GlassApp {
         };
         let update = store.update_available().map(str::to_string);
         v_flex()
-            .w(px(216.))
+            .w(text_size::pt(216.))
             .flex_none()
             .h_full()
             .bg(theme.sidebar)
@@ -853,7 +870,7 @@ impl GlassApp {
                 let theme = cx.theme();
                 h_flex()
                     .id(SharedString::from(format!("nav-{}", page.label())))
-                    .h(px(32.))
+                    .h(text_size::pt(32.))
                     .px_2p5()
                     .gap_2p5()
                     .rounded(px(8.))

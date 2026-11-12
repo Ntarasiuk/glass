@@ -103,7 +103,7 @@ impl GlassApp {
         use gpui_kit::component::input::Input;
         let control = h_flex()
             .gap_2()
-            .w(px(420.))
+            .w(super::text_size::pt(420.))
             .child(div().flex_1().child(Input::new(&self.open_link).small()))
             .child(Button::new("open-link").small().primary().label("Connect").on_click(cx.listener(|this, _, window, cx| {
                 let url = this.open_link.read(cx).value().to_string();
