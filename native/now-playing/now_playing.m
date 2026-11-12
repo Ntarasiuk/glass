@@ -48,10 +48,12 @@ static void report(void)
         // Compare without the artwork, then add it only when it changed.
         NSData *json = [NSJSONSerialization dataWithJSONObject:out options:NSJSONWritingSortedKeys error:nil];
         NSString *line = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
-        if ([line isEqualToString:lastLine]) return;
-        lastLine = line;
+        // Artwork can come later than the rest of a track's details: that's a change too.
         id art = info[@"kMRMediaRemoteNowPlayingInfoArtworkData"];
-        if ([art isKindOfClass:[NSData class]] && artId && ![artId isEqualToString:lastArtworkId] && [(NSData *)art length] < 2000000) {
+        BOOL newArt = [art isKindOfClass:[NSData class]] && artId && ![artId isEqualToString:lastArtworkId] && [(NSData *)art length] < 2000000;
+        if ([line isEqualToString:lastLine] && !newArt) return;
+        lastLine = line;
+        if (newArt) {
             lastArtworkId = artId;
             out[@"artwork"] = [(NSData *)art base64EncodedStringWithOptions:0];
             out[@"artworkType"] = str(@"ArtworkMIMEType") ?: @"image/jpeg";

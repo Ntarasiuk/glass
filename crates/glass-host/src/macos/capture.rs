@@ -39,8 +39,39 @@ struct LastFrame(Option<CFRetained<CVImageBuffer>>, u64);
 // CVPixelBuffers are thread-safe, reference-counted CF objects.
 unsafe impl Send for LastFrame {}
 
+/// Whether a capture is the one its stream number goes out from. A replacement starts shut, so
+/// a failed start leaves the old capture running; the old one is shut first and the new one
+/// opened after, and from then on nothing of the old one reaches viewers, however late it
+/// comes out of VideoToolbox. A stream number only ever has one encoder feeding it.
+#[derive(Default)]
+pub struct Gate(std::sync::Mutex<bool>);
+
+impl Gate {
+    pub fn open(&self) {
+        *self.0.lock().unwrap() = true;
+    }
+
+    /// Once this returns, `pass` runs nothing more.
+    pub fn close(&self) {
+        *self.0.lock().unwrap() = false;
+    }
+
+    pub fn is_open(&self) -> bool {
+        *self.0.lock().unwrap()
+    }
+
+    /// Runs `send` if open; held meanwhile, so `close` waits for one under way.
+    pub fn pass(&self, send: impl FnOnce()) {
+        let open = self.0.lock().unwrap();
+        if *open {
+            send();
+        }
+    }
+}
+
 pub struct FrameState {
     encoder: Arc<Encoder>,
+    gate: Arc<Gate>,
     /// Its stream number, for flow control (crate::flow).
     stream: u8,
     last: std::sync::Mutex<LastFrame>,
@@ -64,6 +95,9 @@ pub struct FrameState {
     queue: dispatch2::DispatchRetained<DispatchQueue>,
     /// ScreenCaptureKit ended the stream (e.g. its display slept); it won't resume by itself.
     stopped: std::sync::atomic::AtomicBool,
+    /// The person at this Mac stopped it (the screen-recording indicator): not to be restarted
+    /// unless a viewer picks what to show again.
+    user_stopped: std::sync::atomic::AtomicBool,
 }
 
 /// A still screen is re-encoded this often for a while, so it sharpens to near-lossless
@@ -115,6 +149,9 @@ impl FrameState {
             return;
         };
         let _ = self.queue.after(when, move || {
+            if !state.gate.is_open() {
+                return; // replaced, or not yet in use
+            }
             if state.generation.load(Relaxed) != generation {
                 return; // newer frames took over
             }
@@ -186,7 +223,9 @@ define_class!(
             kind: SCStreamOutputType,
         ) {
             if kind == SCStreamOutputType::Audio {
-                if let Some(audio) = &self.ivars().audio {
+                if let Some(audio) = &self.ivars().audio
+                    && self.ivars().state.gate.is_open()
+                {
                     audio.lock().unwrap().push(sample);
                 }
                 return;
@@ -220,6 +259,12 @@ define_class!(
                 us => us,
             };
             let state = &ivars.state;
+            // Not in use yet: keep the picture, for when it is.
+            if !state.gate.is_open() {
+                state.unsent.store(true, Relaxed);
+                *state.last.lock().unwrap() = LastFrame(Some(image), capture_us);
+                return;
+            }
             state.generation.fetch_add(1, Relaxed);
             state.refreshes.store(0, Relaxed);
             state.tiny.store(0, Relaxed);
@@ -254,6 +299,7 @@ define_class!(
             // Stopped from this Mac's screen-recording indicator: leave it stopped.
             if error.code() == SCStreamErrorCode::UserStopped.0 {
                 tracing::info!("display {}: capture stopped from this Mac", ivars.display);
+                ivars.state.user_stopped.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
             tracing::warn!(
@@ -349,9 +395,34 @@ impl Capture {
         let state = self.state.clone();
         // A skipped (newer) image is news; otherwise it's the picture already sent.
         self.queue.exec_async(move || {
+            if !state.gate.is_open() {
+                return;
+            }
             let fresh = state.unsent.swap(false, std::sync::atomic::Ordering::Relaxed);
             state.encode_last(!fresh)
         });
+    }
+
+    /// This capture is now the one its stream goes out from: what it has goes out, and a still
+    /// screen goes on to sharpen as usual.
+    pub fn go_live(&self) {
+        self.state.gate.open();
+        let state = self.state.clone();
+        self.queue.exec_async(move || {
+            let fresh = state.unsent.swap(false, std::sync::atomic::Ordering::Relaxed);
+            state.encode_last(!fresh);
+            state.schedule_idle_check();
+        });
+    }
+
+    /// Stops anything of this capture reaching viewers from now on.
+    pub fn retire(&self) {
+        self.state.gate.close();
+    }
+
+    /// Someone at this Mac stopped it.
+    pub fn user_stopped(&self) -> bool {
+        self.state.user_stopped.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Bumped on every new image.
@@ -631,6 +702,7 @@ pub fn screenshot(display_id: CGDirectDisplayID, max: [u32; 2]) -> Result<crate:
 
 impl Drop for Capture {
     fn drop(&mut self) {
+        self.retire();
         let (tx, rx) = mpsc::channel();
         let handler = RcBlock::new(move |_err: *mut NSError| {
             let _ = tx.send(());
@@ -850,6 +922,8 @@ pub fn start(
     height: usize,
     fps: i32,
     encoder: Arc<Encoder>,
+    // Shut until `go_live`.
+    gate: Arc<Gate>,
     fps_cap: Arc<std::sync::atomic::AtomicU32>,
     audio: Option<Arc<std::sync::Mutex<Packetizer>>>,
     // Full colour: for the 4:2:2 encoder, or for lossless refreshes (sharp text).
@@ -903,6 +977,7 @@ pub fn start(
     let queue = DispatchQueue::new("glass.capture", DispatchQueueAttr::SERIAL);
     let state = Arc::new(FrameState {
         encoder,
+        gate,
         stream,
         last: std::sync::Mutex::new(LastFrame(None, 0)),
         fps_cap,
@@ -915,6 +990,7 @@ pub fn start(
         changed_us: Default::default(),
         queue: queue.clone(),
         stopped: Default::default(),
+        user_stopped: Default::default(),
     });
     let output = StreamOutput::new(state.clone(), audio, source_id, matches!(source, Source::Display(_)));
     // The output is also the delegate, to hear when ScreenCaptureKit ends the stream.
@@ -973,6 +1049,23 @@ pub fn start(
 
 #[cfg(test)]
 mod tests {
+    use super::Gate;
+
+    #[test]
+    fn a_gate_lets_through_only_while_open() {
+        let gate = Gate::default();
+        let mut sent = 0;
+        gate.pass(|| sent += 1);
+        assert_eq!(sent, 0, "a replacement starts shut");
+        gate.open();
+        gate.pass(|| sent += 1);
+        assert!(gate.is_open());
+        assert_eq!(sent, 1);
+        gate.close();
+        gate.pass(|| sent += 1);
+        assert_eq!(sent, 1, "nothing of a retired capture goes out");
+    }
+
     /// Needs Screen Recording permission: `cargo test -- --ignored screenshot`.
     #[test]
     #[ignore]

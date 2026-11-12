@@ -1,5 +1,7 @@
 //! Injects client input as system-level CGEvents. Requires Accessibility permission.
 
+use std::collections::HashSet;
+
 use glass_proto::InputEvent;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect};
 use objc2_core_graphics::{
@@ -75,7 +77,8 @@ pub struct Injector {
     window: Option<CGRect>,
     pos: CGPoint,
     buttons: [bool; 3],
-    flags: CGEventFlags,
+    /// The keys now down.
+    held: HashSet<u16>,
     last_click: Option<(u8, std::time::Instant, CGPoint)>,
     click_count: i64,
     /// Relative motion for the next move event (games read these, not the position).
@@ -113,7 +116,7 @@ impl Injector {
             window: None,
             pos: CGDisplayBounds(display).origin,
             buttons: [false; 3],
-            flags: CGEventFlags(0),
+            held: HashSet::new(),
             last_click: None,
             click_count: 1,
             delta: (0, 0),
@@ -202,12 +205,10 @@ impl Injector {
             InputEvent::Gamepad { .. } | InputEvent::Text { .. } => {}
             InputEvent::KeyDown { keycode } | InputEvent::KeyUp { keycode } => {
                 let down = matches!(ev, InputEvent::KeyDown { .. });
-                if let Some(flag) = modifier_flag(keycode) {
-                    self.flags = if down {
-                        CGEventFlags(self.flags.0 | flag.0)
-                    } else {
-                        CGEventFlags(self.flags.0 & !flag.0)
-                    };
+                if down {
+                    self.held.insert(keycode);
+                } else {
+                    self.held.remove(&keycode);
                 }
                 let ev = CGEvent::new_keyboard_event(self.source.as_deref(), keycode, down);
                 self.post(ev);
@@ -259,19 +260,12 @@ impl Injector {
                 self.handle(InputEvent::MouseUp { button });
             }
         }
-        for keycode in [
-            KVK_COMMAND,
-            KVK_SHIFT,
-            KVK_OPTION,
-            KVK_CONTROL,
-            KVK_RIGHT_COMMAND,
-            KVK_RIGHT_SHIFT,
-            KVK_RIGHT_OPTION,
-            KVK_RIGHT_CONTROL,
-        ] {
-            if modifier_flag(keycode).is_some_and(|f| self.flags.0 & f.0 != 0) {
-                self.handle(InputEvent::KeyUp { keycode });
-            }
+        if self.pen.take().is_some() {
+            self.proximity(false);
+        }
+        // Modifiers last, as fingers would: a key let go without them is just let go.
+        for keycode in release_order(self.held.iter().copied()) {
+            self.handle(InputEvent::KeyUp { keycode });
         }
     }
 
@@ -334,7 +328,7 @@ impl Injector {
     fn post(&self, ev: Option<CFRetained<CGEvent>>) {
         if let Some(ev) = ev {
             declare_user_active();
-            CGEvent::set_flags(Some(&ev), self.flags);
+            CGEvent::set_flags(Some(&ev), held_flags(self.held.iter().copied()));
             // Lets privacy mode's event tap tell these from the local keyboard and mouse.
             CGEvent::set_integer_value_field(
                 Some(&ev),
@@ -381,6 +375,18 @@ fn mouse_button(button: u8, down: bool) -> Option<(CGEventType, CGMouseButton)> 
         (1, false) => (CGEventType::OtherMouseUp, CGMouseButton::Center),
         _ => return None,
     })
+}
+
+/// The modifier flags of the keys down: one held with its other-side twin let go still counts.
+fn held_flags(keys: impl Iterator<Item = u16>) -> CGEventFlags {
+    CGEventFlags(keys.filter_map(modifier_flag).fold(0, |flags, flag| flags | flag.0))
+}
+
+/// `keys` in the order to let go of them: modifiers last.
+fn release_order(keys: impl Iterator<Item = u16>) -> Vec<u16> {
+    let mut keys: Vec<u16> = keys.collect();
+    keys.sort_by_key(|&k| (modifier_flag(k).is_some(), k));
+    keys
 }
 
 fn modifier_flag(keycode: u16) -> Option<CGEventFlags> {
@@ -445,6 +451,24 @@ mod tests {
         assert_eq!((p.x, p.y), (500.0, 200.0));
         let edge = to_global(window, 1.5, -1.0);
         assert_eq!((edge.x, edge.y), (900.0, 50.0), "clamped to the window");
+    }
+
+    #[test]
+    fn a_modifier_stays_held_until_both_sides_are_up() {
+        let flags = |keys: &[u16]| held_flags(keys.iter().copied()).0;
+        let command = CGEventFlags::MaskCommand.0;
+        assert_eq!(flags(&[KVK_COMMAND, KVK_RIGHT_COMMAND]), command);
+        assert_eq!(flags(&[KVK_RIGHT_COMMAND]), command, "the left one let go");
+        assert_eq!(flags(&[KVK_COMMAND, KVK_SHIFT, KVK_V]), command | CGEventFlags::MaskShift.0);
+        assert_eq!(flags(&[KVK_V]), 0);
+    }
+
+    #[test]
+    fn everything_held_is_let_go_modifiers_last() {
+        assert_eq!(
+            release_order([KVK_RIGHT_COMMAND, KVK_V, KVK_SHIFT, 0x00].into_iter()),
+            [0x00, KVK_V, KVK_RIGHT_COMMAND, KVK_SHIFT]
+        );
     }
 
     #[test]
