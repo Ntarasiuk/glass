@@ -668,14 +668,44 @@ fn run_pipewire(
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
     let core = context.connect_fd_rc(fd, None)?;
+    // A shared screen's node going away (the portal crashed or closed it) ends the share: its
+    // stream only goes Paused, waiting for a source that won't come back. One already gone is
+    // never announced, so a node not listed by the end of a round trip is gone too.
+    let nodes: Vec<u32> = captures.iter().map(|(node, ..)| *node).collect();
+    let listed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let registry = core.get_registry()?;
+    let (quit, watched) = (mainloop.clone(), nodes.clone());
+    let _registry_listener = registry
+        .add_listener_local()
+        .global({
+            let listed = listed.clone();
+            move |global| listed.borrow_mut().push(global.id)
+        })
+        .global_remove(move |id| {
+            if watched.contains(&id) {
+                info!("screen node {id} is gone");
+                quit.quit();
+            }
+        })
+        .register();
+    let listing = core.sync(0)?;
     // PipeWire going away ends the share.
-    let quit = mainloop.clone();
+    let (quit, done) = (mainloop.clone(), mainloop.clone());
     let _core_listener = core
         .add_listener_local()
         .error(move |id, _seq, _res, message| {
             if id == pw::core::PW_ID_CORE {
                 warn!("pipewire: {message}");
                 quit.quit();
+            }
+        })
+        .done(move |id, seq| {
+            if id == pw::core::PW_ID_CORE
+                && seq == listing
+                && let Some(node) = nodes.iter().find(|n| !listed.borrow().contains(n))
+            {
+                info!("screen node {node} was gone before capture started");
+                done.quit();
             }
         })
         .register();
@@ -819,7 +849,9 @@ fn run_pipewire(
             pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
             &mut params,
         )?;
-        keep.push((stream, listener, values));
+        // The listener first: they drop in order, and destroying the stream frees the list
+        // its hook is on, which removing the hook afterwards would write to.
+        keep.push((listener, stream, values));
     }
     mainloop.run();
     Ok(())

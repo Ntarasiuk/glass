@@ -38,52 +38,91 @@ fn token_path() -> std::path::PathBuf {
     crate::config_dir().join("portal-restore-token")
 }
 
-/// Starts a session on a dedicated thread that keeps it open until `Cast::session` is dropped.
-/// Blocks until the user approves (or cancels) the share dialog.
+/// Starts a session, kept open until `Cast::session` is dropped. Blocks until the user
+/// approves (or cancels) the share dialog.
 pub fn start() -> Result<Cast> {
     let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("glass-portal".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(r) => r,
-                Err(e) => return drop(tx.send(Err(anyhow::Error::from(e)))),
-            };
-            runtime.block_on(async move {
-                let proxy = match Screencast::new().await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        return drop(tx.send(Err(
-                            anyhow::Error::from(e).context("screen-cast portal unavailable"),
-                        )));
-                    }
-                };
-                match open(&proxy).await {
-                    Ok(((fd, streams), session)) => {
-                        let (hold, ended) = tokio::sync::oneshot::channel();
-                        let _ = tx.send(Ok(Cast { fd, streams, session: hold }));
-                        // Dropping the session would end the cast; hold it until told.
-                        let _session = session;
-                        let _ = ended.await;
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e));
-                    }
-                }
-            });
-        })?;
+    portal_thread().send(tx).map_err(|_| anyhow::anyhow!("the portal thread stopped"))?;
     rx.recv().context("portal thread exited")?
 }
 
+/// One thread and runtime for every session. ashpd keeps a single D-Bus connection for the
+/// process, and zbus drives it with tasks on the runtime that made it: a runtime per session
+/// would leave every later portal call (and the file chooser) waiting on one that's gone.
+fn portal_thread() -> &'static tokio::sync::mpsc::UnboundedSender<mpsc::Sender<Result<Cast>>> {
+    static THREAD: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<mpsc::Sender<Result<Cast>>>> =
+        std::sync::OnceLock::new();
+    THREAD.get_or_init(|| {
+        let (requests, mut incoming) = tokio::sync::mpsc::unbounded_channel::<mpsc::Sender<Result<Cast>>>();
+        let spawned = std::thread::Builder::new().name("glass-portal".into()).spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(r) => r,
+                Err(e) => return tracing::warn!("portal runtime: {e}"),
+            };
+            runtime.block_on(async move {
+                while let Some(reply) = incoming.recv().await {
+                    tokio::spawn(session(reply));
+                }
+            });
+        });
+        if let Err(e) = spawned {
+            tracing::warn!("portal thread: {e}");
+        }
+        requests
+    })
+}
+
+/// Opens a session, replies with it, and holds it until `Cast::session` is dropped.
+async fn session(reply: mpsc::Sender<Result<Cast>>) {
+    let opened = match answered(Screencast::new()).await {
+        Ok(proxy) => open(&proxy).await,
+        Err(e) => Err(e.context("screen-cast portal unavailable")),
+    };
+    match opened {
+        Ok(((fd, streams), session)) => {
+            let (hold, ended) = tokio::sync::oneshot::channel();
+            if reply.send(Ok(Cast { fd, streams, session: hold })).is_ok() {
+                // Dropping the session would end the cast; hold it until told.
+                let _ = ended.await;
+            }
+            // Dropping a Session doesn't close it.
+            let _ = answered(session.close()).await;
+        }
+        Err(e) => {
+            let _ = reply.send(Err(e));
+        }
+    }
+}
+
+/// How long a portal call that no one has to answer may take. One sent while the portal is
+/// (re)starting can go unanswered, and the share, and everyone waiting on it, would be stuck.
+const ANSWER: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn answered<T, E: Into<anyhow::Error>>(call: impl Future<Output = Result<T, E>>) -> Result<T> {
+    match tokio::time::timeout(ANSWER, call).await {
+        Ok(r) => r.map_err(Into::into),
+        Err(_) => anyhow::bail!("the screen-cast portal didn't answer in {} s", ANSWER.as_secs()),
+    }
+}
+
 async fn open(proxy: &Screencast) -> Result<((OwnedFd, Vec<PortalStream>), ashpd::desktop::Session<Screencast>)> {
-    let session = proxy.create_session(Default::default()).await?;
+    let session = answered(proxy.create_session(Default::default())).await?;
+    match share(proxy, &session).await {
+        Ok(cast) => Ok((cast, session)),
+        Err(e) => {
+            let _ = answered(session.close()).await;
+            Err(e)
+        }
+    }
+}
+
+/// Selecting sources and starting can wait on the person at the computer (the share dialog),
+/// so they aren't timed.
+async fn share(proxy: &Screencast, session: &ashpd::desktop::Session<Screencast>) -> Result<(OwnedFd, Vec<PortalStream>)> {
     let token = std::fs::read_to_string(token_path()).ok();
     proxy
         .select_sources(
-            &session,
+            session,
             SelectSourcesOptions::default()
                 .set_cursor_mode(CursorMode::Embedded)
                 .set_sources(ashpd::enumflags2::BitFlags::from_flag(SourceType::Monitor))
@@ -93,7 +132,7 @@ async fn open(proxy: &Screencast) -> Result<((OwnedFd, Vec<PortalStream>), ashpd
         )
         .await?;
     let response = proxy
-        .start(&session, None, Default::default())
+        .start(session, None, Default::default())
         .await?
         .response()
         .map_err(|_| anyhow::Error::new(NotApproved))?;
@@ -111,8 +150,6 @@ async fn open(proxy: &Screencast) -> Result<((OwnedFd, Vec<PortalStream>), ashpd
         })
         .collect::<Vec<_>>();
     anyhow::ensure!(!streams.is_empty(), "no screens were shared");
-    let fd = proxy
-        .open_pipe_wire_remote(&session, Default::default())
-        .await?;
-    Ok(((fd, streams), session))
+    let fd = answered(proxy.open_pipe_wire_remote(session, Default::default())).await?;
+    Ok((fd, streams))
 }
