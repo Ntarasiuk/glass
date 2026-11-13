@@ -127,6 +127,7 @@ self.onmessage = async ({ data }) => {
   } else if (data.type === 'certHash') {
     // The host's self-signed WebTransport certificate was replaced (main.js refetched it).
     certHash = data.certHash;
+    wake?.();
   } else if (data.type === 'canvas') {
     videoStream(data.stream).setCanvas(data.canvas, wideColor);
   } else if (data.type === 'streams') {
