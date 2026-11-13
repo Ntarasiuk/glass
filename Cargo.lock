@@ -2617,6 +2617,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-gst"
+version = "0.15.0"
+dependencies = [
+ "gstreamer",
+ "gstreamer-app",
+ "gstreamer-video",
+]
+
+[[package]]
 name = "glass-host"
 version = "0.15.0"
 dependencies = [
@@ -2637,14 +2646,12 @@ dependencies = [
  "futures-util",
  "glass-proto",
  "gpui-kit",
- "gstreamer",
- "gstreamer-app",
- "gstreamer-video",
  "hyper",
  "hyper-util",
  "image",
  "ldap3",
  "libc",
+ "libloading",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-audio",

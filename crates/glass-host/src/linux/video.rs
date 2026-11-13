@@ -146,6 +146,7 @@ impl Video {
         audio: AudioPackets,
     ) -> Self {
         audio::start(audio);
+        gpu_report();
         Self {
             config,
             frames,
@@ -460,13 +461,40 @@ fn wanted_backends() -> &'static [&'static str] {
     }
 }
 
+/// At startup, when `GLASS_ENCODER` asks for the GPU: which encoder will be used, or a
+/// warning with what's missing and how to install it (the host then uses OpenH264).
+fn gpu_report() {
+    use super::va_encode::{Backend, available, missing};
+    let wanted = wanted_backends();
+    if wanted.is_empty() {
+        return;
+    }
+    let backends: Vec<Backend> = wanted
+        .iter()
+        .map(|n| if *n == "nvenc" { Backend::Nvenc } else { Backend::Va })
+        .collect();
+    if let Some((backend, name)) =
+        backends.iter().find_map(|&b| available(b).map(|name| (b, name)))
+    {
+        let version = super::gst_lib::lib().map(|l| l.version.clone()).unwrap_or_default();
+        let path = super::gst_lib::lib().map(|l| l.path.display().to_string()).unwrap_or_default();
+        info!("GPU encoding: {} ({name}, {version}, {path})", backend.label());
+        return;
+    }
+    for backend in backends {
+        if let Some(why) = missing(backend) {
+            warn!("GPU encoding ({}) unavailable: {why}", backend.label());
+        }
+    }
+    warn!("GLASS_ENCODER asks for the GPU, but no GPU encoder can be used: encoding with OpenH264 (software)");
+}
+
 /// OpenH264, or with `GLASS_ENCODER` the GPU through VA-API or NVENC. Opt-in for now:
 /// with frames captured into system memory, copying them to a discrete GPU costs about
 /// what software encoding does (the GPU path uses less CPU). Capturing DMA-BUFs would
 /// remove the copy.
 enum VideoEncoder {
     Soft(Encoder),
-    #[cfg(feature = "vaapi")]
     Va(super::va_encode::VaEncoder),
 }
 
@@ -480,12 +508,6 @@ impl VideoEncoder {
         scale: f64,
     ) -> Result<Self> {
         let wanted = wanted_backends();
-        #[cfg(not(feature = "vaapi"))]
-        if !wanted.is_empty() && !HARDWARE_FAILED.swap(true, Ordering::Relaxed) {
-            let _ = format;
-            warn!("GLASS_ENCODER asks for the GPU, but this build has no GPU encoding (--features vaapi); using OpenH264");
-        }
-        #[cfg(feature = "vaapi")]
         if !HARDWARE_FAILED.load(Ordering::Relaxed) {
             use super::va_encode::{Backend, VaEncoder, fits};
             let mut tried = false;
@@ -500,7 +522,10 @@ impl VideoEncoder {
                         info!("encoder: {} ({})", e.name, backend.label());
                         return Ok(Self::Va(e));
                     }
-                    Err(e) => warn!("{} encoder unavailable: {e:#}", backend.label()),
+                    Err(e) => match super::va_encode::missing(backend) {
+                        Some(why) => warn!("{} unavailable: {why}", backend.label()),
+                        None => warn!("{} encoder unavailable: {e:#}", backend.label()),
+                    },
                 }
             }
             if tried {
@@ -519,7 +544,6 @@ impl VideoEncoder {
     fn accepts(&self, frame: &Frame) -> bool {
         match self {
             Self::Soft(e) => e.source_size() == (frame.width, frame.height),
-            #[cfg(feature = "vaapi")]
             Self::Va(e) => e.accepts(frame),
         }
     }
@@ -527,7 +551,6 @@ impl VideoEncoder {
     fn set_bitrate(&mut self, bps: u32) {
         match self {
             Self::Soft(e) => e.set_bitrate(bps),
-            #[cfg(feature = "vaapi")]
             Self::Va(e) => e.set_bitrate(bps),
         }
     }
@@ -535,7 +558,6 @@ impl VideoEncoder {
     fn encode(&mut self, frame: &Frame, force: bool) -> Result<Option<(Vec<u8>, bool)>> {
         match self {
             Self::Soft(e) => e.encode(frame, force),
-            #[cfg(feature = "vaapi")]
             Self::Va(e) => e.encode(frame, force),
         }
     }

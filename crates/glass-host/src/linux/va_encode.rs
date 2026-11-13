@@ -14,16 +14,14 @@
 //! Each frame goes in and comes out before the next one (no B-frames, no lookahead), so
 //! nothing is buffered. Output is Annex B with SPS/PPS before every IDR, like the OpenH264
 //! path. Used when the plugin and a device are there; otherwise the host falls back to
-//! OpenH264.
+//! OpenH264. GStreamer is reached through libglass_gst.so, loaded at run time
+//! (`gst_lib`), so the host runs without it.
 
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use gstreamer as gst;
-use gstreamer::prelude::*;
-use gstreamer_app::{AppSink, AppSrc};
 
+use super::gst_lib::{self, Pipeline};
 use crate::soft_encode::{Frame, MAX_PIXELS, PixelFormat, to_i420};
 
 /// Matches the macOS and OpenH264 encoders: a periodic IDR.
@@ -80,10 +78,7 @@ fn should_apply(applied: u32, wanted: u32, since: Duration) -> bool {
 
 pub struct VaEncoder {
     backend: Backend,
-    pipeline: gst::Pipeline,
-    src: AppSrc,
-    sink: AppSink,
-    encoder: gst::Element,
+    pipeline: Pipeline,
     source: (usize, usize),
     /// 1, or 2 to halve the picture (`--scale 0.5`, or a screen too big to encode whole).
     div: usize,
@@ -91,12 +86,13 @@ pub struct VaEncoder {
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
-    /// GStreamer's layout for what goes in: NV12 at the output size (rows padded to 4
-    /// bytes) for VA-API, the captured RGB for NVENC.
-    layout: gstreamer_video::VideoInfo,
+    /// GStreamer's layout for what goes in: NV12 at the output size for VA-API, the
+    /// captured RGB for NVENC.
+    layout: Layout,
     format: PixelFormat,
-    next_pts: Option<gst::ClockTime>,
-    frame_duration: gst::ClockTime,
+    /// Next timestamp and frame duration, in nanoseconds.
+    next_pts: u64,
+    frame_duration: u64,
     /// Frames a second it was made for (sizes the rate controller's buffer).
     fps: u32,
     /// Bitrate (bps) the encoder runs at, the latest target, and when it last changed.
@@ -106,14 +102,33 @@ pub struct VaEncoder {
     pub name: &'static str,
 }
 
+/// GStreamer's default layout for the formats used here: rows padded to 4 bytes, NV12's
+/// interleaved chroma right after the luma.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Layout {
+    strides: [usize; 2],
+    offsets: [usize; 2],
+    size: usize,
+}
+
+impl Layout {
+    fn nv12(w: usize, h: usize) -> Self {
+        let stride = (w + 3) & !3;
+        let luma = stride * ((h + 1) & !1);
+        Self { strides: [stride, stride], offsets: [0, luma], size: luma + stride * h.div_ceil(2) }
+    }
+
+    fn rgbx(w: usize, h: usize) -> Self {
+        Self { strides: [w * 4, 0], offsets: [0, 0], size: w * 4 * h }
+    }
+}
+
 /// Whether an H.264 encoder for `backend` is installed (and its device usable), and
 /// which one. GStreamer registers the VA and NVENC elements only for devices it could
 /// open, so a missing element means no driver or no GPU.
 pub fn available(backend: Backend) -> Option<&'static str> {
-    if init().is_err() {
-        return None;
-    }
-    let found = |name: &&str| gst::ElementFactory::find(name).is_some();
+    let lib = gst_lib::lib().ok()?;
+    let found = |name: &&str| lib.has_element(name);
     match backend {
         Backend::Va => VA_ENCODERS.into_iter().find(found),
         Backend::Nvenc => {
@@ -132,34 +147,38 @@ fn rate_units(backend: Backend, bps: u32) -> u32 {
     .max(100)
 }
 
-/// Sets a guint property if the element has one, within its range. `set_property` panics
-/// on a missing property, another type or an out-of-range value, which would end this
-/// screen's encode thread. Whether it was set.
-fn set_uint(element: &gst::Element, name: &str, value: u32) -> bool {
-    let Some(spec) = element.find_property(name) else {
-        return false;
+/// What's missing for `backend`, with how to install it; None when it's ready.
+pub fn missing(backend: Backend) -> Option<String> {
+    let lib = match gst_lib::lib() {
+        Ok(lib) => lib,
+        Err(e) => return Some(format!("{e:#}")),
     };
-    let Some(spec) = spec.downcast_ref::<gst::glib::ParamSpecUInt>() else {
-        return false;
-    };
-    if !spec.flags().contains(gst::glib::ParamFlags::WRITABLE) {
-        return false;
+    if available(backend).is_some() {
+        return None;
     }
-    element.set_property(name, value.clamp(spec.minimum(), spec.maximum()));
-    true
-}
-
-/// A guint property's value, if the element has one.
-fn get_uint(element: &gst::Element, name: &str) -> Option<u32> {
-    element.find_property(name)?;
-    element.property_value(name).get::<u32>().ok()
-}
-
-fn init() -> Result<()> {
-    static INIT: OnceLock<Result<(), String>> = OnceLock::new();
-    INIT.get_or_init(|| gst::init().map_err(|e| e.to_string()))
-        .clone()
-        .map_err(|e| anyhow!("gstreamer: {e}"))
+    let absent = |names: &[&str]| -> Vec<String> {
+        names.iter().filter(|n| !lib.has_element(n)).map(|n| n.to_string()).collect()
+    };
+    Some(match backend {
+        Backend::Va => {
+            let tools = if absent(&["h264parse"]).is_empty() { "" } else { " and h264parse" };
+            format!(
+                "no VA-API H.264 encoder in {} (none of {}{tools}). Needs GStreamer's va plugin and a VA driver that encodes: {}; `vainfo` should list VAEntrypointEncSlice for H264",
+                lib.version,
+                VA_ENCODERS.join(", "),
+                gst_lib::install_hint(gst_lib::Need::Va)
+            )
+        }
+        Backend::Nvenc => {
+            let gone = absent(&[NV_ENCODERS[0], NV_HELPERS[0], NV_HELPERS[1], "h264parse"]);
+            format!(
+                "NVENC isn't usable in {} (missing {}). Needs GStreamer's nvcodec plugin and the NVIDIA driver with its encode library: {}; `nvidia-smi` should see the GPU",
+                lib.version,
+                gone.join(", "),
+                gst_lib::install_hint(gst_lib::Need::Nvenc)
+            )
+        }
+    })
 }
 
 /// Whether to halve the picture: asked to (`scale` of 0.5 or less), bigger than what the
@@ -205,12 +224,7 @@ impl VaEncoder {
         let kbps = rate_units(backend, bitrate);
         let (layout, description) = match backend {
             Backend::Va => {
-                let layout = gstreamer_video::VideoInfo::builder(
-                    gstreamer_video::VideoFormat::Nv12,
-                    ow as u32,
-                    oh as u32,
-                )
-                .build()?;
+                let layout = Layout::nv12(ow, oh);
                 // to_i420's output is BT.601 limited range; like the OpenH264 path, the
                 // stream carries no colour description, which decoders read as BT.601 for
                 // SD and usually BT.709 for HD.
@@ -226,13 +240,11 @@ impl VaEncoder {
                 (layout, description)
             }
             Backend::Nvenc => {
-                let (gst_format, caps_format) = match format {
-                    PixelFormat::Bgrx => (gstreamer_video::VideoFormat::Bgrx, "BGRx"),
-                    PixelFormat::Rgbx => (gstreamer_video::VideoFormat::Rgbx, "RGBx"),
+                let caps_format = match format {
+                    PixelFormat::Bgrx => "BGRx",
+                    PixelFormat::Rgbx => "RGBx",
                 };
-                let layout =
-                    gstreamer_video::VideoInfo::builder(gst_format, width as u32, height as u32)
-                        .build()?;
+                let layout = Layout::rgbx(width, height);
                 // The converter writes BT.709 limited range for HD and the encoder puts the
                 // colour description in the stream, so decoders don't have to guess.
                 let description = format!(
@@ -250,24 +262,12 @@ impl VaEncoder {
                 (layout, description)
             }
         };
-        let pipeline = gst::parse::launch(&description)
-            .context("building the VA-API pipeline")?
-            .downcast::<gst::Pipeline>()
-            .map_err(|_| anyhow!("not a pipeline"))?;
-        let by_name = |n: &str| pipeline.by_name(n).with_context(|| format!("no {n}"));
-        let src = by_name("src")?
-            .downcast::<AppSrc>()
-            .map_err(|_| anyhow!("src isn't an appsrc"))?;
-        let sink = by_name("sink")?
-            .downcast::<AppSink>()
-            .map_err(|_| anyhow!("sink isn't an appsink"))?;
-        let encoder = by_name("enc")?;
+        let pipeline = gst_lib::lib()?
+            .pipeline(&description)
+            .with_context(|| format!("starting the {} pipeline", backend.label()))?;
         let this = Self {
             backend,
             pipeline,
-            src,
-            sink,
-            encoder,
             source: (width, height),
             div,
             out: (ow, oh),
@@ -277,17 +277,14 @@ impl VaEncoder {
             v: if backend == Backend::Va { vec![0; ow * oh / 4] } else { Vec::new() },
             layout,
             format,
-            next_pts: None,
-            frame_duration: gst::ClockTime::from_nseconds(1_000_000_000 / fps.max(1) as u64),
+            next_pts: 0,
+            frame_duration: 1_000_000_000 / fps.max(1) as u64,
             bitrate: (bitrate, bitrate, Instant::now()),
             fps: fps.max(1),
             sps: None,
             name,
         };
         this.set_cpb(bitrate, true);
-        this.pipeline
-            .set_state(gst::State::Playing)
-            .map_err(|_| this.error(&format!("starting the {} pipeline", backend.label())))?;
         Ok(this)
     }
 
@@ -306,13 +303,13 @@ impl VaEncoder {
         let bits = crate::rate::short_window(bps, self.fps).0 * 8.0;
         match self.backend {
             Backend::Va => {
-                set_uint(&self.encoder, "cpb-size", ((bits / 1000.0) as u32).max(1));
+                let _ = self.pipeline.set_uint("enc", "cpb-size", ((bits / 1000.0) as u32).max(1));
             }
             // GStreamer's NVENC (1.28 and older) restarts its session for a new VBV size,
             // with an IDR and a stall, where a new bitrate alone is applied in place. So
             // the size set at the start stays.
-            Backend::Nvenc if starting || gst::version() >= (1, 29, 0, 0) => {
-                set_uint(&self.encoder, "vbv-buffer-size", ((bits / 1024.0) as u32).max(1));
+            Backend::Nvenc if starting || gst_lib::lib().is_ok_and(|l| l.version_at_least(1, 29)) => {
+                let _ = self.pipeline.set_uint("enc", "vbv-buffer-size", ((bits / 1024.0) as u32).max(1));
             }
             Backend::Nvenc => {}
         }
@@ -326,7 +323,7 @@ impl VaEncoder {
     fn apply_bitrate(&mut self) {
         let (applied, wanted, at) = self.bitrate;
         if should_apply(applied, wanted, at.elapsed()) {
-            set_uint(&self.encoder, "bitrate", rate_units(self.backend, wanted));
+            let _ = self.pipeline.set_uint("enc", "bitrate", rate_units(self.backend, wanted));
             self.set_cpb(wanted, false);
             self.bitrate = (wanted, wanted, Instant::now());
         }
@@ -336,64 +333,8 @@ impl VaEncoder {
     pub fn encode(&mut self, frame: &Frame, force_keyframe: bool) -> Result<Option<(Vec<u8>, bool)>> {
         anyhow::ensure!(self.accepts(frame), "frame doesn't match the encoder");
         self.apply_bitrate();
-        let mut buffer = gst::Buffer::with_size(self.layout.size())?;
-        {
-            let buffer = buffer.get_mut().unwrap();
-            // Strictly increasing timestamps, also when the same picture is sent again.
-            let pts = self.next_pts.unwrap_or(gst::ClockTime::ZERO);
-            self.next_pts = Some(pts + self.frame_duration);
-            buffer.set_pts(pts);
-            buffer.set_duration(self.frame_duration);
-            if self.backend == Backend::Nvenc {
-                // The RGB as captured, row by row (capture rows are often padded).
-                let stride = self.layout.stride()[0] as usize;
-                let row = frame.width * 4;
-                // The last row may come without its padding.
-                anyhow::ensure!(
-                    frame.stride >= row && frame.data.len() >= frame.stride * (frame.height - 1) + row,
-                    "frame data shorter than its size"
-                );
-                let mut map = buffer.map_writable()?;
-                if stride == frame.stride && frame.data.len() >= stride * frame.height {
-                    let n = stride * frame.height;
-                    map[..n].copy_from_slice(&frame.data[..n]);
-                } else {
-                    for (dst, src) in map
-                        .chunks_mut(stride)
-                        .zip(frame.data.chunks(frame.stride))
-                        .take(frame.height)
-                    {
-                        dst[..row].copy_from_slice(&src[..row]);
-                    }
-                }
-            }
-        }
         if self.backend == Backend::Va {
             to_i420(frame, self.div, self.out, &mut self.y, &mut self.u, &mut self.v);
-            let (w, h) = self.out;
-            let buffer = buffer.get_mut().unwrap();
-            // NV12: the Y plane, then U and V interleaved, in GStreamer's row layout.
-            let (offsets, strides) = (self.layout.offset(), self.layout.stride());
-            let mut map = buffer.map_writable()?;
-            let (luma, chroma) = map.split_at_mut(offsets[1]);
-            for (dst, src) in luma[offsets[0]..]
-                .chunks_mut(strides[0] as usize)
-                .zip(self.y.chunks_exact(w))
-            {
-                dst[..w].copy_from_slice(src);
-            }
-            let cw = w / 2;
-            for ((dst, u), v) in chroma
-                .chunks_mut(strides[1] as usize)
-                .zip(self.u.chunks_exact(cw))
-                .zip(self.v.chunks_exact(cw))
-                .take(h / 2)
-            {
-                for ((uv, u), v) in dst[..w].chunks_exact_mut(2).zip(u).zip(v) {
-                    uv[0] = *u;
-                    uv[1] = *v;
-                }
-            }
         }
         if force_keyframe && self.backend == Backend::Va {
             // A force-key-unit event makes vah264enc (GStreamer 1.24, Intel iHD) send an
@@ -401,26 +342,70 @@ impl VaEncoder {
             // can't start from. Reconfiguring starts a new sequence with an IDR, so nudge
             // the bitrate by 1 kbps instead.
             let kbps = rate_units(Backend::Va, self.bitrate.0);
-            let now = get_uint(&self.encoder, "bitrate");
-            set_uint(&self.encoder, "bitrate", if now == Some(kbps) { kbps + 1 } else { kbps });
+            let now = self.pipeline.get_uint("enc", "bitrate");
+            let _ = self.pipeline.set_uint("enc", "bitrate", if now == kbps { kbps + 1 } else { kbps });
         } else if force_keyframe {
-            let event = gstreamer_video::DownstreamForceKeyUnitEvent::builder()
-                .all_headers(true)
-                .build();
-            self.src.send_event(event);
+            self.pipeline.force_keyframe();
         }
-        self.src
-            .push_buffer(buffer)
-            .map_err(|e| self.error(&format!("{} input: {e:?}", self.backend.label())))?;
-        let Some(sample) = self.sink.try_pull_sample(gst::ClockTime::from_nseconds(
-            OUTPUT_TIMEOUT.as_nanos() as u64,
-        )) else {
+        if self.backend == Backend::Nvenc {
+            // The last row may come without its padding.
+            let row = frame.width * 4;
+            anyhow::ensure!(
+                frame.stride >= row && frame.data.len() >= frame.stride * (frame.height - 1) + row,
+                "frame data shorter than its size"
+            );
+        }
+        // Strictly increasing timestamps, also when the same picture is sent again.
+        let pts = self.next_pts;
+        self.next_pts += self.frame_duration;
+        let layout = self.layout;
+        let (backend, (w, h)) = (self.backend, self.out);
+        let (y, u, v) = (&self.y, &self.u, &self.v);
+        self.pipeline
+            .push(layout.size, pts, self.frame_duration, |map| match backend {
+                Backend::Nvenc => {
+                    // The RGB as captured, row by row (capture rows are often padded).
+                    let (stride, row) = (layout.strides[0], frame.width * 4);
+                    if stride == frame.stride && frame.data.len() >= stride * frame.height {
+                        let n = stride * frame.height;
+                        map[..n].copy_from_slice(&frame.data[..n]);
+                    } else {
+                        for (dst, src) in map
+                            .chunks_mut(stride)
+                            .zip(frame.data.chunks(frame.stride))
+                            .take(frame.height)
+                        {
+                            dst[..row].copy_from_slice(&src[..row]);
+                        }
+                    }
+                }
+                Backend::Va => {
+                    // NV12: the Y plane, then U and V interleaved, in GStreamer's layout.
+                    let (luma, chroma) = map.split_at_mut(layout.offsets[1]);
+                    for (dst, src) in luma.chunks_mut(layout.strides[0]).zip(y.chunks_exact(w)) {
+                        dst[..w].copy_from_slice(src);
+                    }
+                    let cw = w / 2;
+                    for ((dst, u), v) in chroma
+                        .chunks_mut(layout.strides[1])
+                        .zip(u.chunks_exact(cw))
+                        .zip(v.chunks_exact(cw))
+                        .take(h / 2)
+                    {
+                        for ((uv, u), v) in dst[..w].chunks_exact_mut(2).zip(u).zip(v) {
+                            uv[0] = *u;
+                            uv[1] = *v;
+                        }
+                    }
+                }
+            })
+            .map_err(|e| self.error(&format!("{} input: {e}", self.backend.label())))?;
+        let Some((data, keyframe)) = self.pipeline.pull(OUTPUT_TIMEOUT.as_nanos() as u64)? else {
             return Err(self.error(&format!("{} encoder gave no output", self.backend.label())));
         };
-        self.check_bus()?;
-        let out = sample.buffer().context("sample without a buffer")?;
-        let keyframe = !out.flags().contains(gst::BufferFlags::DELTA_UNIT);
-        let data = out.map_readable()?.to_vec();
+        if let Some(e) = self.pipeline.bus_error() {
+            return Err(anyhow!("{} pipeline: {e}", self.backend.label()));
+        }
         // NVENC's SPS says nothing about reordering, so Chromium's hardware decoder held
         // back ~10 frames (200 ms at 3440x1440): say there's none.
         let data = match self.backend {
@@ -430,43 +415,12 @@ impl VaEncoder {
         Ok((!data.is_empty()).then_some((data, keyframe)))
     }
 
-    /// Empties the bus (nothing else reads it, so tags and other messages would pile up)
-    /// and returns the first error on it.
-    fn check_bus(&self) -> Result<()> {
-        let Some(bus) = self.pipeline.bus() else {
-            return Ok(());
-        };
-        while let Some(message) = bus.pop() {
-            if let gst::MessageView::Error(e) = message.view() {
-                return Err(anyhow!(
-                    "{} pipeline: {} ({:?})",
-                    self.backend.label(),
-                    e.error(),
-                    e.debug()
-                ));
-            }
-        }
-        Ok(())
-    }
-
     /// An error with whatever the pipeline posted on its bus.
     fn error(&self, what: &str) -> anyhow::Error {
-        let detail = self.pipeline.bus().and_then(|bus| {
-            bus.pop_filtered(&[gst::MessageType::Error]).and_then(|m| match m.view() {
-                gst::MessageView::Error(e) => Some(format!("{} ({:?})", e.error(), e.debug())),
-                _ => None,
-            })
-        });
-        match detail {
+        match self.pipeline.bus_error() {
             Some(d) => anyhow!("{what}: {d}"),
             None => anyhow!("{what}"),
         }
-    }
-}
-
-impl Drop for VaEncoder {
-    fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
     }
 }
 
@@ -523,7 +477,7 @@ mod tests {
     }
 
     /// Needs a GPU with VA-API H.264 encode and GStreamer's va plugin; skipped without:
-    /// `cargo test --release -p glass-host --features vaapi va_encode -- --ignored --nocapture`
+    /// `cargo build --release -p glass-gst && GLASS_GST_LIB=$PWD/target/release/libglass_gst.so cargo test --release -p glass-host va_encode -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn encodes_4k_on_the_gpu() {
@@ -591,6 +545,16 @@ mod tests {
         }
     }
 
+    /// Prints what GPU encoding is missing here (the startup warning's text):
+    /// `cargo test -p glass-host gpu_missing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn gpu_missing() {
+        for backend in [Backend::Va, Backend::Nvenc] {
+            println!("{}: {}", backend.label(), missing(backend).unwrap_or_else(|| "ready".into()));
+        }
+    }
+
     /// CPU time the whole process has used (every thread), in seconds.
     fn cpu_seconds() -> f64 {
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
@@ -601,7 +565,7 @@ mod tests {
 
     /// OpenH264 against the GPU encoders on the same moving desktop, at 60 fps pacing:
     /// time per frame (what a frame waits for its encoding) and CPU per frame.
-    /// `GLASS_BENCH_SIZE=3440x1440 cargo test --release -p glass-host --features vaapi \
+    /// `GLASS_BENCH_SIZE=3440x1440 GLASS_GST_LIB=$PWD/target/release/libglass_gst.so cargo test --release -p glass-host \
     ///  compare_encoders -- --ignored --nocapture`
     #[test]
     #[ignore]

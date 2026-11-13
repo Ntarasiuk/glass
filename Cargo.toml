@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/glass-proto", "crates/glass-host"]
+members = ["crates/glass-proto", "crates/glass-host", "crates/glass-gst"]
+# glass-gst needs the GStreamer development files; build it with `-p glass-gst`.
+default-members = ["crates/glass-proto", "crates/glass-host"]
 
 [workspace.package]
 edition = "2024"
