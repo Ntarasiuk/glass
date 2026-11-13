@@ -30,7 +30,7 @@ impl GlassApp {
                     if m.online { "online" } else { "offline" },
                     if m.is_self { " · this computer" } else { "" }
                 );
-                let url = format!("https://{}/", m.dns);
+                let open_dns = m.dns.clone();
                 let dns = m.dns.clone();
                 let control = h_flex()
                     .gap_2()
@@ -62,7 +62,7 @@ impl GlassApp {
                                 .ghost()
                                 .label("Browser")
                                 .icon(I::ExternalLink)
-                                .on_click(move |_, _, _| actions::open(&url)),
+                                .on_click(move |_, _, _| actions::open_machine(&open_dns)),
                         )
                     });
                 ui::icon_row(icon, if m.online { theme.success } else { theme.muted_foreground }, m.name.clone(), detail, control, cx)
