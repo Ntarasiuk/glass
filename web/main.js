@@ -242,6 +242,7 @@ let sharpPending = false; // to ask for once the first picture is up
 let sharpMode = 'off'; // what the host is doing: 'off', 'sharp' or '4:2:2'
 let deniedMsg; // why the host last turned us away
 let deniedToast; // its "Ask again"
+let passToast; // "You're in", taken back if the person at the computer says no
 
 // Resolves with the next clipboard the Mac reports (used for Cmd+C / Cmd+X):
 // { text, html?, image } where `image` says there's one to fetch (macImages).
@@ -1020,6 +1021,10 @@ function onControl(msg) {
       deniedMsg = msg.msg;
       showStatus('error', 'Not let in', msg.msg);
       deniedToast?.dismiss();
+      if (msg.ended) {
+        passToast?.dismiss();
+        storage((s) => s.removeItem(passKey));
+      }
       // `ended`: the host took back this guest's pass with its answer, so only a new link helps.
       deniedToast = ui.toast({ text: msg.msg, kind: 'error', timeout: 0, action: msg.ended ? undefined : { label: 'Ask again', run: () => {
         showStatus('connecting', 'Connecting', machineName(currentHost));
@@ -1069,7 +1074,7 @@ function onControl(msg) {
       break;
     case 'pass':
       storage((s) => s.setItem(passKey, JSON.stringify({ pass: msg.pass, expires: msg.expires })));
-      ui.toast({ text: `You're in. This device has access until ${formatExpiry(msg.expires)}.`, icon: 'link', timeout: 6000 });
+      passToast = ui.toast({ text: `You're in. This device has access until ${formatExpiry(msg.expires)}.`, icon: 'link', timeout: 6000 });
       log('info', 'signed in with a magic link', { expires: msg.expires });
       break;
     case 'sharp':
