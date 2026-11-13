@@ -91,6 +91,36 @@ fn set_rate(session: &VTCompressionSession, bps: u32) {
 
 pub use crate::media::EncodedFrame;
 
+/// MaxAllowedFrameQP, lifted for keyframes: capping them makes them bigger, not sharper
+/// (measured 661 → 981 KB), which stalls a slow link. The cap returns on the next frame.
+#[derive(Debug, Default)]
+struct QpCap {
+    /// From `apply_policy`; 0 = none.
+    qp: u32,
+    /// Lifted for the keyframe just submitted.
+    lifted: bool,
+}
+
+impl QpCap {
+    /// What to set the session to for a new policy.
+    fn set(&mut self, qp: u32) -> Option<i32> {
+        let changed = std::mem::replace(&mut self.qp, qp) != qp;
+        (changed && !self.lifted).then_some(qp as i32)
+    }
+
+    /// What to set the session to before submitting a frame.
+    fn frame(&mut self, keyframe: bool) -> Option<i32> {
+        if keyframe && self.qp != 0 {
+            self.lifted = true;
+            Some(51)
+        } else if !keyframe && std::mem::take(&mut self.lifted) && self.qp != 0 {
+            Some(self.qp as i32)
+        } else {
+            None
+        }
+    }
+}
+
 pub struct Encoder {
     session: CFRetained<VTCompressionSession>,
     hevc: bool,
@@ -98,10 +128,9 @@ pub struct Encoder {
     rext: bool,
     force_keyframe: Arc<AtomicBool>,
     on_frame: Arc<dyn Fn(EncodedFrame) + Send + Sync>,
-    /// The sharpness cap in force (MaxAllowedFrameQP; 0 = none), from `apply_policy`.
-    qp_cap: AtomicU32,
-    /// The cap is lifted for the keyframe just submitted; restore it on the next frame.
-    cap_lifted: AtomicBool,
+    /// The sharpness cap. Locked while it's set on the session, so the policy thread and the
+    /// capture queue can't leave the session at a value this doesn't say.
+    cap: std::sync::Mutex<QpCap>,
     /// Bytes produced, for sharing the bitrate between displays by activity.
     bytes: Arc<AtomicU64>,
     /// Size of the latest output frame (an idle refresh stops once these get tiny).
@@ -223,8 +252,7 @@ impl Encoder {
             rext,
             force_keyframe,
             on_frame,
-            qp_cap: AtomicU32::new(0),
-            cap_lifted: AtomicBool::new(false),
+            cap: Default::default(),
             bytes: Arc::new(AtomicU64::new(0)),
             last_size: Arc::new(AtomicU64::new(0)),
             bps: AtomicU32::new(bitrate as u32),
@@ -243,13 +271,11 @@ impl Encoder {
             fps as i32,
             "frame rate",
         );
-        if self.qp_cap.swap(qp, Ordering::Relaxed) != qp && !self.cap_lifted.load(Ordering::Relaxed)
         {
-            self.set(
-                unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP },
-                qp as i32,
-                "QP cap",
-            );
+            let mut cap = self.cap.lock().unwrap();
+            if let Some(value) = cap.set(qp) {
+                self.set(unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP }, value, "QP cap");
+            }
         }
         fps
     }
@@ -292,29 +318,17 @@ impl Encoder {
     /// `refresh`: the picture is unchanged since the last encode (see FLAG_REFRESH).
     pub fn encode(&self, image: &CVImageBuffer, pts: CMTime, capture_us: u64, refresh: bool) {
         let keyframe = self.force_keyframe.swap(false, Ordering::Relaxed);
-        // Keyframes go uncapped: capping them makes them bigger, not sharper (measured
-        // 661 → 981 KB), which stalls a slow link. The cap returns on the next frame.
-        let cap = self.qp_cap.load(Ordering::Relaxed);
-        if keyframe && cap != 0 {
-            self.set(
-                unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP },
-                51,
-                "QP cap",
-            );
-            self.cap_lifted.store(true, Ordering::Relaxed);
-        } else if !keyframe && self.cap_lifted.swap(false, Ordering::Relaxed) && cap != 0 {
-            self.set(
-                unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP },
-                cap as i32,
-                "QP cap",
-            );
+        {
+            let mut cap = self.cap.lock().unwrap();
+            if let Some(value) = cap.frame(keyframe) {
+                self.set(unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP }, value, "QP cap");
+            }
         }
         let props = keyframe.then(|| {
             let keys = unsafe { [kVTEncodeFrameOptionKey_ForceKeyFrame] };
             CFDictionary::<CFString, CFType>::from_slices(&keys, &[CFBoolean::new(true)])
         });
         let on_frame = self.on_frame.clone();
-        let force_keyframe = self.force_keyframe.clone();
         let hevc = self.hevc;
         let (bytes, last_size) = (self.bytes.clone(), self.last_size.clone());
         let force_keyframe = self.force_keyframe.clone();
@@ -322,6 +336,10 @@ impl Encoder {
             move |status: i32, _flags: VTEncodeInfoFlags, sample: *mut CMSampleBuffer| {
                 if status != 0 {
                     tracing::warn!("encode failed: {status}");
+                    // A keyframe someone is waiting for is asked for again.
+                    if keyframe {
+                        force_keyframe.store(true, Ordering::Relaxed);
+                    }
                     return;
                 }
                 if sample.is_null() {
@@ -359,6 +377,9 @@ impl Encoder {
         };
         if status != 0 {
             tracing::warn!("VTCompressionSessionEncodeFrame failed: {status}");
+            if keyframe {
+                self.force_keyframe.store(true, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -506,6 +527,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn keyframes_go_uncapped_and_the_cap_returns() {
+        let mut cap = QpCap::default();
+        assert_eq!(cap.frame(true), None, "no cap to lift yet");
+        assert_eq!(cap.set(30), Some(30));
+        assert_eq!(cap.frame(false), None);
+        assert_eq!(cap.frame(true), Some(51));
+        assert_eq!(cap.frame(true), Some(51), "two in a row stay uncapped");
+        assert_eq!(cap.frame(false), Some(30));
+        assert_eq!(cap.frame(false), None, "only once");
+    }
+
+    #[test]
+    fn a_policy_change_during_a_keyframe_waits_and_then_applies() {
+        let mut cap = QpCap::default();
+        cap.set(30);
+        assert_eq!(cap.frame(true), Some(51));
+        assert_eq!(cap.set(42), None, "the keyframe stays uncapped");
+        assert_eq!(cap.frame(false), Some(42), "the new cap, not the old one");
+        assert_eq!(cap.set(42), None, "already there");
+    }
+
+    #[test]
     fn keyframe_nals() {
         // H.264: IDR (5) yes, non-IDR slice (1) no.
         assert!(super::is_keyframe_nal(&[0x65], false));
@@ -584,7 +627,7 @@ mod tests {
                 )
                 .unwrap();
                 set_rate(&enc.session, bps);
-                enc.qp_cap.store(qp, Ordering::Relaxed);
+                enc.cap.lock().unwrap().qp = qp;
                 enc.set(unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP }, qp as i32, "QP cap");
                 enc.set(unsafe { kVTCompressionPropertyKey_ExpectedFrameRate }, fps as i32, "frame rate");
                 let total = fps * 3;

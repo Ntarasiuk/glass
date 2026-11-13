@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 
 /// How long an unopened link stays valid.
 pub const LINK_TTL: Duration = Duration::from_secs(15 * 60);
+/// How long a pass that needs a passkey waits for one before it stops working: whoever holds
+/// it first could otherwise bind their own for as long as the pass lasts.
+const BIND_TTL: u64 = 15 * 60;
 /// Bounds for how long the access a link grants lasts.
 pub const MIN_GRANT: Duration = Duration::from_secs(5 * 60);
 pub const MAX_GRANT: Duration = Duration::from_secs(30 * 24 * 3600);
@@ -146,6 +149,24 @@ fn network_key(ip: std::net::IpAddr) -> String {
 /// "Chrome on iPhone" → "iPhone".
 fn os_of(device: &str) -> String {
     device.rsplit_once(" on ").map_or(device, |(_, os)| os).trim().to_lowercase()
+}
+
+impl Pass {
+    /// Not expired, and not waiting too long for the passkey it needs.
+    fn usable(&self, now: u64) -> bool {
+        self.expires > now && !(self.scope.passkey && self.passkey.is_none() && self.created + BIND_TTL <= now)
+    }
+}
+
+impl Store {
+    /// A pass ended by someone's decision: the link that let it in opens for nobody again, or
+    /// the same device could simply come back on it.
+    fn end_pass(&mut self, i: usize) {
+        let pass = self.passes.remove(i);
+        if let Some(used) = pass.link.and_then(|h| self.links.iter_mut().find(|l| l.hash == h)).and_then(|l| l.used.as_mut()) {
+            used.devices = LINK_DEVICES;
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -329,14 +350,14 @@ pub fn redeem_link(path: &Path, code: &str, device: &str, ip: std::net::IpAddr) 
     let pass = random_code()?;
     let mut granted = None;
     update(path, |store| {
+        let now = now();
         let Some(i) = store
             .links
             .iter()
-            .position(|l| crate::control::token_matches(&l.hash, &hash))
+            .position(|l| l.expires > now && crate::control::token_matches(&l.hash, &hash))
         else {
             return;
         };
-        let now = now();
         let link = &mut store.links[i];
         let expires = match &mut link.used {
             None => {
@@ -406,7 +427,7 @@ pub fn check_pass(path: &Path, pass: &str) -> Option<Valid> {
     load(path)
         .passes
         .iter()
-        .find(|p| p.expires > now && crate::control::token_matches(&p.hash, &hash))
+        .find(|p| p.usable(now) && crate::control::token_matches(&p.hash, &hash))
         .map(|p| Valid {
             id: short_id(&p.hash),
             expires: p.expires,
@@ -420,6 +441,7 @@ pub fn check_pass(path: &Path, pass: &str) -> Option<Valid> {
 pub fn bind_passkey(path: &Path, pass: &str, key: Passkey) -> Result<bool> {
     let hash = fingerprint(pass);
     let mut bound = false;
+    // (Past its wait, `update` has already dropped it.)
     update(path, |store| {
         if let Some(p) = store
             .passes
@@ -461,7 +483,7 @@ pub fn list(path: &Path) -> Vec<PassInfo> {
     load(path)
         .passes
         .iter()
-        .filter(|p| p.expires > now)
+        .filter(|p| p.usable(now))
         .map(|p| PassInfo {
             id: short_id(&p.hash),
             expires: p.expires,
@@ -473,7 +495,8 @@ pub fn list(path: &Path) -> Vec<PassInfo> {
         .collect()
 }
 
-/// Removes the pass whose id starts with `id`; false if none (or several) match.
+/// Removes the pass whose id starts with `id` (and its link can't let it back in); false if
+/// none (or several) match.
 pub fn revoke(path: &Path, id: &str) -> Result<bool> {
     let id = id.trim().to_ascii_lowercase();
     if id.len() < 4 {
@@ -485,11 +508,42 @@ pub fn revoke(path: &Path, id: &str) -> Result<bool> {
             .filter(|&i| short_id(&store.passes[i].hash).starts_with(&id))
             .collect();
         if let [i] = matches[..] {
-            store.passes.remove(i);
+            store.end_pass(i);
             removed = true;
         }
     })?;
     Ok(removed)
+}
+
+/// The person at the computer turned this pass's holder away: it's over, not a pass to ask
+/// again with.
+pub fn revoke_pass(path: &Path, pass: &str) -> Result<()> {
+    let hash = fingerprint(pass);
+    update(path, |store| {
+        if let Some(i) = store.passes.iter().position(|p| crate::control::token_matches(&p.hash, &hash)) {
+            store.end_pass(i);
+        }
+    })
+}
+
+/// The short id of a pass (as `list` gives it).
+pub fn pass_id(pass: &str) -> String {
+    short_id(&fingerprint(pass))
+}
+
+/// This link opens for nobody from now on; what it already let in stays, and stays tied to it.
+pub fn retire_link(path: &Path, code: &str) -> Result<()> {
+    let hash = fingerprint(code);
+    update(path, |store| {
+        if let Some(l) = store.links.iter_mut().find(|l| l.hash == hash) {
+            l.expires = 0;
+        }
+    })
+}
+
+/// A `glass support` session has links here, used or not.
+pub fn has_owned_links(path: &Path) -> bool {
+    load(path).links.iter().any(|l| l.owner.is_some())
 }
 
 /// Removes the passes the link with this code let in, and with `and_link` the link itself
@@ -567,8 +621,10 @@ fn update(path: &Path, f: impl FnOnce(&mut Store)) -> Result<()> {
     };
     let mut store = load(path);
     let now = now();
-    store.links.retain(|l| l.expires > now);
-    store.passes.retain(|p| p.expires > now);
+    // A link with an owner stays, expired or not, as long as the owner is there to end it (or
+    // gone, for the reaper to see): the passes it let in outlast it.
+    store.links.retain(|l| l.expires > now || l.owner.is_some());
+    store.passes.retain(|p| p.usable(now));
     f(&mut store);
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
@@ -717,6 +773,83 @@ mod tests {
         assert!(redeem_link(&path, &helper.code, "Chrome on Linux", ip()).unwrap().is_none());
         assert!(pass_expiry(&path, &m.pass).is_some());
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_dead_owners_passes_go_even_after_its_link_expired() {
+        let path = temp().with_file_name("reap-expired.json");
+        let hour = Duration::from_secs(3600);
+        let support = Scope { ask: true, support: true, ..Scope::default() };
+        let link = create_owned_link(&path, hour, 4 * hour, support, Some(111)).unwrap();
+        let helper = redeem_link(&path, &link.code, "Chrome on Linux", ip()).unwrap().unwrap();
+        // The link's hour is up, and something else writes the file.
+        update(&path, |s| s.links[0].expires = 1).unwrap();
+        create_link(&path, hour, Scope::default()).unwrap();
+        assert!(has_owned_links(&path));
+        assert!(redeem_link(&path, &link.code, "Chrome on Linux", ip()).unwrap().is_none(), "expired: it opens for nobody");
+        assert!(pass_expiry(&path, &helper.pass).is_some());
+        assert_eq!(reap_orphaned_support(&path, |_| false).unwrap(), 1);
+        assert!(pass_expiry(&path, &helper.pass).is_none(), "the helper is out");
+        assert!(!has_owned_links(&path));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_retired_link_opens_for_nobody_and_keeps_what_it_let_in() {
+        let path = temp().with_file_name("retire.json");
+        let hour = Duration::from_secs(3600);
+        let a = create_owned_link(&path, hour, hour, Scope::default(), Some(111)).unwrap();
+        let in_already = redeem_link(&path, &a.code, "Chrome on Linux", ip()).unwrap().unwrap();
+        retire_link(&path, &a.code).unwrap();
+        assert!(redeem_link(&path, &a.code, "Chrome on Linux", ip()).unwrap().is_none());
+        assert!(pass_expiry(&path, &in_already.pass).is_some());
+        assert_eq!(revoke_link(&path, &a.code, true).unwrap(), 1, "still tied to it");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_revoked_device_cant_come_back_on_its_link() {
+        let path = temp().with_file_name("revoke-reopen.json");
+        let link = create_link(&path, Duration::from_secs(3600), Scope::default()).unwrap();
+        let first = redeem_link(&path, &link.code, "Safari on iPhone", ip()).unwrap().unwrap();
+        assert!(revoke(&path, &pass_id(&first.pass)).unwrap());
+        assert!(check_pass(&path, &first.pass).is_none());
+        assert!(redeem_link(&path, &link.code, "Safari on iPhone", ip()).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn someone_turned_away_loses_the_pass_and_the_link() {
+        let path = temp().with_file_name("turned-away.json");
+        let scope = Scope { ask: true, ..Scope::default() };
+        let link = create_link(&path, Duration::from_secs(3600), scope).unwrap();
+        let g = redeem_link(&path, &link.code, "Safari on iPhone", ip()).unwrap().unwrap();
+        revoke_pass(&path, &g.pass).unwrap();
+        assert!(check_pass(&path, &g.pass).is_none());
+        assert!(redeem_link(&path, &link.code, "Safari on iPhone", ip()).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_pass_waits_only_so_long_for_its_passkey() {
+        let path = temp().with_file_name("bind-wait.json");
+        let scope = Scope { passkey: true, ..Scope::default() };
+        let link = create_link(&path, Duration::from_secs(3600), scope).unwrap();
+        let g = redeem_link(&path, &link.code, "Safari on iPhone", ip()).unwrap().unwrap();
+        assert!(check_pass(&path, &g.pass).is_some(), "it can still register");
+        let key = Passkey { id: "abc".into(), public_key: "def".into(), counter: 0 };
+        // Waited too long: neither the pass nor a passkey for it counts any more.
+        update(&path, |s| s.passes[0].created = 1).unwrap();
+        assert!(check_pass(&path, &g.pass).is_none());
+        assert!(!bind_passkey(&path, &g.pass, key.clone()).unwrap());
+        // Bound in time: it lasts as long as the pass does.
+        let path = path.with_file_name("bind-in-time.json");
+        let link = create_link(&path, Duration::from_secs(3600), scope).unwrap();
+        let g = redeem_link(&path, &link.code, "Safari on iPhone", ip()).unwrap().unwrap();
+        assert!(bind_passkey(&path, &g.pass, key).unwrap());
+        update(&path, |s| s.passes[0].created = 1).unwrap();
+        assert!(check_pass(&path, &g.pass).is_some());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

@@ -13,7 +13,7 @@ use evdev::{
 use glass_proto::InputEvent as Ev;
 
 use super::keymap::{
-    self, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, KEY_LEFTCTRL, KEY_LEFTMETA, KEY_RIGHTMETA, KEY_V,
+    self, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, KEY_LEFTCTRL, KEY_LEFTMETA, KEY_RIGHTCTRL, KEY_RIGHTMETA, KEY_V,
 };
 use super::video::{self, Rect};
 
@@ -219,10 +219,17 @@ impl Injector {
         for &k in &supers {
             self.key(k, false);
         }
-        self.key(KEY_LEFTCTRL, true);
+        // A Ctrl the viewer is holding (Ctrl+V from a PC) stays down: letting it go here would
+        // make the next key typed with it plain.
+        let ctrl_held = self.held.contains(&KEY_LEFTCTRL) || self.held.contains(&KEY_RIGHTCTRL);
+        if !ctrl_held {
+            self.key(KEY_LEFTCTRL, true);
+        }
         self.key(KEY_V, true);
         self.key(KEY_V, false);
-        self.key(KEY_LEFTCTRL, false);
+        if !ctrl_held {
+            self.key(KEY_LEFTCTRL, false);
+        }
         for &k in &supers {
             self.key(k, true);
         }

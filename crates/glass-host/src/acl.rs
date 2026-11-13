@@ -132,6 +132,32 @@ pub fn decide(rules: &[Rule], email: &str, groups: &[String]) -> Option<(Scope, 
         })
 }
 
+/// What `email` may do, as the directory and the rules say together: nothing if it's
+/// deactivated or deleted there, and with its groups there added to `groups`.
+pub fn allowed(dir: &crate::scim::Directory, rules: &[Rule], email: &str, groups: &[String]) -> Option<(Scope, Duration)> {
+    let mut groups = groups.to_vec();
+    match dir.account(email) {
+        crate::scim::Account::Inactive => return None,
+        crate::scim::Account::Active(g) => groups.extend(g),
+        crate::scim::Account::Unknown => {}
+    }
+    decide(rules, email, &groups)
+}
+
+fn tailnet_scope_in(dir: &crate::scim::Directory, rules: &[Rule], members: bool, login: &str) -> Option<Scope> {
+    if matches!(dir.account(login), crate::scim::Account::Inactive) {
+        return None;
+    }
+    allowed(dir, rules, login, &[]).map(|(scope, _)| scope).or_else(|| members.then(Scope::default))
+}
+
+/// What someone else on the tailnet (`login`) may do: the access rules' first match, else a
+/// guest's default if the owner lets the whole tailnet in; `None`: they need the token. A
+/// session holding this is checked again while it lasts.
+pub fn tailnet_guest_scope(login: &str) -> Option<Scope> {
+    tailnet_scope_in(&crate::scim::load(), &effective(), crate::settings::load().tailnet_members, login)
+}
+
 /// One line for `glass acl`.
 pub fn describe(i: usize, r: &Rule) -> String {
     let d = r.duration_secs.map_or(DEFAULT_GRANT, Duration::from_secs);
@@ -239,5 +265,39 @@ mod tests {
         for bad in ["", "example.com", "@nodot", "group:", "a@@b.c", "ana @x.com"] {
             assert!(validate(bad).is_err(), "{bad}");
         }
+    }
+
+    fn directory(user: &str, active: bool, group: Option<&str>) -> crate::scim::Directory {
+        crate::scim::Directory {
+            users: vec![crate::scim::User { id: "1".into(), user_name: user.into(), active, ..Default::default() }],
+            groups: group.map(|g| crate::scim::Group { id: "g".into(), display_name: g.into(), members: vec!["1".into()], ..Default::default() }).into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_directory_has_the_last_word_over_the_rules() {
+        let rules = [rule("@example.com", false)];
+        assert!(allowed(&Default::default(), &rules, "ana@example.com", &[]).is_some(), "nobody provisioned: the rules decide");
+        assert!(allowed(&directory("ana@example.com", true, None), &rules, "ana@example.com", &[]).is_some());
+        assert!(allowed(&directory("ana@example.com", false, None), &rules, "ana@example.com", &[]).is_none());
+        let in_group = [rule("group:eng", false)];
+        assert!(allowed(&directory("ana@example.com", true, Some("eng")), &in_group, "ana@example.com", &[]).is_some());
+    }
+
+    #[test]
+    fn a_tailnet_member_answers_to_the_directory_too() {
+        let everyone = [rule("*", false)];
+        assert!(tailnet_scope_in(&Default::default(), &everyone, false, "ana@example.com").is_some());
+        assert!(tailnet_scope_in(&Default::default(), &[], false, "ana@example.com").is_none());
+        assert!(tailnet_scope_in(&Default::default(), &[], true, "ana@example.com").is_some(), "the whole tailnet");
+        let off = directory("ana@example.com", false, None);
+        assert!(tailnet_scope_in(&off, &everyone, true, "ana@example.com").is_none(), "deactivated: rules and tailnet-members don't matter");
+        let mut deleted = crate::scim::Directory::default();
+        deleted.removed.push("ana@example.com".into());
+        assert!(tailnet_scope_in(&deleted, &everyone, true, "ana@example.com").is_none());
+        // Groups from the directory count for tailnet members as they do for sign-ins.
+        let in_group = [rule("group:eng", false)];
+        assert!(tailnet_scope_in(&directory("ana@example.com", true, Some("eng")), &in_group, false, "ana@example.com").is_some());
     }
 }

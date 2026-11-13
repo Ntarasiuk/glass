@@ -10,20 +10,22 @@ use crate::soft_encode::Frame;
 /// arrives while the encoder is busy replaces the one waiting, so the encoder never
 /// starts on a picture that went stale in a queue. Pixel buffers are reused, so a 4K
 /// frame (33 MB) is copied into memory that's already mapped, not freshly allocated.
+///
+/// `M` goes with each frame: when it was captured, by default.
 #[derive(Default)]
-pub struct Mailbox {
-    state: Mutex<MailboxState>,
+pub struct Mailbox<M = u64> {
+    state: Mutex<MailboxState<M>>,
     ready: Condvar,
 }
 
 #[derive(Default)]
-struct MailboxState {
-    frame: Option<(Frame, u64)>,
+struct MailboxState<M> {
+    frame: Option<(Frame, M)>,
     spare: Option<Vec<u8>>,
     closed: bool,
 }
 
-impl Mailbox {
+impl<M> Mailbox<M> {
     /// A buffer to copy the next frame into: the waiting frame's (it's about to be
     /// replaced), else one the encoder gave back.
     pub fn buffer(&self) -> Vec<u8> {
@@ -36,12 +38,12 @@ impl Mailbox {
             .unwrap_or_default()
     }
 
-    pub fn put(&self, frame: Frame, captured_us: u64) {
-        self.state.lock().unwrap().frame = Some((frame, captured_us));
+    pub fn put(&self, frame: Frame, meta: M) {
+        self.state.lock().unwrap().frame = Some((frame, meta));
         self.ready.notify_one();
     }
 
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<(Frame, u64), RecvTimeoutError> {
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<(Frame, M), RecvTimeoutError> {
         let state = self.state.lock().unwrap();
         let (mut state, _) = self
             .ready
@@ -61,9 +63,9 @@ impl Mailbox {
 }
 
 /// The capture side of a mailbox; dropping it tells the encoder capture has stopped.
-pub struct FrameSender(pub std::sync::Arc<Mailbox>);
+pub struct FrameSender<M = u64>(pub std::sync::Arc<Mailbox<M>>);
 
-impl Drop for FrameSender {
+impl<M> Drop for FrameSender<M> {
     fn drop(&mut self) {
         self.0.state.lock().unwrap().closed = true;
         self.0.ready.notify_all();

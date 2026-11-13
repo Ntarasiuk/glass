@@ -31,8 +31,6 @@ pub struct Recording {
     /// The first file; later parts sit next to it.
     pub path: PathBuf,
     state: Arc<Mutex<Option<Recorder>>>,
-    /// The file records the video as sent: the pointer has to be in it.
-    _cursor: crate::cursor::Bake,
     made: Arc<Mutex<Made>>,
 }
 
@@ -43,9 +41,16 @@ pub struct Made {
     pub files: Vec<PathBuf>,
     /// HEVC frames came, and were left out.
     pub hevc: bool,
+    /// It stopped by itself, for this reason (what's in `files` ends there).
+    pub error: Option<String>,
 }
 
 impl Recording {
+    /// Still recording: writing to the file can fail, and that ends it.
+    pub fn running(&self) -> bool {
+        self.state.lock().unwrap().is_some()
+    }
+
     /// Ends the recording and says what it wrote.
     pub fn finish(self) -> Made {
         let made = self.made.clone();
@@ -64,24 +69,26 @@ impl Drop for Recording {
     }
 }
 
-/// Starts recording what's streamed, for `who`.
-pub fn start(who: &str) -> Result<Recording> {
+/// Starts recording what's streamed, for `who`. `stopped` hears if it ends by itself: the
+/// first file and why.
+pub fn start(who: &str, stopped: impl FnOnce(PathBuf, String) + Send + 'static) -> Result<Recording> {
     let settings = crate::settings::load();
-    start_in(&crate::settings::recordings_dir(&settings), who)
+    start_in(&crate::settings::recordings_dir(&settings), who, stopped)
 }
 
 /// Starts recording what's streamed into `dir`, for `who`.
-pub fn start_in(dir: &Path, who: &str) -> Result<Recording> {
+pub fn start_in(dir: &Path, who: &str, stopped: impl FnOnce(PathBuf, String) + Send + 'static) -> Result<Recording> {
     let shared = crate::server::shared().context("the host isn't ready yet")?;
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let (recorder, made) = Recorder::new(dir, who);
+    let (mut recorder, made) = Recorder::new(dir, who);
     let path = recorder.first.clone();
-    let state = Arc::new(Mutex::new(Some(recorder)));
     // Before the first keyframe is asked for, so the recording starts with the pointer in.
-    let cursor = crate::cursor::bake();
+    recorder._cursor = Some(crate::cursor::bake());
+    let state = Arc::new(Mutex::new(Some(recorder)));
     let mut frames = shared.frames.subscribe();
     shared.video.request_keyframe(Some(0));
     let thread_state = state.clone();
+    let (thread_made, first) = (made.clone(), path.clone());
     std::thread::Builder::new()
         .name("recording".into())
         .spawn(move || {
@@ -105,12 +112,16 @@ pub fn start_in(dir: &Path, who: &str) -> Result<Recording> {
                     if let Some(r) = guard.take() {
                         r.finish();
                     }
+                    drop(guard);
+                    let why = format!("{e:#}");
+                    thread_made.lock().unwrap().error = Some(why.clone());
+                    stopped(first, why);
                     return;
                 }
             }
         })?;
     tracing::info!("recording to {}", path.display());
-    Ok(Recording { path, state, _cursor: cursor, made })
+    Ok(Recording { path, state, made })
 }
 
 struct Recorder {
@@ -121,6 +132,8 @@ struct Recorder {
     file: Option<Mp4Writer>,
     warned_hevc: bool,
     made: Arc<Mutex<Made>>,
+    /// The file records the video as sent: the pointer has to be in it for as long as this is.
+    _cursor: Option<crate::cursor::Bake>,
 }
 
 impl Recorder {
@@ -128,7 +141,7 @@ impl Recorder {
         let base = format!("Glass {} {}", local_stamp(), sanitize(who));
         let first = crate::control::unique_path(dir, &format!("{base}.mp4"));
         let made = Arc::new(Mutex::new(Made::default()));
-        let r = Recorder { dir: dir.to_path_buf(), base, first, part: 1, file: None, warned_hevc: false, made: made.clone() };
+        let r = Recorder { dir: dir.to_path_buf(), base, first, part: 1, file: None, warned_hevc: false, made: made.clone(), _cursor: None };
         (r, made)
     }
 

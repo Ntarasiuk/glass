@@ -653,6 +653,10 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       if (rejected) input.select();
       input.focus();
     },
+    /** Signed in after all, or on the way to another machine. */
+    hideAuth() {
+      auth.classList.add('hidden');
+    },
     /** Guests (signed in with a magic link) can't switch machines. */
     setGuest(guest) {
       $('btn-machines').classList.toggle('hidden', guest);

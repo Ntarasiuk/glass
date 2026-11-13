@@ -91,6 +91,8 @@ pub struct Agent {
     pub public: bool,
     /// Apps asking for unattended access: (client id, name).
     pub installs: Vec<(String, String)>,
+    /// Apps installed for unattended access: (client id, name).
+    pub installed: Vec<(String, String)>,
     /// The latest audit log lines, newest first, as text.
     pub recent: Vec<String>,
 }
@@ -224,6 +226,7 @@ pub fn gather() -> Snapshot {
     snap.agent.enabled = store.enabled;
     snap.agent.public = store.public;
     snap.agent.installs = store.clients.iter().filter(|c| c.install_requested && !c.installed).map(|c| (c.id.clone(), c.name.clone())).collect();
+    snap.agent.installed = store.clients.iter().filter(|c| c.installed).map(|c| (c.id.clone(), c.name.clone())).collect();
     snap.agent.recent = crate::grants::audit_lines(6)
         .iter()
         .rev()

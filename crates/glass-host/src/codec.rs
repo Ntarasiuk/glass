@@ -17,8 +17,6 @@ struct Viewer {
 
 static VIEWERS: Mutex<Vec<Viewer>> = Mutex::new(Vec::new());
 static HEVC: AtomicBool = AtomicBool::new(false);
-/// Serializes switches (each restarts every encoder).
-static SWITCH: Mutex<()> = Mutex::new(());
 
 /// Held for a session's lifetime.
 pub struct Guard(pub u64);
@@ -57,14 +55,14 @@ pub fn decide(enabled: bool, supported: bool, viewers: &[(bool, bool)]) -> bool 
         && viewers.iter().all(|&(can_hevc, rtp)| can_hevc && !rtp)
 }
 
-/// Recomputes the codec after a viewer joins or leaves; switching restarts capture, so
-/// it happens off the async runtime.
-fn reapply() {
+/// Recomputes the codec after a viewer joins or leaves, or when the encoders have caught up
+/// with one that couldn't start at first; switching restarts every encoder, so it happens off
+/// the async runtime.
+pub fn reapply() {
     let Some(shared) = crate::server::shared() else {
         return;
     };
-    std::thread::spawn(move || {
-        let _switching = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+    crate::media::reconfigure(move || {
         let viewers: Vec<(bool, bool)> = VIEWERS
             .lock()
             .unwrap()

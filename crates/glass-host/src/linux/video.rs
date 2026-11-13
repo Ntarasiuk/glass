@@ -135,9 +135,46 @@ fn hyprland_monitors() -> Vec<Rect> {
 pub struct Video {
     config: VideoConfig,
     frames: broadcast::Sender<Arc<EncodedFrame>>,
-    monitors: Mutex<Option<Vec<Arc<Monitor>>>>,
+    /// `None` until the portal approves a share, and again once that share has ended.
+    monitors: Arc<Mutex<Option<Vec<Arc<Monitor>>>>>,
     shown: Mutex<Vec<u32>>,
+    /// What's asked to be streamed, to go back to when a share that ended is replaced.
+    layout: Mutex<Option<Layout>>,
+    /// One portal session being started at a time. Apart from `monitors`, as it can wait as long
+    /// as the share dialog stays open, and viewers' bitrates and keyframes shouldn't.
+    starting: Mutex<()>,
+    /// A share that ended, and how it's going getting a new one.
+    ended: Arc<Mutex<Option<Rejoin>>>,
 }
+
+/// After a share ends (PipeWire restarted, the compositor closed it, the person at the computer
+/// stopped it), a new one is asked for when it's time. That's silent while the restore token
+/// holds; otherwise it shows the share dialog, so once that's turned down Glass doesn't ask
+/// again by itself. A viewer choosing what to show still does.
+struct Rejoin {
+    at: std::time::Instant,
+    tries: u32,
+    declined: bool,
+}
+
+impl Rejoin {
+    fn new() -> Self {
+        Self { at: std::time::Instant::now() + REJOIN_FIRST, tries: 0, declined: false }
+    }
+
+    fn failed(&mut self, declined: bool) {
+        self.declined = declined;
+        self.tries += 1;
+        self.at = std::time::Instant::now() + REJOIN_FIRST.saturating_mul(1 << self.tries.min(6)).min(REJOIN_MAX);
+    }
+
+    fn due(&self) -> bool {
+        !self.declined && std::time::Instant::now() >= self.at
+    }
+}
+
+const REJOIN_FIRST: Duration = Duration::from_secs(5);
+const REJOIN_MAX: Duration = Duration::from_secs(300);
 
 impl Video {
     pub fn new(
@@ -150,8 +187,11 @@ impl Video {
         Self {
             config,
             frames,
-            monitors: Mutex::new(None),
+            monitors: Arc::new(Mutex::new(None)),
             shown: Mutex::new(Vec::new()),
+            layout: Mutex::new(None),
+            starting: Mutex::new(()),
+            ended: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -184,6 +224,13 @@ impl Video {
     /// session (the share dialog) and blocks until it's approved.
     pub fn set_layout(&self, layout: Layout) -> Result<Vec<DisplayInfo>> {
         let monitors = self.ensure_started()?;
+        let shown = self.show(&monitors, layout)?;
+        *self.layout.lock().unwrap() = Some(layout);
+        Ok(shown)
+    }
+
+    /// Maps `monitors` to stream numbers.
+    fn show(&self, monitors: &[Arc<Monitor>], layout: Layout) -> Result<Vec<DisplayInfo>> {
         let ids: Vec<u32> = match layout {
             Layout::Single(Some(id)) => {
                 anyhow::ensure!((id as usize) < monitors.len(), "unknown display");
@@ -206,16 +253,17 @@ impl Video {
                 all.into_iter().map(|(i, ..)| i).collect()
             }
         };
-        for m in &monitors {
-            m.slot.store(-1, Ordering::Relaxed);
+        for m in monitors {
+            m.slot.store(-1, Ordering::Release);
         }
         for (slot, &id) in ids.iter().enumerate() {
-            monitors[id as usize]
-                .slot
-                .store(slot as i32, Ordering::Relaxed);
+            // The keyframe first: whoever sees the slot sees that it's wanted.
             monitors[id as usize]
                 .keyframe
                 .store(true, Ordering::Relaxed);
+            monitors[id as usize]
+                .slot
+                .store(slot as i32, Ordering::Release);
         }
         *self.shown.lock().unwrap() = ids.clone();
         Ok(ids
@@ -233,8 +281,8 @@ impl Video {
     }
 
     fn ensure_started(&self) -> Result<Vec<Arc<Monitor>>> {
-        let mut guard = self.monitors.lock().unwrap();
-        if let Some(m) = guard.as_ref() {
+        let _one = self.starting.lock().unwrap();
+        if let Some(m) = self.monitors.lock().unwrap().as_ref() {
             return Ok(m.clone());
         }
         let cast = portal::start()?;
@@ -296,18 +344,51 @@ impl Video {
         }
         *RECTS.lock().unwrap() = rects;
 
-        let fd = cast.fd;
+        let (fd, session) = (cast.fd, cast.session);
+        let (all, ended) = (self.monitors.clone(), self.ended.clone());
         std::thread::Builder::new()
             .name("glass-pipewire".into())
             .spawn(move || {
-                if let Err(e) = run_pipewire(fd, captures) {
-                    warn!("pipewire capture stopped: {e:#}");
+                match run_pipewire(fd, captures) {
+                    Ok(()) => warn!("the screen share ended"),
+                    Err(e) => warn!("pipewire capture stopped: {e:#}"),
                 }
+                // Its encoders have ended with it (their mailboxes closed). What's left is to
+                // say so, rather than go on looking like a frozen screen.
+                drop(session);
+                permissions::set_screen_cast_granted(false);
+                *all.lock().unwrap() = None;
+                *ended.lock().unwrap() = Some(Rejoin::new());
             })
             .context("starting capture thread")?;
 
-        *guard = Some(monitors.clone());
+        *self.monitors.lock().unwrap() = Some(monitors.clone());
+        *self.ended.lock().unwrap() = None;
+        // A share that ended is being replaced: back to what was streaming.
+        let layout = *self.layout.lock().unwrap();
+        if let Some(layout) = layout
+            && self.show(&monitors, layout).is_err()
+        {
+            let _ = self.show(&monitors, Layout::Single(None));
+        }
         Ok(monitors)
+    }
+
+    /// Gets a new share when one has ended, when it's time.
+    fn rejoin(&self) {
+        if !self.ended.lock().unwrap().as_ref().is_some_and(Rejoin::due) {
+            return;
+        }
+        match self.ensure_started() {
+            Ok(_) => info!("the screen share is back"),
+            Err(e) => {
+                warn!("getting the screen share back: {e:#}");
+                let declined = e.is::<portal::NotApproved>();
+                if let Some(rejoin) = self.ended.lock().unwrap().as_mut() {
+                    rejoin.failed(declined);
+                }
+            }
+        }
     }
 }
 
@@ -324,6 +405,8 @@ fn encode_loop(
     let mut last: Option<(Frame, u64)> = None;
     // The latest picture hasn't been encoded yet (held while a viewer's link is full).
     let mut unsent = false;
+    // No encoder could be made: not again until then.
+    let mut retry_at = std::time::Instant::now();
     loop {
         let wait = if unsent { crate::flow::POLL } else { IDLE_POLL };
         let fresh = match rx.recv_timeout(wait) {
@@ -353,20 +436,20 @@ fn encode_loop(
         {
             *monitor.thumb.lock().unwrap() = Some((std::time::Instant::now(), Arc::new(small)));
         }
-        let slot = monitor.slot.load(Ordering::Relaxed);
+        let slot = monitor.slot.load(Ordering::Acquire);
         if slot < 0 {
             continue;
         }
         unsent |= has_fresh;
-        let wants_key = monitor.keyframe.load(Ordering::Relaxed);
         // Nothing new: only re-encode the last frame to answer a keyframe request.
-        if !unsent && !wants_key {
+        if (!unsent && !monitor.keyframe.load(Ordering::Relaxed)) || std::time::Instant::now() < retry_at {
             continue;
         }
         let Some((frame, captured_us)) = last.as_ref() else {
             continue;
         };
-        monitor.keyframe.store(false, Ordering::Relaxed);
+        // Taken, not just cleared: one asked for since the look above is answered by this frame.
+        let wants_key = monitor.keyframe.swap(false, Ordering::Relaxed);
 
         let size = (frame.width, frame.height);
         let mut force = wants_key;
@@ -382,6 +465,8 @@ fn encode_loop(
                 Ok(e) => encoder = Some(e),
                 Err(e) => {
                     warn!("encoder: {e:#}");
+                    retry_at = std::time::Instant::now() + Duration::from_secs(1);
+                    monitor.keyframe.store(wants_key, Ordering::Relaxed);
                     continue;
                 }
             }
@@ -437,10 +522,12 @@ fn encode_loop(
             Err(e) => {
                 warn!("encode: {e:#}");
                 if encoder.as_ref().is_some_and(VideoEncoder::is_hardware) {
-                    // Drop it; the next frame gets OpenH264 (and a keyframe).
+                    // Drop it; the picture goes again through OpenH264, as a keyframe, without
+                    // waiting for the screen to change.
                     warn!("hardware encoding failed; using OpenH264 from now on");
                     HARDWARE_FAILED.store(true, Ordering::Relaxed);
                     encoder = None;
+                    monitor.keyframe.store(true, Ordering::Relaxed);
                 }
             }
         }
@@ -581,6 +668,47 @@ fn run_pipewire(
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
     let core = context.connect_fd_rc(fd, None)?;
+    // A shared screen's node going away (the portal crashed or closed it) ends the share: its
+    // stream only goes Paused, waiting for a source that won't come back. One already gone is
+    // never announced, so a node not listed by the end of a round trip is gone too.
+    let nodes: Vec<u32> = captures.iter().map(|(node, ..)| *node).collect();
+    let listed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let registry = core.get_registry()?;
+    let (quit, watched) = (mainloop.clone(), nodes.clone());
+    let _registry_listener = registry
+        .add_listener_local()
+        .global({
+            let listed = listed.clone();
+            move |global| listed.borrow_mut().push(global.id)
+        })
+        .global_remove(move |id| {
+            if watched.contains(&id) {
+                info!("screen node {id} is gone");
+                quit.quit();
+            }
+        })
+        .register();
+    let listing = core.sync(0)?;
+    // PipeWire going away ends the share.
+    let (quit, done) = (mainloop.clone(), mainloop.clone());
+    let _core_listener = core
+        .add_listener_local()
+        .error(move |id, _seq, _res, message| {
+            if id == pw::core::PW_ID_CORE {
+                warn!("pipewire: {message}");
+                quit.quit();
+            }
+        })
+        .done(move |id, seq| {
+            if id == pw::core::PW_ID_CORE
+                && seq == listing
+                && let Some(node) = nodes.iter().find(|n| !listed.borrow().contains(n))
+            {
+                info!("screen node {node} was gone before capture started");
+                done.quit();
+            }
+        })
+        .register();
 
     let mut keep = Vec::new();
     for (i, (node, _monitor, tx)) in captures.into_iter().enumerate() {
@@ -601,8 +729,16 @@ fn run_pipewire(
             id: i,
             differ: Default::default(),
         };
+        let quit = mainloop.clone();
         let listener = stream
             .add_local_listener_with_user_data(state)
+            // Its node gone (the share closed): it won't come back by itself.
+            .state_changed(move |_stream, st, old, new| {
+                if share_ended(&old, &new) {
+                    info!("screen {}: {old:?} -> {new:?}", st.id);
+                    quit.quit();
+                }
+            })
             .param_changed(|stream, st, id, param| {
                 let Some(param) = param else { return };
                 if id != spa::param::ParamType::Format.as_raw() {
@@ -713,10 +849,18 @@ fn run_pipewire(
             pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
             &mut params,
         )?;
-        keep.push((stream, listener, values));
+        // The listener first: they drop in order, and destroying the stream frees the list
+        // its hook is on, which removing the hook afterwards would write to.
+        keep.push((listener, stream, values));
     }
     mainloop.run();
     Ok(())
+}
+
+/// Whether a stream's change of state means it won't deliver again.
+fn share_ended(old: &pw::stream::StreamState, new: &pw::stream::StreamState) -> bool {
+    use pw::stream::StreamState::{Error, Unconnected};
+    matches!(new, Error(_)) || (matches!(new, Unconnected) && !matches!(old, Unconnected))
 }
 
 /// Damage regions with each buffer (SPA_META_VideoDamage), up to 16 a frame.
@@ -859,5 +1003,38 @@ impl VideoSource for Video {
                 m.bitrate.store(bps, Ordering::Relaxed);
             }
         }
+    }
+    fn heal(&self) {
+        self.rejoin();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pw::stream::StreamState::{Connecting, Error, Paused, Streaming, Unconnected};
+
+    #[test]
+    fn a_share_ends_when_its_stream_can_no_longer_deliver() {
+        assert!(share_ended(&Streaming, &Unconnected));
+        assert!(share_ended(&Paused, &Error("node gone".into())));
+        assert!(!share_ended(&Unconnected, &Unconnected), "not started yet");
+        assert!(!share_ended(&Unconnected, &Connecting));
+        assert!(!share_ended(&Streaming, &Paused), "nothing to send isn't ended");
+    }
+
+    #[test]
+    fn a_share_turned_down_isnt_asked_for_again_unprompted() {
+        let mut rejoin = Rejoin::new();
+        assert!(!rejoin.due(), "a moment first");
+        rejoin.at = std::time::Instant::now();
+        assert!(rejoin.due());
+        rejoin.failed(false);
+        assert!(!rejoin.due(), "a wait after a failure");
+        rejoin.at = std::time::Instant::now();
+        assert!(rejoin.due(), "tried again");
+        rejoin.failed(true);
+        rejoin.at = std::time::Instant::now();
+        assert!(!rejoin.due());
     }
 }

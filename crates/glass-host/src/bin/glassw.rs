@@ -84,6 +84,18 @@ mod agent {
         }
     }
 
+    /// Waits before starting the host again, still listening: false when told to stop, and a
+    /// restart cuts the wait short.
+    fn wait_or_stop(wait: Duration, restart: HANDLE, stop: HANDLE) -> bool {
+        // SAFETY: two live handles.
+        let woke = unsafe { WaitForMultipleObjects(&[restart, stop], false, wait.as_millis() as u32) };
+        if woke.0 == WAIT_OBJECT_0.0 + 1 {
+            log("glassw: stopping");
+            return false;
+        }
+        true
+    }
+
     pub fn run() -> windows::core::Result<()> {
         // SAFETY: named kernel objects, never closed: they last as long as this process.
         let (restart, stop) = unsafe {
@@ -104,7 +116,9 @@ mod agent {
                 Ok(c) => c,
                 Err(e) => {
                     log(&format!("glassw: can't start {}: {e}", host.display()));
-                    std::thread::sleep(Duration::from_secs(10));
+                    if !wait_or_stop(Duration::from_secs(10), restart, stop) {
+                        return Ok(());
+                    }
                     continue;
                 }
             };
@@ -122,7 +136,9 @@ mod agent {
                     failures = if started.elapsed() < Duration::from_secs(30) { failures + 1 } else { 0 };
                     let wait = Duration::from_secs((2u64 << failures.min(4)).min(30));
                     log(&format!("glassw: the host exited ({code}); starting it again in {}s", wait.as_secs()));
-                    std::thread::sleep(wait);
+                    if !wait_or_stop(wait, restart, stop) {
+                        return Ok(());
+                    }
                 }
                 1 => {
                     log("glassw: restarting the host");

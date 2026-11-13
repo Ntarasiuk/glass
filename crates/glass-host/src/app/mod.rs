@@ -450,6 +450,8 @@ pub struct GlassApp {
     open_link: Entity<InputState>,
     /// First-run setup, shown instead of the pages.
     setup: Option<setup::Setup>,
+    /// Finished or skipped in this window, in case that couldn't be saved.
+    setup_dismissed: bool,
     chat: Entity<InputState>,
     /// The conversation's scroll, kept at the newest message.
     chat_scroll: ScrollHandle,
@@ -503,6 +505,7 @@ impl GlassApp {
             #[cfg(any(target_os = "macos", windows))]
             open_link: input("https://computer.tailnet.ts.net/#l=…", window, cx),
             setup: None,
+            setup_dismissed: false,
             chat,
             chat_scroll: ScrollHandle::new(),
             chat_seen: 0,
@@ -561,7 +564,7 @@ impl GlassApp {
     fn on_store(&mut self, store: Entity<Store>, cx: &mut Context<Self>) {
         let s = store.read(cx);
         // First run (never set up), once the first read is in: setup takes the window.
-        if s.loaded && self.setup.is_none() && !s.snap.installed && !setup::dismissed() {
+        if setup::should_open(s.loaded, self.setup.is_some(), s.snap.installed, setup::dismissed(), self.setup_dismissed) {
             self.setup = Some(setup::Setup::default());
         }
         let asks: Vec<u64> = s.snap.agent.asks.iter().map(|a| a.id).collect();

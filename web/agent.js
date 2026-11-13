@@ -167,6 +167,9 @@ export function createAgent({ control, locate }) {
     reset() {
       status = { paused: false, stopped: false };
       asks.replaceChildren();
+      // Its last steps may be another computer's.
+      lastAction = 0;
+      recent.length = 0;
       render();
     },
   };

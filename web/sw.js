@@ -140,6 +140,8 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'POST' || !url.pathname.endsWith('/share')) return;
   e.respondWith((async () => {
     const form = await e.request.formData();
+    // The newest share is the one to deliver: not mixed with one that never was.
+    await caches.delete(SHARE_CACHE);
     const cache = await caches.open(SHARE_CACHE);
     const files = form.getAll('files').filter((f) => f instanceof File && f.size);
     let i = 0;

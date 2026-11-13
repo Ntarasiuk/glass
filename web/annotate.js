@@ -155,7 +155,7 @@ export function createAnnotator({ screens, send }) {
   }
 
   // ---- Drawing ----
-  let current; // { id, stream, rect, pending: [], timer }
+  let current; // { pointerId, id, stream, rect, pending: [], timer }
   let nextId = 1;
 
   function flush() {
@@ -176,18 +176,20 @@ export function createAnnotator({ screens, send }) {
   overlay.addEventListener('pointerdown', (e) => {
     if (!enabled) return;
     e.preventDefault();
+    // One stroke at a time: another finger (a resting palm) doesn't join in or end it.
+    if (current) return;
     rects = undefined;
     const hit = [...streamRects()].find(([, r]) => e.clientX >= r.left && e.clientX <= r.left + r.width && e.clientY >= r.top && e.clientY <= r.top + r.height);
     if (!hit) return;
     overlay.setPointerCapture(e.pointerId);
-    current = { id: `${session}-${nextId++}`, stream: hit[0], rect: hit[1], pending: [] };
+    current = { pointerId: e.pointerId, id: `${session}-${nextId++}`, stream: hit[0], rect: hit[1], pending: [] };
     const p = point(e);
     current.pending.push(p);
     add(session, { id: current.id, stream: current.stream, color, points: [p] });
     flush();
   });
   overlay.addEventListener('pointermove', (e) => {
-    if (!current) return;
+    if (current?.pointerId !== e.pointerId) return;
     const events = e.getCoalescedEvents?.() ?? [e];
     const points = events.map(point);
     current.pending.push(...points);
@@ -198,8 +200,11 @@ export function createAnnotator({ screens, send }) {
     flush();
     current = undefined;
   };
-  overlay.addEventListener('pointerup', end);
-  overlay.addEventListener('pointercancel', end);
+  const endOf = (e) => {
+    if (current?.pointerId === e.pointerId) end();
+  };
+  overlay.addEventListener('pointerup', endOf);
+  overlay.addEventListener('pointercancel', endOf);
 
   function setEnabled(on) {
     if (enabled === on) return;

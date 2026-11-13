@@ -28,7 +28,7 @@ const DECODER_LADDER = [
 ];
 const LADDER_WINDOW_MS = 120_000;
 const LADDER_FAILURES = 2;
-const ladder = { step: 0, failures: [] };
+const ladder = { step: 0, failures: [], stepping: false };
 
 /**
  * Skips configurations this browser can't do at all. "prefer-hardware" fails outright
@@ -81,7 +81,7 @@ export function setDecoderStep(step) {
 export class VideoStream {
   /**
    * @param index   stream number (matches the host's)
-   * @param env     { log, post, requestKeyframe(index), hostNowUs(), stats, probe?(index, frame, hostNowUs), firstFrame?(), nackOn?(), nack?(index, frameId, fragments) }
+   * @param env     { log, post, requestKeyframe(index), hostNowUs(), stats, probe?(index, frame, hostNowUs), firstFrame?(), nackOn?(), nack?(index, frameId, fragments), paused?() }
    */
   constructor(index, env) {
     this.index = index;
@@ -124,6 +124,11 @@ export class VideoStream {
     this.waitingSince = performance.now();
     this.waitingForKeyframe = true;
     this.dropLossless();
+  }
+
+  /** The host starts on this viewer's picture now: a wait for its first frame counts from here. */
+  expectPicture() {
+    this.waitingSince = performance.now();
   }
 
   /**
@@ -201,6 +206,13 @@ export class VideoStream {
     // Copy, don't view: the browser may reuse the datagram's buffer for later datagrams.
     frame.parts[h.fragIdx] = bytes.slice(VIDEO_HEADER_LEN);
     if (++frame.received !== h.fragCount) return;
+    // Paused (a hidden tab gave its decoder up): what was already on its way has arrived, and
+    // that's all. A keyframe mustn't bring a decoder back.
+    if (this.env.paused?.()) {
+      this.pending.delete(h.frameId);
+      this.env.ack?.(this.index, h.frameId);
+      return;
+    }
     if (!repairing) {
       this.onFrame(h.frameId, frame);
       return;
@@ -352,6 +364,7 @@ export class VideoStream {
   }
 
   decodeFrame(id, frame) {
+    const skip = () => this.env.ack?.(this.index, id);
     const data = join(frame.parts);
     if (fletcher16(data) !== frame.checksum) {
       // Corrupted in transit or reassembly: never feed it to the decoder.
@@ -384,6 +397,7 @@ export class VideoStream {
 
   requestKeyframe() {
     this.waitingForKeyframe = true;
+    if (this.env.paused?.()) return;
     const now = performance.now();
     if (now - this.lastKeyframeRequest < this.keyframeRetry) return;
     this.lastKeyframeRequest = now;
@@ -405,7 +419,17 @@ export class VideoStream {
     try { this.decoder?.close(); } catch {}
     this.hevc = hevc;
     this.codec = hevc ? hevcCodec(sps) : `avc1.${hex(sps[1])}${hex(sps[2])}${hex(sps[3])}`;
-    this.decoder = new VideoDecoder({ output: (f) => this.draw(f), error: (e) => this.onDecodeError(e) });
+    // Late word from a decoder that has been replaced says nothing about this one.
+    const decoder = new VideoDecoder({
+      output: (f) => {
+        if (decoder === this.decoder) this.draw(f);
+        else f.close();
+      },
+      error: (e) => {
+        if (decoder === this.decoder) this.onDecodeError(e);
+      },
+    });
+    this.decoder = decoder;
     this.decoder.configure({ codec: this.codec, ...DECODER_LADDER[ladder.step] });
     this.env.post({ type: 'codec', stream: this.index, codec: `${this.codec} ${DECODER_LADDER[ladder.step].name}` });
     return true;
@@ -416,9 +440,9 @@ export class VideoStream {
     ladder.failures = ladder.failures.filter((t) => now - t < LADDER_WINDOW_MS);
     ladder.failures.push(now);
     if (ladder.failures.length >= LADDER_FAILURES) this.stepDownDecoder();
-    this.env.post({ type: 'status', level: 'error', text: `decoder error: ${e.message}` });
+    // Not a connection problem: a new keyframe brings the picture back.
     this.env.log('error', 'decoder error detail', {
-      stream: this.index, name: e.name, lastChunk: this.lastChunk, sinceKeyframe: this.sinceKeyframe,
+      stream: this.index, name: e.name, message: e.message, lastChunk: this.lastChunk, sinceKeyframe: this.sinceKeyframe,
       queue: this.decoder?.decodeQueueSize, codec: this.codec,
       config: DECODER_LADDER[ladder.step].name, failuresInWindow: ladder.failures.length,
     });
@@ -428,20 +452,27 @@ export class VideoStream {
   }
 
   async stepDownDecoder() {
-    for (let next = ladder.step + 1; next < DECODER_LADDER.length; next++) {
-      const config = { codec: this.codec, ...DECODER_LADDER[next] };
-      const { supported } = await VideoDecoder.isConfigSupported(config).catch(() => ({}));
-      if (supported) {
-        this.env.log('warn', 'decoder fallback', { from: DECODER_LADDER[ladder.step].name, to: DECODER_LADDER[next].name });
-        ladder.step = next;
-        ladder.failures = [];
-        this.env.post({ type: 'decoderStep', step: next });
-        // Rebuild with the new config at the next keyframe.
-        this.currentSps = undefined;
-        this.requestKeyframe();
-        return;
+    // Streams fail together: the ladder moves one step for them all, and only ever down.
+    if (ladder.stepping) return;
+    ladder.stepping = true;
+    try {
+      for (let next = ladder.step + 1; next < DECODER_LADDER.length; next++) {
+        const config = { codec: this.codec, ...DECODER_LADDER[next] };
+        const { supported } = await VideoDecoder.isConfigSupported(config).catch(() => ({}));
+        if (supported) {
+          this.env.log('warn', 'decoder fallback', { from: DECODER_LADDER[ladder.step].name, to: DECODER_LADDER[next].name });
+          ladder.step = next;
+          ladder.failures = [];
+          this.env.post({ type: 'decoderStep', step: next });
+          // Rebuild with the new config at the next keyframe.
+          this.currentSps = undefined;
+          this.requestKeyframe();
+          return;
+        }
+        this.env.log('info', `decoder config ${DECODER_LADDER[next].name} unsupported`);
       }
-      this.env.log('info', `decoder config ${DECODER_LADDER[next].name} unsupported`);
+    } finally {
+      ladder.stepping = false;
     }
   }
 

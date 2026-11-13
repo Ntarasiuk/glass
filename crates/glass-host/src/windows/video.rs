@@ -39,7 +39,7 @@ use crate::mailbox::{FrameSender, Mailbox};
 use crate::media::VideoSource;
 pub use crate::media::{AudioPackets, DisplayInfo, EncodedFrame, Layout};
 use crate::soft_encode::{Encoder, Frame, PixelFormat};
-use crate::win_capture::{Crop, Rotation, SteadySize, blit, window_crop};
+use crate::win_capture::{Crop, HardwarePolicy, Rotation, SteadySize, blit, encode_wait, window_crop};
 
 /// How long an encoder waits for a new frame before checking for a keyframe request it
 /// can satisfy by re-encoding the last one (static screens produce no new frames).
@@ -49,6 +49,13 @@ const ACQUIRE_MS: u32 = 100;
 /// OpenH264 keeps up with 60 frames a second at most; the hardware encoder takes what
 /// viewers ask for (crate::refresh).
 const SOFTWARE_MAX_FPS: u32 = 60;
+/// How soon an encoder that couldn't be made, or couldn't encode, is tried again.
+const ENCODER_RETRY: Duration = Duration::from_secs(1);
+
+/// What goes with a captured picture: when it was captured, and the window it was cropped to
+/// (0: the whole display). A picture is on its way for a while, and the target can change
+/// meanwhile: only the encoder can tell it's no longer what's wanted.
+type Captured = (u64, u32);
 
 pub struct VideoConfig {
     pub fps: i32,
@@ -274,8 +281,9 @@ struct Duplicator {
     origin: (i32, i32),
     /// A streamed window's size, held while it's being resized.
     window_size: SteadySize,
-    /// The part of the picture last sent.
+    /// The part of the picture last sent, and the window it was for.
     sent: Option<Crop>,
+    sent_window: u32,
     /// Where the pointer is on this display (its top-left, upright), if it's here and visible.
     pointer: Option<(i32, i32)>,
     /// The staging copy holds a desktop image (not just a pointer move) yet.
@@ -326,6 +334,7 @@ impl Duplicator {
                 origin,
                 window_size: SteadySize::default(),
                 sent: None,
+                sent_window: 0,
                 pointer: None,
                 has_image: false,
                 sent_pointer: true,
@@ -337,7 +346,7 @@ impl Duplicator {
     /// `window`'s part when that isn't 0) into `tx` if either did. Errors
     /// (DXGI_ERROR_ACCESS_LOST on a mode change, the lock screen or a UAC prompt) mean the
     /// duplication must be made again.
-    fn next(&mut self, tx: &FrameSender, window: u32) -> windows::core::Result<()> {
+    fn next(&mut self, tx: &FrameSender<Captured>, window: u32) -> windows::core::Result<()> {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
         // SAFETY: COM calls; the acquired frame is released before returning.
@@ -350,10 +359,10 @@ impl Duplicator {
                     // Or the pointer went in or out of the picture.
                     let crop = self.crop(window);
                     if self.has_image
-                        && (crop != self.sent || self.sent_pointer != CURSOR_BAKED.load(Ordering::Relaxed))
+                        && (crop != self.sent || window != self.sent_window || self.sent_pointer != CURSOR_BAKED.load(Ordering::Relaxed))
                         && let Some(crop) = crop
                     {
-                        self.copy_out(tx, now_us(), crop)?;
+                        self.copy_out(tx, now_us(), crop, window)?;
                     }
                     return Ok(());
                 }
@@ -368,7 +377,7 @@ impl Duplicator {
                 && self.has_image
                 && let Some(crop) = self.crop(window)
             {
-                self.copy_out(tx, captured_us, crop)?;
+                self.copy_out(tx, captured_us, crop, window)?;
             }
         }
         Ok(())
@@ -490,7 +499,7 @@ impl Duplicator {
 
     /// Copies `crop` of the staging image, turned upright and with the pointer drawn in,
     /// into the next mailbox frame.
-    unsafe fn copy_out(&mut self, tx: &FrameSender, captured_us: u64, crop: Crop) -> windows::core::Result<()> {
+    unsafe fn copy_out(&mut self, tx: &FrameSender<Captured>, captured_us: u64, crop: Crop, window: u32) -> windows::core::Result<()> {
         let staging = self.staging.as_ref().expect("has_image without staging");
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         // SAFETY: the staging texture is CPU-readable; it's unmapped below.
@@ -502,6 +511,7 @@ impl Duplicator {
         let src = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, mapped.RowPitch as usize * self.height) };
         blit(src, scanned, mapped.RowPitch as usize, self.rotation, crop, &mut pixels);
         self.sent = Some(crop);
+        self.sent_window = window;
         // SAFETY: mapped above.
         unsafe { self.context.Unmap(staging, 0) };
         // Duplication gives the pointer's position and shape the way the desktop is seen
@@ -521,7 +531,7 @@ impl Duplicator {
                 format: PixelFormat::Bgrx,
                 data: pixels,
             },
-            captured_us,
+            (captured_us, window),
         );
         Ok(())
     }
@@ -529,9 +539,13 @@ impl Duplicator {
 
 /// Duplicates one display for as long as the host runs, making the duplication again
 /// whenever it's lost (resolution changes, the lock screen, UAC prompts, sleep).
-fn capture_loop(id: usize, device: String, monitor: Arc<Monitor>, tx: FrameSender) {
+fn capture_loop(id: usize, device: String, monitor: Arc<Monitor>, tx: FrameSender<Captured>) {
     let mut failing_since: Option<Instant> = None;
     loop {
+        // In the secure-desktop helper, nothing's captured while nobody's being sent it.
+        while super::secure::capture_paused() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
         // In the secure-desktop helper, follow the input desktop so duplication can see the
         // lock screen / UAC desktop. A no-op in the ordinary per-user host.
         super::secure::follow_input_desktop();
@@ -557,6 +571,10 @@ fn capture_loop(id: usize, device: String, monitor: Arc<Monitor>, tx: FrameSende
             }
         };
         loop {
+            // A new duplication next time starts with the whole picture.
+            if super::secure::capture_paused() {
+                break;
+            }
             if let Err(e) = dup.next(&tx, monitor.window.load(Ordering::Relaxed)) {
                 info!("screen {id}: duplication ended ({e}); starting it again");
                 break;
@@ -671,8 +689,9 @@ impl Video {
             monitors[ids[0] as usize].window.store(window, Ordering::Relaxed);
         }
         for (slot, &id) in ids.iter().enumerate() {
-            monitors[id as usize].slot.store(slot as i32, Ordering::Relaxed);
+            // The keyframe first: whoever sees the slot sees that it's wanted.
             monitors[id as usize].keyframe.store(true, Ordering::Relaxed);
+            monitors[id as usize].slot.store(slot as i32, Ordering::Release);
         }
         *self.shown.lock().unwrap() = ids.clone();
         drop(monitors);
@@ -705,14 +724,14 @@ impl Video {
             return;
         }
         info!("window {window} moved to display {to}");
-        // The old display stops before the new one starts, so stream 0 never has two
-        // encoders feeding it.
-        monitors[from].slot.store(-1, Ordering::Relaxed);
+        // The old display stops before the new one starts (and a frame of its still being
+        // encoded is dropped, see `encode_loop`), so stream 0 never has two encoders feeding it.
+        monitors[from].slot.store(-1, Ordering::Release);
         monitors[from].window.store(0, Ordering::Relaxed);
         let m = &monitors[to as usize];
         m.window.store(window, Ordering::Relaxed);
-        m.slot.store(0, Ordering::Relaxed);
         m.keyframe.store(true, Ordering::Relaxed);
+        m.slot.store(0, Ordering::Release);
         *self.shown.lock().unwrap() = vec![to];
     }
 
@@ -885,19 +904,23 @@ fn window_stream(id: u32, [l, t, r, b]: [i32; 4]) -> DisplayInfo {
 /// encoder's frame rate, and again on a keyframe request (static screens send nothing).
 fn encode_loop(
     monitor: Arc<Monitor>,
-    rx: Arc<Mailbox>,
+    rx: Arc<Mailbox<Captured>>,
     frames: broadcast::Sender<Arc<EncodedFrame>>,
     fps: u32,
     scale: f64,
 ) {
     let mut encoder: Option<VideoEncoder> = None;
     let mut applied_bitrate = 0;
-    let mut last: Option<(Frame, u64)> = None;
+    let mut last: Option<(Frame, Captured)> = None;
     // The latest picture hasn't been encoded yet (it came sooner than the frame rate allows).
     let mut unsent = false;
     let mut next_due = Instant::now();
     // The window being streamed, or 0 for the whole display.
     let mut target = 0;
+    // No encoder could be made, or it failed: not again until then.
+    let mut retry_at = Instant::now();
+    // The helper is the video source (the secure desktop is up), not this.
+    let mut held_off = false;
     loop {
         // Another target: the picture held is of the old one; the capture sends a new one.
         let window = monitor.window.load(Ordering::Relaxed);
@@ -908,7 +931,8 @@ fn encode_loop(
                 rx.recycle(old.data);
             }
         }
-        let wait = if unsent { next_due.saturating_duration_since(Instant::now()) } else { IDLE_POLL };
+        let shown = monitor.slot.load(Ordering::Acquire) >= 0 && !super::secure::capturing();
+        let wait = encode_wait(shown, unsent, next_due.max(retry_at), Instant::now(), IDLE_POLL);
         let fresh = match rx.recv_timeout(wait) {
             Ok(f) => Some(f),
             Err(RecvTimeoutError::Timeout) => None,
@@ -920,6 +944,15 @@ fn encode_loop(
         {
             rx.recycle(old.data);
         }
+        // The secure-desktop helper between uses: what it has is old by the next one, and could
+        // be an earlier prompt.
+        if super::secure::capture_paused() {
+            if let Some((old, _)) = last.take() {
+                rx.recycle(old.data);
+            }
+            unsent = false;
+            continue;
+        }
         unsent |= has_fresh;
         // Previews cover every monitor, shown or not (as a whole). The first one comes from
         // the last frame: a still screen sends no new ones, and screenshots would never work.
@@ -927,18 +960,41 @@ fn encode_loop(
             && target == 0
             && THUMBS_UNTIL.lock().unwrap().is_some_and(|t| t > Instant::now())
             && monitor.thumb.lock().unwrap().as_ref().is_none_or(|(at, _)| at.elapsed() >= THUMB_EVERY)
-            && let Some((frame, _)) = last.as_ref()
+            && let Some((frame, (_, 0))) = last.as_ref()
             && let Some(small) = crate::thumbs::downscale(&frame.data, frame.width, frame.height, frame.stride, false, PICTURE_MAX)
         {
             *monitor.thumb.lock().unwrap() = Some((Instant::now(), Arc::new(small)));
         }
-        let slot = monitor.slot.load(Ordering::Relaxed);
+        let slot = monitor.slot.load(Ordering::Acquire);
         if slot < 0 {
             continue;
         }
-        let Some((frame, captured_us)) = last.as_ref() else {
+        // The helper is showing the secure desktop: a picture from here, its last from before
+        // the lock, would land in the middle of its stream. Back from that, viewers' decoders
+        // hold the helper's pictures, not this encoder's: start on a keyframe.
+        let capturing = super::secure::capturing();
+        if capturing != held_off {
+            held_off = capturing;
+            if !capturing {
+                monitor.keyframe.store(true, Ordering::Relaxed);
+            }
+        }
+        if capturing {
+            continue;
+        }
+        let Some((frame, (captured_us, cropped_to))) = last.as_ref() else {
             continue;
         };
+        let cropped_to = *cropped_to;
+        // Captured for what was streamed before: a whole display must never go out as a window.
+        // Read after the slot, which `set_layout` sets last. The capture sends a new one.
+        if cropped_to != monitor.window.load(Ordering::Relaxed) {
+            if let Some((old, _)) = last.take() {
+                rx.recycle(old.data);
+            }
+            unsent = false;
+            continue;
+        }
         if has_fresh {
             monitor.generation.fetch_add(1, Ordering::Relaxed);
             // Duplication hands over BGRA as is: full colour, nothing to convert back
@@ -954,6 +1010,9 @@ fn encode_loop(
                 }));
             }
         }
+        if Instant::now() < retry_at {
+            continue;
+        }
         let wants_key = monitor.keyframe.load(Ordering::Relaxed);
         // Nothing new, or too soon for it: only a keyframe request is answered now.
         if !wants_key && (!unsent || Instant::now() < next_due) {
@@ -965,12 +1024,16 @@ fn encode_loop(
             next_due = Instant::now() + crate::flow::POLL;
             continue;
         }
-        monitor.keyframe.store(false, Ordering::Relaxed);
+        // Taken, not just cleared: one asked for since the look above is answered by this frame.
+        let wants_key = monitor.keyframe.swap(false, Ordering::Relaxed);
 
         let size = (frame.width, frame.height);
         let wanted_fps = fps.min(VIEWER_FPS.load(Ordering::Relaxed)).max(1);
         let mut force = wants_key;
-        if encoder.as_ref().is_none_or(|e| e.source_size() != size || e.wanted_fps != wanted_fps) {
+        if encoder
+            .as_ref()
+            .is_none_or(|e| e.source_size() != size || e.wanted_fps != wanted_fps || e.hardware_is_back(size, scale))
+        {
             applied_bitrate = monitor.bitrate.load(Ordering::Relaxed);
             encoder = None;
             match VideoEncoder::new(frame.width, frame.height, wanted_fps, applied_bitrate, scale) {
@@ -981,6 +1044,8 @@ fn encode_loop(
                 }
                 Err(e) => {
                     warn!("encoder: {e:#}");
+                    retry_at = Instant::now() + ENCODER_RETRY;
+                    monitor.keyframe.store(wants_key, Ordering::Relaxed);
                     continue;
                 }
             }
@@ -1003,6 +1068,16 @@ fn encode_loop(
         next_due = Instant::now() + Duration::from_secs_f64(0.9 / enc.fps() as f64);
         match enc.encode(frame, force) {
             Ok(Some((data, keyframe))) => {
+                // Encoding takes a while. If this stream moved on meanwhile, this frame could
+                // land after its new source's keyframe, so it's dropped; and this encoder's
+                // next one, being a delta from it, starts over.
+                if monitor.slot.load(Ordering::Acquire) != slot
+                    || monitor.window.load(Ordering::Relaxed) != cropped_to
+                    || super::secure::capturing()
+                {
+                    monitor.keyframe.store(true, Ordering::Relaxed);
+                    continue;
+                }
                 let _ = frames.send(Arc::new(EncodedFrame {
                     stream: slot as u8,
                     data,
@@ -1017,19 +1092,21 @@ fn encode_loop(
                 warn!("encode: {e:#}");
                 if enc.is_hardware() {
                     // Drop it; the picture goes again through OpenH264, as a keyframe.
-                    warn!("hardware encoding failed; using OpenH264 from now on");
-                    HARDWARE_FAILED.store(true, Ordering::Relaxed);
+                    let rest = HARDWARE.lock().unwrap().failed(Instant::now(), enc.made.elapsed());
+                    warn!("hardware encoding failed; this display uses OpenH264, and tries hardware again in {}s", rest.as_secs());
                     encoder = None;
                     monitor.keyframe.store(true, Ordering::Relaxed);
+                } else {
+                    retry_at = Instant::now() + ENCODER_RETRY;
+                    monitor.keyframe.store(force, Ordering::Relaxed);
                 }
             }
         }
     }
 }
 
-/// Set once the hardware encoder has failed (or there's none): the host stays on OpenH264
-/// after that.
-static HARDWARE_FAILED: AtomicBool = AtomicBool::new(false);
+/// Whether the hardware encoder may be tried just now.
+static HARDWARE: Mutex<HardwarePolicy> = Mutex::new(HardwarePolicy::new());
 
 /// The hardware encoder through Media Foundation where there is one, else OpenH264.
 /// `GLASS_ENCODER=software` asks for OpenH264.
@@ -1037,6 +1114,7 @@ struct VideoEncoder {
     kind: Kind,
     /// The frame rate asked for when it was made (viewers' rate within --fps).
     wanted_fps: u32,
+    made: Instant,
 }
 
 enum Kind {
@@ -1048,26 +1126,36 @@ enum Kind {
 impl VideoEncoder {
     fn new(width: usize, height: usize, fps: u32, bitrate: u32, scale: f64) -> Result<Self> {
         let software = std::env::var("GLASS_ENCODER").is_ok_and(|e| e.eq_ignore_ascii_case("software"));
-        if software && !HARDWARE_FAILED.swap(true, Ordering::Relaxed) {
-            info!("GLASS_ENCODER=software: encoding with OpenH264");
+        if software {
+            let mut policy = HARDWARE.lock().unwrap();
+            if !policy.is_never() {
+                info!("GLASS_ENCODER=software: encoding with OpenH264");
+                policy.never();
+            }
         }
-        if !HARDWARE_FAILED.load(Ordering::Relaxed) && crate::win_capture::hardware_fits((width, height), scale) {
+        let made = Instant::now();
+        if HARDWARE.lock().unwrap().allowed(made) && crate::win_capture::hardware_fits((width, height), scale) {
             if !mf::available() {
                 info!("no hardware H.264 encoder; encoding with OpenH264");
-                HARDWARE_FAILED.store(true, Ordering::Relaxed);
+                HARDWARE.lock().unwrap().never();
             } else {
                 match mf::MfEncoder::new(width, height, fps, bitrate, scale) {
-                    Ok(e) => return Ok(Self { kind: Kind::Hard(e), wanted_fps: fps }),
+                    Ok(e) => return Ok(Self { kind: Kind::Hard(e), wanted_fps: fps, made }),
                     Err(e) => {
-                        warn!("hardware encoder unavailable, using OpenH264: {e:#}");
-                        HARDWARE_FAILED.store(true, Ordering::Relaxed);
+                        let rest = HARDWARE.lock().unwrap().failed(Instant::now(), Duration::ZERO);
+                        warn!("hardware encoder unavailable, using OpenH264 and trying again in {}s: {e:#}", rest.as_secs());
                     }
                 }
             }
         }
         let soft_fps = fps.min(SOFTWARE_MAX_FPS);
         let e = Encoder::new(width, height, soft_fps, bitrate, scale)?;
-        Ok(Self { kind: Kind::Soft(e, soft_fps), wanted_fps: fps })
+        Ok(Self { kind: Kind::Soft(e, soft_fps), wanted_fps: fps, made })
+    }
+
+    /// On OpenH264 while the hardware encoder had a rest, and it's time to try it again.
+    fn hardware_is_back(&self, size: (usize, usize), scale: f64) -> bool {
+        !self.is_hardware() && crate::win_capture::hardware_fits(size, scale) && HARDWARE.lock().unwrap().allowed(Instant::now())
     }
 
     fn is_hardware(&self) -> bool {
@@ -1179,6 +1267,10 @@ impl VideoSource for Video {
         Some(m.generation.load(Ordering::Relaxed))
     }
     fn raw_frame(&self, stream: u8) -> Option<Arc<crate::lossless::RawFrame>> {
+        // What's kept is from before the secure desktop came up.
+        if super::secure::capturing() {
+            return None;
+        }
         let monitors = self.monitors.lock().unwrap();
         let m = monitors.as_ref()?.iter().find(|m| m.slot.load(Ordering::Relaxed) == stream as i32)?;
         m.latest.lock().unwrap().clone()

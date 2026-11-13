@@ -184,7 +184,8 @@ async function signOut(request, env) {
 async function deleteAccount(request, env) {
   const s = await session(request, env);
   if (!s) throw new Refused('Not signed in.', 401);
-  await env.DB.batch(['passkeys', 'sessions', 'account_computers', 'account_policy'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE account = ?`).bind(s.account)).concat(
+  // Its open challenges too: one left over would make a new account with the same id.
+  await env.DB.batch(['passkeys', 'sessions', 'account_computers', 'account_policy', 'account_challenges'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE account = ?`).bind(s.account)).concat(
     env.DB.prepare('DELETE FROM accounts WHERE id = ?').bind(s.account),
     dropOrphanReports(env),
   ));
@@ -214,12 +215,29 @@ async function makeClaim(request, env, url) {
   return json({ url: `${url.origin}/computers#claim=${code}`, expires: Math.floor((now + CLAIM_MS) / 1000) });
 }
 
+/**
+ * A host's signed message works once. Its timestamp alone would let a copy through for
+ * minutes: say, undoing `glass account add` right after `glass account remove`. Keyed by the
+ * message, not the signature: an ECDSA signature has a second valid form anyone can work out.
+ */
+async function firstUse(env, hostId, message) {
+  const now = Date.now();
+  await env.DB.prepare('DELETE FROM signed_requests WHERE expires < ?').bind(now).run();
+  // Its timestamp may be up to CLAIM_CLOCK_MS ahead, and is good for that long after.
+  const res = await env.DB.prepare('INSERT OR IGNORE INTO signed_requests (hash, expires) VALUES (?, ?)')
+    .bind(await sha256b64(`${hostId}\n${message}`), now + 2 * CLAIM_CLOCK_MS + 60_000)
+    .run();
+  if (!res.meta.changes) throw new Refused('That was sent already.', 409);
+}
+
 /** A host takes itself off every account (and drops its unused claims). */
 async function unclaim(request, env) {
   const { key, ts, sig } = await body(request);
   if (Math.abs(Date.now() - Number(ts) * 1000) > CLAIM_CLOCK_MS) throw new Refused('This computer\'s clock is off by more than a few minutes.');
-  const hostId = await verifySigned(String(key ?? ''), `glass-unclaim-v1\n${ts}`, String(sig ?? ''));
+  const message = `glass-unclaim-v1\n${ts}`;
+  const hostId = await verifySigned(String(key ?? ''), message, String(sig ?? ''));
   if (!hostId) throw new Refused('Not signed by that computer.', 401);
+  await firstUse(env, hostId, message);
   const [removed] = await env.DB.batch([
     env.DB.prepare('DELETE FROM account_computers WHERE host_id = ?').bind(hostId),
     env.DB.prepare('DELETE FROM computer_claims WHERE host_id = ?').bind(hostId),
@@ -243,14 +261,26 @@ async function addComputer(request, env) {
   const { claim: code } = await body(request);
   const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM account_computers WHERE account = ?').bind(s.account).first('n');
   if (n >= COMPUTERS_PER_ACCOUNT) throw new Refused('This account has as many computers as it can hold.');
-  // Taken in one step, so two browsers can't both use one link.
-  const claim = await env.DB.prepare('DELETE FROM computer_claims WHERE code_hash = ? AND expires > ? RETURNING host_id, host_key, name')
-    .bind(await sha256b64(`claim:${code}`), Date.now())
-    .first();
+  // In one transaction: two browsers can't both use one link, the limit holds however many
+  // come at once, a used link has always added its computer, and the computer taking itself
+  // off (which takes its links too) comes wholly before this or wholly after.
+  const hash = await sha256b64(`claim:${code}`);
+  const now = Date.now();
+  const [, taken] = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT OR REPLACE INTO account_computers (account, host_id, host_key, name, added)
+         SELECT ?, host_id, host_key, name, ? FROM computer_claims
+          WHERE code_hash = ? AND expires > ? AND (SELECT COUNT(*) FROM account_computers WHERE account = ?) < ?`,
+    ).bind(s.account, now, hash, now, s.account, COMPUTERS_PER_ACCOUNT),
+    env.DB.prepare(
+      `DELETE FROM computer_claims
+        WHERE code_hash = ? AND expires > ?
+          AND EXISTS (SELECT 1 FROM account_computers a WHERE a.account = ? AND a.host_id = computer_claims.host_id)
+        RETURNING name`,
+    ).bind(hash, now, s.account),
+  ]);
+  const claim = taken.results[0];
   if (!claim) throw new Refused('This link has expired or was used already. Make a new one with: glass account add', 404);
-  await env.DB.prepare('INSERT OR REPLACE INTO account_computers (account, host_id, host_key, name, added) VALUES (?, ?, ?, ?, ?)')
-    .bind(s.account, claim.host_id, claim.host_key, claim.name, Date.now())
-    .run();
   return json({ name: claim.name });
 }
 
@@ -367,9 +397,11 @@ async function fleetReport(request, env) {
   const { key, ts, data, sig } = await body(request);
   if (typeof data !== 'string' || data.length > REPORT_MAX) throw new Refused('expected key, ts, data and sig');
   if (Math.abs(Date.now() - Number(ts) * 1000) > CLAIM_CLOCK_MS) throw new Refused('This computer\'s clock is off by more than a few minutes.');
-  const hostId = await verifySigned(String(key ?? ''), `glass-fleet-v1\n${ts}\n${data}`, String(sig ?? ''));
+  const message = `glass-fleet-v1\n${ts}\n${data}`;
+  const hostId = await verifySigned(String(key ?? ''), message, String(sig ?? ''));
   if (!hostId) throw new Refused('Not signed by that computer.', 401);
   if (data === '') {
+    await firstUse(env, hostId, message);
     await env.DB.prepare('DELETE FROM computer_reports WHERE host_id = ?').bind(hostId).run();
     return json({ deleted: true });
   }
@@ -385,6 +417,7 @@ async function fleetReport(request, env) {
   const now = Date.now();
   const last = await env.DB.prepare('SELECT reported FROM computer_reports WHERE host_id = ?').bind(hostId).first('reported');
   if (last && now - last < REPORT_EVERY_MS) throw new Refused('Reports come at most every few seconds.', 429);
+  await firstUse(env, hostId, message);
   await env.DB.prepare('INSERT OR REPLACE INTO computer_reports (host_id, reported, data) VALUES (?, ?, ?)')
     .bind(hostId, now, JSON.stringify(cleanReport(raw)))
     .run();

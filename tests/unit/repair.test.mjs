@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { VideoStream } from '../../web/video-stream.js';
-import { FLAG_KEYFRAME, VIDEO_HEADER_LEN } from '../../web/proto.js';
+import { fletcher16, FLAG_KEYFRAME, VIDEO_HEADER_LEN } from '../../web/proto.js';
 
 function setup() {
   const sent = { nacks: [], keyframes: 0, decoded: [] };
@@ -27,6 +27,23 @@ const frag = (s, frameId, fragIdx, fragCount, keyframe = false) => s.onFragment(
   new Uint8Array(VIDEO_HEADER_LEN + 1),
 );
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('a corrupted frame or a keyframe that cannot start a decoder is skipped, not fatal', () => {
+  const acks = [];
+  let keyframes = 0;
+  const s = new VideoStream(0, {
+    log() {}, post() {}, stats: { bytes: 0, dropped: 0 }, hostNowUs: () => 0,
+    requestKeyframe: () => { keyframes++; },
+    ack: (stream, id) => acks.push([stream, id]),
+  });
+  const parts = [new Uint8Array([1, 2, 3])];
+  s.decodeFrame(1, { parts, checksum: fletcher16(parts[0]) ^ 1, keyframe: true, hevc: false });
+  assert.deepEqual(acks, [[0, 1]]);
+  assert.equal(keyframes, 1);
+  // Checks out, but holds no parameter sets.
+  s.decodeFrame(2, { parts, checksum: fletcher16(parts[0]), keyframe: true, hevc: false });
+  assert.deepEqual(acks, [[0, 1], [0, 2]]);
+});
 
 test('a keyframe missing a fragment is repaired, and later frames wait for it', async () => {
   const { s, sent } = setup();

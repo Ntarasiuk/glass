@@ -26,8 +26,17 @@ struct Pending {
 
 static PENDING: Mutex<Vec<Pending>> = Mutex::new(Vec::new());
 
-/// Waits for an answer about `who`; false when denied or unanswered.
-pub async fn ask(who: String) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Answer {
+    Allowed,
+    /// Someone said no.
+    Denied,
+    /// Nobody answered in time.
+    Unanswered,
+}
+
+/// Waits for an answer about `who`.
+pub async fn ask(who: String) -> Answer {
     let id = crate::viewers::next_id();
     let (tx, rx) = oneshot::channel();
     PENDING.lock().unwrap().push(Pending {
@@ -49,10 +58,14 @@ pub async fn ask(who: String) -> bool {
             decide(id, allow);
         }
     });
-    let allowed = matches!(tokio::time::timeout(TIMEOUT, rx).await, Ok(Ok(true)));
+    let answer = match tokio::time::timeout(TIMEOUT, rx).await {
+        Ok(Ok(true)) => Answer::Allowed,
+        Ok(Ok(false)) => Answer::Denied,
+        _ => Answer::Unanswered,
+    };
     PENDING.lock().unwrap().retain(|p| p.request.id != id);
-    tracing::info!("{who}: {}", if allowed { "allowed" } else { "denied" });
-    allowed
+    tracing::info!("{who}: {answer:?}");
+    answer
 }
 
 /// Answers a waiting request; false if there's no such request (any more).
@@ -90,7 +103,7 @@ mod tests {
             tokio::task::yield_now().await;
         };
         assert!(decide(id, true));
-        assert!(waiting.await.unwrap());
+        assert_eq!(waiting.await.unwrap(), Answer::Allowed);
         assert!(!decide(id, true), "answered once");
 
         let waiting = tokio::spawn(ask("Chrome on Windows".into()));
@@ -101,6 +114,6 @@ mod tests {
             tokio::task::yield_now().await;
         };
         assert!(decide(id, false));
-        assert!(!waiting.await.unwrap());
+        assert_eq!(waiting.await.unwrap(), Answer::Denied);
     }
 }

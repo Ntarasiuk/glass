@@ -22,6 +22,7 @@ pub fn set_setting(key: &str, value: &str) -> Result<String> {
 
 pub fn set_remote(on: bool) -> Result<String> {
     remote::set_enabled(on)?;
+    crate::support::owner_chose_remote();
     Ok(if on {
         "Remote access is on. Links can now work from any network.".into()
     } else {
@@ -82,14 +83,14 @@ pub fn agents_public(on: bool) -> Result<String> {
 
 /// Installs an app that asked for unattended access.
 pub fn install_agent(id: &str) -> Result<String> {
-    let name = crate::grants::update(|s| {
-        let c = s.clients.iter_mut().find(|c| c.id == id && c.auth_method != "none")?;
-        c.installed = true;
-        c.install_requested = false;
-        Some(c.name.clone())
-    })?
-    .ok_or_else(|| anyhow::anyhow!("that app is gone"))?;
-    Ok(format!("{name} can use this computer unattended. Revoke it any time."))
+    let name = crate::grants::install(id)?.ok_or_else(|| anyhow::anyhow!("that app is gone"))?;
+    Ok(format!("{name} can use this computer unattended. Uninstall it any time."))
+}
+
+/// Takes an app's unattended access back, whether or not it has used it yet.
+pub fn uninstall_agent(id: &str) -> Result<String> {
+    anyhow::ensure!(crate::grants::uninstall(id)?, "it isn't installed any more");
+    Ok("Uninstalled. It can't use this computer unless you install it again.".into())
 }
 
 /// Ends an agent's access (from another device).

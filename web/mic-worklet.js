@@ -12,9 +12,12 @@ class GlassMic extends AudioWorkletProcessor {
     this.carry = 0; // last input sample of the previous block, for interpolation
     this.packet = new Int16Array(FRAMES_PER_PACKET);
     this.filled = 0;
+    this.stopped = false;
+    this.port.onmessage = () => { this.stopped = true; };
   }
 
   process(inputs) {
+    if (this.stopped) return false;
     const input = inputs[0];
     if (!input?.length || !input[0].length) return true;
     const n = input[0].length;

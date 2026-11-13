@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const SITE = resolve(import.meta.dirname, '../../site');
-const PORT = 8790;
+// (Another port when something is already on this one: it would answer in this Worker's place.)
+const PORT = Number(process.env.SITE_TEST_PORT ?? 8790);
 const BASE = `http://localhost:${PORT}`;
 const KEY = 'test-stats-key';
 let wrangler;
@@ -252,4 +253,21 @@ test('quick support: guessing codes is slow', async () => {
   let status;
   for (let i = 0; i < 25; i++) status = (await support('POST', '/api/support/claim', { code: '000000000' })).status;
   assert.equal(status, 429);
+});
+
+test('host connections that never sign in are only kept so long', { timeout: 30_000 }, async () => {
+  const id = 'A'.repeat(22);
+  const open = () =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${PORT}/signal/host/${id}`);
+      ws.addEventListener('message', () => resolve(ws), { once: true });
+      ws.addEventListener('error', reject, { once: true });
+    });
+  const oldest = await open();
+  const closed = new Promise((resolve) => oldest.addEventListener('close', (e) => resolve(e.code)));
+  const others = [];
+  for (let i = 0; i < 4; i++) others.push(await open());
+  assert.equal(await closed, 4008);
+  assert.equal(others.at(-1).readyState, WebSocket.OPEN);
+  for (const ws of others) ws.close();
 });

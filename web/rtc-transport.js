@@ -14,6 +14,7 @@ export class RtcTransport {
     this.send = send;
     this.streams = new Map(); // id -> { controller (readable side), credit waiters }
     this.nextId = 1;
+    this.ended = false;
     let incoming;
     this.incomingUnidirectionalStreams = new ReadableStream({ start: (c) => { incoming = c; } });
     this.incoming = incoming;
@@ -76,8 +77,12 @@ export class RtcTransport {
   }
 
   end(reason) {
+    this.ended = true;
+    // Like WebTransport: closed before it was up, it never comes up.
+    this.rejectReady(new Error(reason));
     for (const s of this.streams.values()) {
       try { s.controller?.error(new Error(reason)); } catch {}
+      for (const wake of s.waiters.splice(0)) wake();
     }
     this.streams.clear();
     try { this.dgramIn.close(); } catch {}
@@ -100,7 +105,8 @@ export class RtcTransport {
     const s = this.stream(id);
     return new WritableStream({
       write: async (chunk) => {
-        while (s.inFlight > MAX_IN_FLIGHT) await new Promise((r) => s.waiters.push(r));
+        while (!this.ended && s.inFlight > MAX_IN_FLIGHT) await new Promise((r) => s.waiters.push(r));
+        if (this.ended) throw new Error('connection closed');
         const copy = chunk.slice().buffer;
         s.inFlight += copy.byteLength;
         this.send({ t: 'data', id, data: copy }, [copy]);
@@ -110,12 +116,14 @@ export class RtcTransport {
   }
 
   async createBidirectionalStream() {
+    if (this.ended) throw new Error('connection closed');
     const id = this.nextId++;
     this.send({ t: 'open-stream', id, kind: 'bi' });
     return { readable: this.readableFor(id), writable: this.writableFor(id) };
   }
 
   async createUnidirectionalStream() {
+    if (this.ended) throw new Error('connection closed');
     const id = this.nextId++;
     this.send({ t: 'open-stream', id, kind: 'uni' });
     return this.writableFor(id);

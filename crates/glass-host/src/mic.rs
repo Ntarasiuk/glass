@@ -265,19 +265,96 @@ pub fn packet(data: &[u8]) {
     }
 }
 
-/// A session started (true) or stopped (false) sending.
-pub fn active(on: bool) {
+/// How many sessions have their mic on. The device starts with the first and stops with the
+/// last, so a session counts once, and only if the device did start.
+#[derive(Default)]
+struct Users(usize);
+
+impl Users {
+    fn join(&mut self, start: impl FnOnce() -> bool) -> bool {
+        if self.0 == 0 && !start() {
+            return false;
+        }
+        self.0 += 1;
+        true
+    }
+
+    fn leave(&mut self, stop: impl FnOnce()) {
+        self.0 = self.0.saturating_sub(1);
+        if self.0 == 0 {
+            stop();
+        }
+    }
+}
+
+/// One session's seat among the [`Users`]: `on` however often it's said is counted once, and
+/// `off` from a session that isn't on takes nothing from anyone else's. Returns whether the
+/// session now has one.
+fn choose(has: bool, on: bool, users: &mut Users, start: impl FnOnce() -> bool, stop: impl FnOnce()) -> bool {
+    match (has, on) {
+        (false, true) => users.join(start),
+        (true, false) => {
+            users.leave(stop);
+            false
+        }
+        _ => has,
+    }
+}
+
+static USERS: std::sync::Mutex<Users> = std::sync::Mutex::new(Users(0));
+
+/// A session's microphone. `flag` says whether its KIND_MIC datagrams are wanted. Dropped with
+/// the session, however that ends.
+pub struct Session {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    has: bool,
+}
+
+impl Session {
+    pub fn new(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self { flag, has: false }
+    }
+
+    /// The viewer turned its mic on or off.
+    pub fn set(&mut self, on: bool) {
+        let mut users = USERS.lock().unwrap_or_else(|e| e.into_inner());
+        self.has = choose(self.has, on, &mut users, start_device, stop_device);
+        self.flag.store(self.has, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.set(false);
+    }
+}
+
+/// The device, for the first mic on: false if it wouldn't start.
+fn start_device() -> bool {
+    if crate::testmode::enabled() {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    return linux::start();
+    #[cfg(target_os = "macos")]
+    return mac::start();
+    #[cfg(windows)]
+    return win::start();
+    #[allow(unreachable_code)]
+    false
+}
+
+/// The last mic went off.
+fn stop_device() {
     if crate::testmode::enabled() {
         return;
     }
     #[cfg(target_os = "linux")]
-    linux::active(on);
+    linux::stop();
     #[cfg(target_os = "macos")]
-    mac::active(on);
+    mac::stop();
     #[cfg(windows)]
-    win::active(on);
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    let _ = on;
+    win::stop();
 }
 
 /// A short buffer of mono 48 kHz samples: the newest win when the viewer sends faster
@@ -384,7 +461,6 @@ mod mac {
         proc_id: AudioDeviceIOProcID,
         /// The default input before ours, put back when the last mic turns off.
         previous: Option<AudioObjectID>,
-        users: usize,
     }
 
     // SAFETY: the IOProc id is an opaque handle from the HAL, only used under the lock.
@@ -522,26 +598,26 @@ mod mac {
         }
     }
 
-    pub fn active(on: bool) {
-        let mut playing = PLAYING.lock().unwrap();
-        if on {
-            if let Some(p) = playing.as_mut() {
-                p.users += 1;
-                return;
+    pub fn start() -> bool {
+        match open() {
+            Ok(p) => {
+                *PLAYING.lock().unwrap() = Some(p);
+                true
             }
-            match start() {
-                Ok(p) => *playing = Some(p),
-                Err(e) => tracing::warn!("microphone: {e:#}"),
-            }
-        } else if let Some(p) = playing.as_mut() {
-            p.users = p.users.saturating_sub(1);
-            if p.users == 0 {
-                stop(playing.take().unwrap());
+            Err(e) => {
+                tracing::warn!("microphone: {e:#}");
+                false
             }
         }
     }
 
-    fn start() -> anyhow::Result<Playing> {
+    pub fn stop() {
+        if let Some(p) = PLAYING.lock().unwrap().take() {
+            close(p);
+        }
+    }
+
+    fn open() -> anyhow::Result<Playing> {
         let (device, name) = device().ok_or_else(|| anyhow::anyhow!("BlackHole isn't installed (glass mic install)"))?;
         // Ask for 48 kHz (what viewers send); if it won't, the callback resamples.
         set(device, address(kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal), 48_000.0f64);
@@ -579,10 +655,10 @@ mod mac {
             tracing::warn!("microphone: couldn't make {name} the default input; choose it in the app instead");
         }
         tracing::info!("microphone: playing into {name} ({} Hz), now the default input", format.mSampleRate);
-        Ok(Playing { device, proc_id, previous, users: 1 })
+        Ok(Playing { device, proc_id, previous })
     }
 
-    fn stop(p: Playing) {
+    fn close(p: Playing) {
         // SAFETY: the proc was created and started on this device in `start`.
         unsafe {
             AudioDeviceStop(p.device, p.proc_id);
@@ -665,7 +741,7 @@ mod mac {
         fn plays_into_the_device_and_puts_the_input_back() {
             let (device, name) = device().expect("no loopback device (set GLASS_MIC_DEVICE)");
             let before = default_input();
-            active(true);
+            assert!(start());
             let switched = default_input() == Some(device);
             let tone: Vec<u8> = (0..4800).flat_map(|i| (((i as f32 / 48.0).sin() * 8000.0) as i16).to_le_bytes()).collect();
             for _ in 0..10 {
@@ -673,7 +749,7 @@ mod mac {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             let rendered = RENDERED.load(std::sync::atomic::Ordering::Relaxed);
-            active(false);
+            stop();
             assert!(rendered > 0, "{name} pulled audio");
             // Some virtual devices (Zoom's) refuse to be a default; BlackHole doesn't.
             let can_default = get(device, address(kAudioDevicePropertyDeviceCanBeDefaultDevice, kAudioObjectPropertyScopeInput), 0u32) == Some(1);
@@ -724,8 +800,6 @@ mod win {
 
     struct Playing {
         stop: Arc<AtomicBool>,
-        /// Sessions with their mic on.
-        users: usize,
     }
 
     static PLAYING: Mutex<Option<Playing>> = Mutex::new(None);
@@ -785,26 +859,26 @@ mod win {
         Ok(())
     }
 
-    pub fn active(on: bool) {
-        let mut playing = PLAYING.lock().unwrap();
-        if on {
-            if let Some(p) = playing.as_mut() {
-                p.users += 1;
-                return;
+    pub fn start() -> bool {
+        RING.lock().unwrap().samples.clear();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        match std::thread::Builder::new().name("glass-mic".into()).spawn(move || play(&flag)) {
+            Ok(_) => {
+                *PLAYING.lock().unwrap() = Some(Playing { stop });
+                true
             }
-            RING.lock().unwrap().samples.clear();
-            let stop = Arc::new(AtomicBool::new(false));
-            let flag = stop.clone();
-            match std::thread::Builder::new().name("glass-mic".into()).spawn(move || play(&flag)) {
-                Ok(_) => *playing = Some(Playing { stop, users: 1 }),
-                Err(e) => tracing::warn!("microphone: {e}"),
+            Err(e) => {
+                tracing::warn!("microphone: {e}");
+                false
             }
-        } else if let Some(p) = playing.as_mut() {
-            p.users = p.users.saturating_sub(1);
-            if p.users == 0 {
-                playing.take().unwrap().stop.store(true, Ordering::Relaxed);
-                tracing::info!("microphone: off");
-            }
+        }
+    }
+
+    pub fn stop() {
+        if let Some(p) = PLAYING.lock().unwrap().take() {
+            p.stop.store(true, Ordering::Relaxed);
+            tracing::info!("microphone: off");
         }
     }
 
@@ -890,8 +964,6 @@ mod linux {
     struct Source {
         module: String,
         fifo: Option<std::fs::File>,
-        /// Sessions with their mic on.
-        users: usize,
     }
 
     static SOURCE: Mutex<Option<Source>> = Mutex::new(None);
@@ -941,34 +1013,27 @@ mod linux {
         dir.join("glass-mic.fifo")
     }
 
-    pub fn active(on: bool) {
-        let mut source = SOURCE.lock().unwrap();
-        if on {
-            if let Some(s) = source.as_mut() {
-                s.users += 1;
-                return;
+    pub fn start() -> bool {
+        match load() {
+            Ok(module) => {
+                tracing::info!("microphone: \"Glass microphone\" is available on this computer");
+                *SOURCE.lock().unwrap() = Some(Source { module, fifo: None });
+                true
             }
-            match load() {
-                Ok(module) => {
-                    tracing::info!("microphone: \"Glass microphone\" is available on this computer");
-                    *source = Some(Source {
-                        module,
-                        fifo: None,
-                        users: 1,
-                    });
-                }
-                Err(e) => tracing::warn!("microphone: {e:#}"),
+            Err(e) => {
+                tracing::warn!("microphone: {e:#}");
+                false
             }
-        } else if let Some(s) = source.as_mut() {
-            s.users = s.users.saturating_sub(1);
-            if s.users == 0 {
-                let s = source.take().unwrap();
-                drop(s.fifo);
-                let _ = Command::new("pactl")
-                    .args(["unload-module", &s.module])
-                    .status();
-                tracing::info!("microphone: removed");
-            }
+        }
+    }
+
+    pub fn stop() {
+        if let Some(s) = SOURCE.lock().unwrap().take() {
+            drop(s.fifo);
+            let _ = Command::new("pactl")
+                .args(["unload-module", &s.module])
+                .status();
+            tracing::info!("microphone: removed");
         }
     }
 
@@ -1035,6 +1100,81 @@ mod tests {
         let mut p = glass_proto::audio_packet(1, 2, channels, samples);
         p[0] = KIND_MIC;
         p
+    }
+
+    /// A fake device: how often it started and stopped, and whether it will start.
+    struct Device {
+        starts: std::cell::Cell<u32>,
+        stops: std::cell::Cell<u32>,
+        works: std::cell::Cell<bool>,
+    }
+
+    impl Device {
+        fn new() -> Self {
+            Self { starts: Default::default(), stops: Default::default(), works: true.into() }
+        }
+
+        fn say(&self, has: bool, on: bool, users: &mut Users) -> bool {
+            choose(
+                has,
+                on,
+                users,
+                || {
+                    self.starts.set(self.starts.get() + 1);
+                    self.works.get()
+                },
+                || self.stops.set(self.stops.get() + 1),
+            )
+        }
+    }
+
+    #[test]
+    fn saying_on_twice_counts_once() {
+        let (d, mut users) = (Device::new(), Users::default());
+        let a = d.say(false, true, &mut users);
+        let a = d.say(a, true, &mut users);
+        assert!(a);
+        assert_eq!(users.0, 1);
+        assert!(!d.say(a, false, &mut users));
+        assert_eq!((d.starts.get(), d.stops.get()), (1, 1), "nothing left behind");
+    }
+
+    #[test]
+    fn off_from_a_session_without_a_mic_leaves_others_alone() {
+        let (d, mut users) = (Device::new(), Users::default());
+        let a = d.say(false, true, &mut users);
+        let b = d.say(false, false, &mut users);
+        assert!(a && !b);
+        assert_eq!((users.0, d.stops.get()), (1, 0), "the other session still has it");
+    }
+
+    #[test]
+    fn the_device_lasts_until_the_last_one_leaves() {
+        let (d, mut users) = (Device::new(), Users::default());
+        let a = d.say(false, true, &mut users);
+        let b = d.say(false, true, &mut users);
+        assert_eq!(d.starts.get(), 1);
+        d.say(a, false, &mut users);
+        assert_eq!(d.stops.get(), 0);
+        d.say(b, false, &mut users);
+        assert_eq!(d.stops.get(), 1);
+    }
+
+    #[test]
+    fn a_device_that_wouldnt_start_doesnt_count_as_a_user() {
+        let (d, mut users) = (Device::new(), Users::default());
+        d.works.set(false);
+        let a = d.say(false, true, &mut users);
+        assert!(!a);
+        assert_eq!(users.0, 0);
+        // Another session gets it going; the first one leaving takes nothing from it.
+        d.works.set(true);
+        let b = d.say(false, true, &mut users);
+        assert!(b && !d.say(a, false, &mut users));
+        assert_eq!((users.0, d.stops.get()), (1, 0));
+        // And trying again works.
+        assert!(d.say(a, true, &mut users));
+        assert_eq!((users.0, d.starts.get()), (2, 2));
     }
 
     #[test]
