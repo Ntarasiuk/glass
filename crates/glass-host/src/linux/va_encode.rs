@@ -137,6 +137,16 @@ pub fn available(backend: Backend) -> Option<&'static str> {
     }
 }
 
+/// The encoder's `bitrate` for `bps`: VA-API takes kbit/s; GStreamer's NVENC multiplies
+/// its value by 1024.
+fn rate_units(backend: Backend, bps: u32) -> u32 {
+    match backend {
+        Backend::Va => bps / 1000,
+        Backend::Nvenc => bps / 1024,
+    }
+    .max(100)
+}
+
 /// What's missing for `backend`, with how to install it; None when it's ready.
 pub fn missing(backend: Backend) -> Option<String> {
     let lib = match gst_lib::lib() {
@@ -211,7 +221,7 @@ impl VaEncoder {
         anyhow::ensure!(fits(backend, width, height, scale), "{width}x{height} can't be encoded");
         let div = divisor(backend, (width, height), scale);
         let (ow, oh) = output_size(backend, (width, height), scale);
-        let kbps = (bitrate / 1000).max(100);
+        let kbps = rate_units(backend, bitrate);
         let (layout, description) = match backend {
             Backend::Va => {
                 let layout = Layout::nv12(ow, oh);
@@ -274,7 +284,7 @@ impl VaEncoder {
             sps: None,
             name,
         };
-        this.set_cpb(bitrate);
+        this.set_cpb(bitrate, true);
         Ok(this)
     }
 
@@ -286,11 +296,23 @@ impl VaEncoder {
     }
 
     /// The rate controller's buffer: about two frames at the target (rate::short_window),
-    /// so one frame can't take a second's worth of bits on a slow link. Older va plugins
-    /// have no such property; they keep their default.
-    fn set_cpb(&self, bps: u32) {
-        let kbits = (crate::rate::short_window(bps, self.fps).0 * 8.0 / 1000.0) as u32;
-        let _ = self.pipeline.set_uint("enc", "cpb-size", kbits.max(1));
+    /// so one frame can't take a second's worth of bits on a slow link. VA-API calls it
+    /// `cpb-size` (kbit), NVENC `vbv-buffer-size` (units of 1024 bits); older va plugins and
+    /// GPUs without a custom VBV have no such property and keep their default.
+    fn set_cpb(&self, bps: u32, starting: bool) {
+        let bits = crate::rate::short_window(bps, self.fps).0 * 8.0;
+        match self.backend {
+            Backend::Va => {
+                let _ = self.pipeline.set_uint("enc", "cpb-size", ((bits / 1000.0) as u32).max(1));
+            }
+            // GStreamer's NVENC (1.28 and older) restarts its session for a new VBV size,
+            // with an IDR and a stall, where a new bitrate alone is applied in place. So
+            // the size set at the start stays.
+            Backend::Nvenc if starting || gst_lib::lib().is_ok_and(|l| l.version_at_least(1, 29)) => {
+                let _ = self.pipeline.set_uint("enc", "vbv-buffer-size", ((bits / 1024.0) as u32).max(1));
+            }
+            Backend::Nvenc => {}
+        }
     }
 
     /// Sets the target bitrate; `should_apply` decides when the encoder follows it.
@@ -301,8 +323,8 @@ impl VaEncoder {
     fn apply_bitrate(&mut self) {
         let (applied, wanted, at) = self.bitrate;
         if should_apply(applied, wanted, at.elapsed()) {
-            let _ = self.pipeline.set_uint("enc", "bitrate", (wanted / 1000).max(100));
-            self.set_cpb(wanted);
+            let _ = self.pipeline.set_uint("enc", "bitrate", rate_units(self.backend, wanted));
+            self.set_cpb(wanted, false);
             self.bitrate = (wanted, wanted, Instant::now());
         }
     }
@@ -319,11 +341,19 @@ impl VaEncoder {
             // I-frame that isn't an IDR and has no SPS, which a decoder joining the stream
             // can't start from. Reconfiguring starts a new sequence with an IDR, so nudge
             // the bitrate by 1 kbps instead.
-            let kbps = (self.bitrate.0 / 1000).max(100);
+            let kbps = rate_units(Backend::Va, self.bitrate.0);
             let now = self.pipeline.get_uint("enc", "bitrate");
             let _ = self.pipeline.set_uint("enc", "bitrate", if now == kbps { kbps + 1 } else { kbps });
         } else if force_keyframe {
             self.pipeline.force_keyframe();
+        }
+        if self.backend == Backend::Nvenc {
+            // The last row may come without its padding.
+            let row = frame.width * 4;
+            anyhow::ensure!(
+                frame.stride >= row && frame.data.len() >= frame.stride * (frame.height - 1) + row,
+                "frame data shorter than its size"
+            );
         }
         // Strictly increasing timestamps, also when the same picture is sent again.
         let pts = self.next_pts;
@@ -336,7 +366,7 @@ impl VaEncoder {
                 Backend::Nvenc => {
                     // The RGB as captured, row by row (capture rows are often padded).
                     let (stride, row) = (layout.strides[0], frame.width * 4);
-                    if stride == frame.stride {
+                    if stride == frame.stride && frame.data.len() >= stride * frame.height {
                         let n = stride * frame.height;
                         map[..n].copy_from_slice(&frame.data[..n]);
                     } else {

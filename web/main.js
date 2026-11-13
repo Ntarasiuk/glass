@@ -48,9 +48,10 @@ const DECODER_CHOICES = ['hw-lowlatency', 'hw', 'sw', 'auto'];
 {
   const asked = new URLSearchParams(location.search).get('decoder');
   if (asked !== null) {
-    storage((s) => (DECODER_CHOICES.includes(asked) ? s.setItem(DECODER_KEY, asked) : s.removeItem(DECODER_KEY)));
-    // Forget a fallback found with another decoder.
-    storage((s) => s.removeItem(DECODER_STEP_KEY));
+    const choice = DECODER_CHOICES.includes(asked) ? asked : null;
+    // Forget a fallback found with another decoder (not one found with this same choice).
+    if (choice !== (storage((s) => s.getItem(DECODER_KEY)) ?? null)) storage((s) => s.removeItem(DECODER_STEP_KEY));
+    storage((s) => (choice ? s.setItem(DECODER_KEY, choice) : s.removeItem(DECODER_KEY)));
   }
 }
 const PC_KEYBOARD_KEY = 'glass.pcKeyboard';

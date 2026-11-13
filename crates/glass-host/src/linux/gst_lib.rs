@@ -35,7 +35,7 @@ pub fn install_hint(need: Need) -> String {
         (
             "sudo pacman -S",
             "gstreamer gst-plugins-base gst-plugins-bad",
-            "gst-plugins-bad intel-media-driver (Intel) or libva-mesa-driver (AMD)",
+            "gst-plugin-va gst-plugins-bad intel-media-driver (Intel) or libva-mesa-driver (AMD)",
             "gst-plugins-bad nvidia-utils",
         )
     } else if is("fedora") || is("rhel") {
@@ -192,6 +192,22 @@ fn cstr(s: &str) -> CString {
 }
 
 impl Lib {
+    /// Whether GStreamer is at least `major.minor` (from its version string, e.g.
+    /// "GStreamer 1.24.2"); false if that can't be read.
+    pub fn version_at_least(&self, major: u32, minor: u32) -> bool {
+        let mut numbers = self
+            .version
+            .rsplit(' ')
+            .next()
+            .unwrap_or_default()
+            .split('.')
+            .map(|n| n.parse::<u32>().ok());
+        match (numbers.next().flatten(), numbers.next().flatten()) {
+            (Some(a), Some(b)) => (a, b) >= (major, minor),
+            _ => false,
+        }
+    }
+
     pub fn has_element(&self, name: &str) -> bool {
         (self.has_element)(cstr(name).as_ptr())
     }
@@ -200,7 +216,8 @@ impl Lib {
         let mut err = [0 as c_char; 1024];
         let raw = (self.pipeline_new)(cstr(description).as_ptr(), err.as_mut_ptr(), err.len());
         if raw.is_null() {
-            return Err(anyhow!("{}", text(&err)));
+            let why = text(&err);
+            return Err(anyhow!("{}", if why.is_empty() { "GStreamer failed (no reason given)" } else { &why }));
         }
         Ok(Pipeline { lib: self, raw })
     }

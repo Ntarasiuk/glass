@@ -80,12 +80,17 @@ package_linux() {
     cargo build --release -p glass-host
     # GPU encoding (GLASS_ENCODER): libglass_gst.so, opened at run time, so the host
     # still starts where GStreamer isn't installed. Building it needs GStreamer's dev files.
+    # Without them it stops, so a release can't quietly lose GPU encoding; GLASS_NO_GPU=1
+    # packages without it on purpose.
     if pkg-config --exists gstreamer-app-1.0 gstreamer-video-1.0; then
       cargo build --release -p glass-gst
       tarball "linux-$(uname -m)" target/release/glass-host target/release/libglass_gst.so
-    else
-      echo "no GStreamer dev files: packaging without GPU encoding (libglass_gst.so)"
+    elif [ "${GLASS_NO_GPU:-}" = 1 ]; then
+      echo "GLASS_NO_GPU=1: packaging without GPU encoding (libglass_gst.so)"
       tarball "linux-$(uname -m)" target/release/glass-host
+    else
+      echo "no GStreamer dev files (libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev) to build libglass_gst.so; install them, or set GLASS_NO_GPU=1 to package without GPU encoding" >&2
+      exit 1
     fi
   elif docker info >/dev/null 2>&1; then
     scripts/linux/build.sh

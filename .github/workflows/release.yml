@@ -77,7 +77,8 @@ jobs:
           - { runner: ubuntu-24.04-arm, arch: aarch64 }
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev pkg-config nasm
+      # GStreamer dev files: libglass_gst.so (GPU encoding) is built and packaged with the host.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev pkg-config nasm libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with: { shared-key: 'release-linux-${{ matrix.arch }}', save-if: "${{ github.ref == 'refs/heads/main' }}" }

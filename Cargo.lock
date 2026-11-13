@@ -2536,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "glass-gst"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "gstreamer",
  "gstreamer-app",
