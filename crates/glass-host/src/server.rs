@@ -125,6 +125,7 @@ pub async fn run(
     }
 
     crate::origin::start(wt_host.as_deref()).await;
+    crate::wol::prefetch_own_macs();
     let version_dir = web_dir.clone();
     let client_config = move || {
         let (wt_host, cert_hash) = (wt_host.clone(), cert_hash.lock().unwrap().clone());

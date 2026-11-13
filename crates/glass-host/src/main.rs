@@ -26,6 +26,7 @@ mod keys;
 mod ldap;
 mod lid;
 mod listen;
+mod firewall_bind;
 mod lossless;
 #[cfg(not(target_os = "macos"))]
 mod mailbox;
@@ -69,6 +70,8 @@ mod testmode;
 mod thumbs;
 mod update;
 mod viewers;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod viewer;
 mod zipdir;
 #[cfg(any(windows, test))]
 mod win_capture;
@@ -314,6 +317,68 @@ enum Command {
         #[arg(long, default_value_t = 6)]
         seconds: u64,
     },
+    /// Connect to a computer the way the app's viewer does, without a window, and report
+    /// what arrived (frames decoded, delay). For testing the native viewer.
+    #[command(hide = true)]
+    ViewerProbe {
+        /// A tailnet name, or a URL like http://127.0.0.1:8080.
+        target: String,
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+        /// The host's access token (`glass token` there).
+        #[arg(long)]
+        token: Option<String>,
+        /// Also send a pointer move and ⌘Tab (to a test host: they're real input).
+        #[arg(long)]
+        input: bool,
+        /// Save the last picture of the first display as a PNG.
+        #[arg(long)]
+        save: Option<PathBuf>,
+        /// Also turn sharp text on for a few seconds (shared by everyone viewing).
+        #[arg(long)]
+        sharp: bool,
+        /// Click once at x,y (0..1 of the first display) when connected.
+        #[arg(long, value_parser = parse_point)]
+        click: Option<(f32, f32)>,
+        /// Send this control message (JSON) once connected; repeatable.
+        #[arg(long = "control")]
+        controls: Vec<String>,
+        /// Type this, key by key (`{wait:N}` pauses; \n is Return, \t is Tab).
+        #[arg(long)]
+        keys: Option<String>,
+    },
+    /// Drives every native-viewer feature against a `glass --test` host and checks it.
+    #[cfg(any(target_os = "macos", windows))]
+    #[command(hide = true)]
+    ViewerSelftest {
+        /// The test host, e.g. http://localhost:8080.
+        target: String,
+        #[arg(long)]
+        token: String,
+    },
+    /// The codecs the native viewer offers on this computer (each checked by decoding).
+    #[command(hide = true)]
+    ViewerCodecs,
+    /// Prints what the native viewer reads from game controllers here, for a while.
+    #[cfg(any(target_os = "macos", windows))]
+    #[command(hide = true)]
+    ViewerGamepad {
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+        /// Write to this file instead of the terminal.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Shows the passkey confirmation (Touch ID, Windows Hello) and says what came of it.
+    #[command(hide = true)]
+    ViewerConfirm {
+        /// Write the result to this file too.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Prints this computer's remote-access address (`…/app/#r=key`), for viewer-probe.
+    #[command(hide = true)]
+    RemoteAddress,
     /// Access rules for directory sign-in (SSO, LDAP): who gets in, and what they may do.
     Acl {
         #[command(subcommand)]
@@ -378,6 +443,12 @@ enum Command {
     Service {
         #[arg(value_parser = ["install", "uninstall", "status"], default_value = "status")]
         action: String,
+        /// MSI full uninstall only: also remove the installed program's firewall rule.
+        #[arg(long, hide = true)]
+        remove_host_rule: bool,
+        /// Classified before elevation. The elevated install does not read settings.
+        #[arg(long, hide = true, value_parser = ["tailscale", "loopback", "any"])]
+        firewall_scope: Option<String>,
     },
     /// Wake a machine with Wake-on-LAN, by a MAC address or a tailnet name seen before.
     Wake { target: String },
@@ -584,6 +655,12 @@ fn config_cli(key: Option<&str>, value: Option<&str>) -> Result<()> {
             s.set(k, v)?;
             settings::save(&s)?;
             println!("{k} = {}", s.get(k)?);
+            #[cfg(windows)]
+            if k == "bind"
+                && let Some(note) = platform::firewall::bind_change_note()
+            {
+                println!("{note}");
+            }
             // A generated token is shown once, to paste into the identity provider.
             if k == "scim-token" && v == "new"
                 && let Some(t) = settings::scim_token()
@@ -812,6 +889,7 @@ fn main() -> Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         match argv.get(1).map(String::as_str) {
             Some(platform::service::SERVICE_ARG) => return platform::service::run_service(),
+            Some(platform::firewall::APPLY_ARG) => std::process::exit(if platform::firewall::apply_from_arg(&argv[2..]) { 0 } else { 1 }),
             Some(platform::secure::HELPER_ARG) => return platform::secure::run_helper(),
             Some(platform::micdriver::ARG) => return platform::micdriver::cli(&argv[2..]),
             _ => {}
@@ -1090,7 +1168,9 @@ async fn async_main(args: Args) -> Result<()> {
             Ok(())
         }
         #[cfg(windows)]
-        Some(Command::Service { action }) => platform::service::cli(action),
+        Some(Command::Service { action, remove_host_rule, firewall_scope }) => {
+            platform::service::cli(action, *remove_host_rule, firewall_scope.as_deref())
+        }
         Some(Command::Remote { action }) => remote_cli(action),
         Some(Command::Account { action, json }) => account_cli(action, *json),
         Some(Command::Fleet { action, arg, json }) => fleet_cli(action, arg.as_deref(), *json),
@@ -1118,6 +1198,59 @@ async fn async_main(args: Args) -> Result<()> {
             Ok(())
         }
         Some(Command::Restart) => restart_service(),
+        #[cfg(any(target_os = "macos", windows))]
+        Some(Command::ViewerSelftest { target, token }) => viewer::selftest::run(target, token.clone()).await,
+        Some(Command::ViewerCodecs) => {
+            println!("{}", viewer::codecs().join(" "));
+            #[cfg(windows)]
+            println!("{}", viewer::winmf_report());
+            Ok(())
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        Some(Command::ViewerGamepad { seconds, out }) => {
+            let lines = std::cell::RefCell::new(Vec::<String>::new());
+            let say = |l: String| {
+                println!("{l}");
+                lines.borrow_mut().push(l);
+            };
+            let mut pads = viewer::gamepad::Pads::default();
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(*seconds);
+            let n = std::cell::Cell::new(0u32);
+            let mut described = String::new();
+            while std::time::Instant::now() < end {
+                let d = viewer::gamepad::describe();
+                if d != described {
+                    say(format!("controllers: [{d}]"));
+                    described = d;
+                }
+                pads.poll(&|e| {
+                    n.set(n.get() + 1);
+                    say(format!("{e:?}"));
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+            }
+            say(format!("{} events", n.get()));
+            if let Some(out) = out {
+                std::fs::write(out, lines.borrow().join("\n"))?;
+            }
+            Ok(())
+        }
+        Some(Command::ViewerConfirm { out }) => {
+            let t = std::time::Instant::now();
+            let r = viewer::passkey::confirm("use a passkey (a test of the Glass viewer)".into()).await;
+            let line = format!("{} after {:.1}s", match r { Ok(true) => "verified".to_string(), Ok(false) => "no verification on this computer".to_string(), Err(e) => format!("declined: {e:#}") }, t.elapsed().as_secs_f64());
+            println!("{line}");
+            if let Some(out) = out {
+                std::fs::write(out, line)?;
+            }
+            Ok(())
+        }
+        Some(Command::RemoteAddress) => {
+            let key = remote::HostKey::load_or_create()?;
+            println!("{}/app/#r={}", remote::base().trim_end_matches('/'), key.public());
+            Ok(())
+        }
+        Some(Command::ViewerProbe { target, seconds, token, input, save, sharp, click, keys, controls }) => viewer::probe(target, token.clone(), *seconds, *input, save.clone(), *sharp, *click, keys.clone().map(|k| k.replace("\\n", "\n").replace("\\t", "\t")), controls.clone()).await,
         #[cfg(any(target_os = "macos", windows))]
         Some(Command::App { .. }) => unreachable!("handled before the runtime starts"),
         Some(Command::Support { .. }) => unreachable!("handled before the runtime starts"),
@@ -1278,6 +1411,17 @@ async fn run_host(args: Args) -> Result<()> {
             .await
             .map(|(cert, key)| server::TlsFiles { cert, key }),
     };
+    // Started before Tailscale (at boot, say): pick up HTTPS once it's there, when nobody is
+    // connected. Only under something that starts Glass again, or it would just quit.
+    let restarted = signin::active() || std::env::var_os("GLASS_SUPERVISED").is_some();
+    if tls.is_none() && restarted && !args.test && !support::is_host() {
+        tokio::spawn(async {
+            if tailscale::wait_for_cert(&config_dir().join("certs")).await {
+                viewers::until_none().await;
+                power::restart_for_certificate();
+            }
+        });
+    }
     let host = tls
         .as_ref()
         .and_then(|t| t.cert.file_stem())
@@ -1483,6 +1627,11 @@ pub fn config_dir() -> PathBuf {
                 .map(|d| PathBuf::from(d).join("Glass"))
         })
         .unwrap_or_else(|| home().join(".config/glass"))
+}
+
+fn parse_point(s: &str) -> Result<(f32, f32), String> {
+    let (x, y) = s.split_once(',').ok_or("x,y")?;
+    Ok((x.trim().parse().map_err(|_| "x")?, y.trim().parse().map_err(|_| "y")?))
 }
 
 pub fn default_token_file() -> PathBuf {

@@ -166,13 +166,15 @@ fn focus_window() -> Option<HWND> {
     }
 }
 
-/// Whether the foreground window belongs to an elevated (higher-integrity) process, which
-/// this unelevated host's SendInput can't reach (UIPI). Such input must go through the
-/// SYSTEM secure-desktop helper instead (see `windows::secure`).
+/// Whether the foreground window is out of this host's reach for SendInput (UIPI): an
+/// elevated process, one at a higher integrity level (Windows' own credential prompts,
+/// such as "verify your account password" or a Windows Hello PIN, run that way without
+/// being "elevated"), or a protected process it isn't even allowed to look at. Such input
+/// must go through the SYSTEM secure-desktop helper instead (see `windows::secure`).
 pub fn foreground_is_elevated() -> bool {
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
-    use windows::Win32::System::Threading::OpenProcessToken;
+    use windows::Win32::Security::TOKEN_QUERY;
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     // SAFETY: plain queries; the process and token handles are closed before returning.
     unsafe {
         let fg = GetForegroundWindow();
@@ -180,25 +182,54 @@ pub fn foreground_is_elevated() -> bool {
             return false;
         }
         let pid = window_pid(fg);
-        let Ok(proc) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        if pid == 0 {
+            return false;
+        }
+        let Ok(proc) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            // Not even this much access: a protected process, so certainly beyond SendInput.
+            return true;
+        };
         let mut token = HANDLE::default();
         let opened = OpenProcessToken(proc, TOKEN_QUERY, &mut token).is_ok();
         let _ = CloseHandle(proc);
         if !opened {
-            return false;
+            return true;
         }
+        let theirs = token_level(token);
+        let _ = CloseHandle(token);
+        let mut own = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut own).is_err() {
+            return theirs.0;
+        }
+        let ours = token_level(own);
+        let _ = CloseHandle(own);
+        theirs.0 || theirs.1 > ours.1
+    }
+}
+
+/// (elevated, integrity level RID) of a token.
+unsafe fn token_level(token: windows::Win32::Foundation::HANDLE) -> (bool, u32) {
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TokenElevation, TokenIntegrityLevel,
+    };
+    // SAFETY: the buffers are sized as GetTokenInformation asks; the SID is read within them.
+    unsafe {
         let mut elevation = TOKEN_ELEVATION::default();
         let mut len = 0u32;
-        let ok = GetTokenInformation(
-            token,
-            TokenElevation,
-            Some((&raw mut elevation).cast()),
-            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-            &mut len,
-        )
-        .is_ok();
-        let _ = CloseHandle(token);
-        ok && elevation.TokenIsElevated != 0
+        let elevated = GetTokenInformation(token, TokenElevation, Some((&raw mut elevation).cast()), std::mem::size_of::<TOKEN_ELEVATION>() as u32, &mut len).is_ok()
+            && elevation.TokenIsElevated != 0;
+        let mut need = 0u32;
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut need);
+        let mut buf = vec![0u8; need.max(64) as usize];
+        let level = if GetTokenInformation(token, TokenIntegrityLevel, Some(buf.as_mut_ptr().cast()), buf.len() as u32, &mut need).is_ok() {
+            let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+            let sid = label.Label.Sid;
+            let count = *GetSidSubAuthorityCount(sid) as u32;
+            if count > 0 { *GetSidSubAuthority(sid, count - 1) } else { 0 }
+        } else {
+            0
+        };
+        (elevated, level)
     }
 }
 
