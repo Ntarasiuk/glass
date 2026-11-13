@@ -26,6 +26,10 @@ mod h264_vui;
 mod gamepad;
 mod ipc;
 mod keys;
+mod input_queue;
+mod input_dispatch;
+mod input_protocol;
+mod text_input;
 mod ldap;
 mod lid;
 mod listen;
@@ -1466,7 +1470,7 @@ async fn run_host(args: Args) -> Result<()> {
 
     let (video, injector, clipboard, tailnet_owner, _awake): (
         Arc<dyn media::VideoSource>,
-        Box<dyn media::InputSink>,
+        input_dispatch::Dispatch,
         Arc<dyn media::Clipboard>,
         _,
         _,
@@ -1480,7 +1484,7 @@ async fn run_host(args: Args) -> Result<()> {
         testmode::start_tone(audio.clone());
         (
             video,
-            Box::new(testmode::FakeInput),
+            input_dispatch::Dispatch::new(Box::new(testmode::FakeInput)),
             Arc::new(testmode::FakeClipboard),
             // Who owns the computer on Tailscale, when a test says. Never polls Tailscale.
             tailscale::TailnetOwner::fixed(std::env::var("GLASS_TEST_TAILNET_OWNER").ok()),
@@ -1513,6 +1517,10 @@ async fn run_host(args: Args) -> Result<()> {
             );
         }
         permissions::request_missing();
+        // Windows may need native wake input before capture discovers its display.
+        // Start the same executor now; no bootstrap input bypasses its serialization.
+        #[cfg(windows)]
+        let injector = input_dispatch::Dispatch::new(Box::new(input::Injector::new(0)));
         let display = loop {
             match video.set_layout(media::Layout::Single(None)) {
                 Ok(streams) => break streams[0].clone(),
@@ -1528,6 +1536,11 @@ async fn run_host(args: Args) -> Result<()> {
                 }
                 Err(e) => {
                     tracing::warn!("{e:#}; waking displays and retrying");
+                    #[cfg(windows)]
+                    if let Ok(owner) = injector.local() {
+                        if let Ok(receipt) = owner.events(vec![glass_proto::InputEvent::MouseMoveBy { dx: 1.0, dy: 0.0 }, glass_proto::InputEvent::MouseMoveBy { dx: -1.0, dy: 0.0 }]) { let _ = receipt.wait().await; }
+                    }
+                    #[cfg(not(windows))]
                     platform::wake_displays();
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
@@ -1545,9 +1558,13 @@ async fn run_host(args: Args) -> Result<()> {
             }
             Err(e) => info!("tailscale unavailable ({e:#}); will check again on connection"),
         }
+        #[cfg(not(windows))]
+        let injector = input_dispatch::Dispatch::new(Box::new(input::Injector::new(display.id)));
+        #[cfg(windows)]
+        injector.configure(&[display.id], None);
         (
             video,
-            Box::new(input::Injector::new(display.id)),
+            injector,
             Arc::new(clipboard::SystemClipboard),
             tailnet_owner,
             awake,
@@ -1565,10 +1582,10 @@ async fn run_host(args: Args) -> Result<()> {
 
     let test_routes = args
         .test
-        .then(|| testmode::routes(events.clone(), files::downloads_dir()));
+        .then(|| testmode::routes(events.clone(), files::downloads_dir(), injector.clone()));
     let shared = Arc::new(server::Shared {
         frames,
-        injector: Mutex::new(injector),
+        injector,
         video,
         clipboard,
         events,
