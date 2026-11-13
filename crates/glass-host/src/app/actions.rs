@@ -247,6 +247,33 @@ pub fn open(target: &str) {
     let _ = std::process::Command::new("open").arg(target).spawn();
 }
 
+/// Opens a machine's Glass in the browser, at whichever address it's serving on. Asks off
+/// the main thread: a machine that doesn't answer takes a moment to say so.
+pub fn open_machine(dns: &str) {
+    let dns = dns.to_string();
+    std::thread::spawn(move || open(&machine_url(&dns, is_glass)));
+}
+
+/// A machine's web address: the standard HTTPS port, or 8080, where Glass serves when
+/// something else (like `tailscale serve`) has that one. The first that `is_glass`; the
+/// port-less one when neither answers, as before.
+fn machine_url(dns: &str, is_glass: impl Fn(&str) -> bool) -> String {
+    let portless = format!("https://{dns}/");
+    [portless.clone(), format!("https://{dns}:8080/")].into_iter().find(|url| is_glass(url)).unwrap_or(portless)
+}
+
+/// Whether Glass answers at this address. Another app on that port answers too, with
+/// something that isn't Glass's config.
+fn is_glass(url: &str) -> bool {
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(2))).build().into();
+    agent
+        .get(format!("{url}config.json"))
+        .call()
+        .ok()
+        .and_then(|mut r| r.body_mut().read_json::<Value>().ok())
+        .is_some_and(|v| v.get("wtPort").is_some())
+}
+
 /// Opens the Tailscale app (to sign in).
 pub fn open_tailscale() {
     #[cfg(windows)]
@@ -393,4 +420,18 @@ fn claude_cli() -> Option<PathBuf> {
 pub fn mcp_json() -> String {
     serde_json::to_string_pretty(&json!({ "mcpServers": { "glass": { "command": glass_path(), "args": ["mcp"] } } }))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::machine_url;
+
+    #[test]
+    fn a_machine_opens_where_glass_answers() {
+        let url = |glass_at: &[&str]| machine_url("mac.tail1.ts.net", |u| glass_at.contains(&u));
+        assert_eq!(url(&["https://mac.tail1.ts.net/", "https://mac.tail1.ts.net:8080/"]), "https://mac.tail1.ts.net/");
+        // Something else has 443 (tailscale serve): Glass is on its web port.
+        assert_eq!(url(&["https://mac.tail1.ts.net:8080/"]), "https://mac.tail1.ts.net:8080/");
+        assert_eq!(url(&[]), "https://mac.tail1.ts.net/");
+    }
 }
