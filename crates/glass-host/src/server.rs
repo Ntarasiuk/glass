@@ -54,6 +54,12 @@ pub struct TlsFiles {
     pub key: PathBuf,
 }
 
+/// How often the self-signed WebTransport certificate is checked for replacement. Short,
+/// as timers stop while the computer sleeps: the check itself goes by the wall clock.
+const SELF_SIGNED_CHECK: Duration = Duration::from_secs(300);
+/// The self-signed certificate is valid for 14 days and replaced once it's this old.
+const SELF_SIGNED_MAX_AGE: Duration = Duration::from_secs(10 * 86400);
+
 pub async fn run(
     shared: Arc<Shared>,
     web_dir: PathBuf,
@@ -83,20 +89,36 @@ pub async fn run(
             }
         });
     }
-    let identity = match &tls {
-        Some(t) => Identity::load_pemfiles(&t.cert, &t.key).await?,
-        None => self_signed_identity(wt_host.as_deref()).await?,
+    let (identity, issued) = match &tls {
+        Some(t) => {
+            let identity = Identity::load_pemfiles(&t.cert, &t.key).await?;
+            check_identity(&identity).with_context(|| format!("{} and {}", t.cert.display(), t.key.display()))?;
+            (identity, None)
+        }
+        None => {
+            let (identity, issued) = self_signed_identity(wt_host.as_deref()).await?;
+            (identity, Some(issued))
+        }
     };
-    // Only meaningful for the self-signed identity; a real cert validates normally.
-    let cert_hash = tls.is_none().then(|| {
-        identity.certificate_chain().as_slice()[0]
-            .hash()
-            .fmt(Sha256DigestFmt::BytesArray)
-    });
 
     // The usual port, or the next free one: clients learn it from /config.json.
     // Every listen address shares that port. The default is one dual-stack socket.
     let (endpoints, wt_port) = bind_wt(&identity, &listen, wt_port)?;
+    let endpoints = Arc::new(endpoints);
+    // Only for the self-signed identity (its hash goes to viewers); a real cert validates normally.
+    let self_signed = issued.map(|issued| {
+        Arc::new(SelfSigned {
+            endpoints: endpoints.clone(),
+            listen: listen.clone(),
+            port: wt_port,
+            wt_host: wt_host.clone(),
+            current: Mutex::new((identity_hash(&identity), issued)),
+            renewing: tokio::sync::Mutex::new(()),
+        })
+    });
+    if let Some(s) = &self_signed {
+        tokio::spawn(s.clone().keep_renewed());
+    }
     let wt_where = match &listen {
         crate::listen::Listen::Default => "0.0.0.0 and [::]".to_string(),
         other => crate::listen::describe(other),
@@ -114,12 +136,20 @@ pub async fn run(
     }
 
     crate::origin::start(wt_host.as_deref()).await;
-    let cert_hash = cert_hash.map(|h| serde_json::from_str::<Vec<u8>>(&h).unwrap());
+    crate::wol::prefetch_own_macs();
     let version_dir = web_dir.clone();
     let client_config = move || {
-        let (wt_host, cert_hash) = (wt_host.clone(), cert_hash.clone());
+        let (wt_host, self_signed) = (wt_host.clone(), self_signed.clone());
         let version = web_version(&version_dir);
         async move {
+            // A host that slept past the renewal date replaces it before a viewer pins it.
+            let cert_hash = match self_signed {
+                Some(s) => {
+                    s.renew_if_due().await;
+                    Some(s.hash())
+                }
+                None => None,
+            };
             Json(serde_json::json!({
                 "wtPort": wt_port,
                 "wtHost": wt_host,
@@ -300,10 +330,7 @@ fn bind_wt_endpoints(
     listen: &crate::listen::Listen,
     port: u16,
 ) -> Result<Vec<Endpoint<Server>>, WtBindError> {
-    let specs: Vec<WtBind> = match listen {
-        crate::listen::Listen::Default => vec![WtBind::Default],
-        crate::listen::Listen::Explicit(ips) => ips.iter().copied().map(WtBind::Address).collect(),
-    };
+    let specs = wt_specs(listen);
     let mut endpoints = Vec::with_capacity(specs.len());
     for spec in specs {
         let config = wt_server_config(identity, port, &spec)?;
@@ -318,6 +345,14 @@ fn bind_wt_endpoints(
         }
     }
     Ok(endpoints)
+}
+
+/// One WebTransport socket per listen address (or one dual-stack default).
+fn wt_specs(listen: &crate::listen::Listen) -> Vec<WtBind> {
+    match listen {
+        crate::listen::Listen::Default => vec![WtBind::Default],
+        crate::listen::Listen::Explicit(ips) => ips.iter().copied().map(WtBind::Address).collect(),
+    }
 }
 
 fn wt_server_config(
@@ -2544,33 +2579,181 @@ async fn probe_glass(dns: &str, port: u16) -> Option<(u16, Vec<String>)> {
     None
 }
 
+fn identity_hash(identity: &Identity) -> Vec<u8> {
+    let text = identity.certificate_chain().as_slice()[0]
+        .hash()
+        .fmt(Sha256DigestFmt::BytesArray);
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+/// The self-signed WebTransport certificate in use, replaced before it expires without a
+/// restart: the endpoints take the new one for new connections (live ones carry on) and
+/// /config.json sends its hash, which viewers fetch again when connecting fails.
+struct SelfSigned {
+    endpoints: Arc<Vec<Endpoint<Server>>>,
+    listen: crate::listen::Listen,
+    port: u16,
+    wt_host: Option<String>,
+    /// Its SHA-256, as /config.json sends it (`certHash`), and when it was made.
+    current: Mutex<(Vec<u8>, std::time::SystemTime)>,
+    /// One renewal at a time (the regular check and /config.json).
+    renewing: tokio::sync::Mutex<()>,
+}
+
+impl SelfSigned {
+    fn hash(&self) -> Vec<u8> {
+        self.current.lock().unwrap().0.clone()
+    }
+
+    /// Checks every few minutes for as long as the host runs. Nothing in it returns an
+    /// error, and should it panic it starts again rather than stop renewing.
+    async fn keep_renewed(self: Arc<Self>) {
+        loop {
+            let this = self.clone();
+            let run = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(SELF_SIGNED_CHECK).await;
+                    this.renew_if_due().await;
+                }
+            });
+            let Err(e) = run.await;
+            warn!("WebTransport certificate: renewal stopped ({e}); starting it again");
+        }
+    }
+
+    /// Replaces the certificate if it's due. A failure is logged and tried again later.
+    async fn renew_if_due(&self) {
+        let issued = self.current.lock().unwrap().1;
+        if !self_signed_due(issued, std::time::SystemTime::now()) {
+            return;
+        }
+        let _one = self.renewing.lock().await;
+        // Renewed while this waited.
+        if self.current.lock().unwrap().1 != issued {
+            return;
+        }
+        match self.renew().await {
+            Ok(()) => info!("WebTransport: new self-signed certificate"),
+            Err(e) => warn!("WebTransport certificate: can't renew: {e:#}"),
+        }
+    }
+
+    async fn renew(&self) -> Result<()> {
+        // A host sharing the config directory may have renewed it already: that one's taken.
+        let (identity, issued) = self_signed_identity(self.wt_host.as_deref()).await?;
+        let hash = identity_hash(&identity);
+        if hash != self.hash() {
+            reload_wt(&self.endpoints, &identity, &self.listen, self.port)
+                .context("switching to the new certificate")?;
+        }
+        *self.current.lock().unwrap() = (hash, issued);
+        Ok(())
+    }
+}
+
+/// Whether a self-signed certificate made at `issued` is due for replacement at `now`. By the
+/// wall clock, which (unlike timers) runs on while the computer sleeps. Made in the future
+/// means the clock went back: by more than a minute, and its validity may not have begun.
+fn self_signed_due(issued: std::time::SystemTime, now: std::time::SystemTime) -> bool {
+    match now.duration_since(issued) {
+        Ok(age) => age >= SELF_SIGNED_MAX_AGE,
+        Err(ahead) => ahead.duration() > Duration::from_secs(60),
+    }
+}
+
+/// Fails unless the certificate and key belong together, which wtransport takes for
+/// granted (a mismatch panics in its `ServerConfig`).
+fn check_identity(identity: &Identity) -> Result<()> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    let chain: Vec<CertificateDer<'static>> = identity
+        .certificate_chain()
+        .as_slice()
+        .iter()
+        .map(|c| CertificateDer::from(c.der().to_vec()))
+        .collect();
+    anyhow::ensure!(!chain.is_empty(), "no certificate");
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.private_key().secret_der().to_vec()));
+    rustls::sign::CertifiedKey::from_der(chain, key, &rustls::crypto::ring::default_provider())
+        .context("the certificate and key don't match")?;
+    Ok(())
+}
+
+/// Gives the endpoints (bound by `bind_wt_endpoints`, in the same order) a new identity.
+fn reload_wt(
+    endpoints: &[Endpoint<Server>],
+    identity: &Identity,
+    listen: &crate::listen::Listen,
+    port: u16,
+) -> Result<()> {
+    check_identity(identity)?;
+    for (endpoint, spec) in endpoints.iter().zip(wt_specs(listen)) {
+        let config = wt_server_config(identity, port, &spec).map_err(|e| match e {
+            WtBindError::Config(e) => e,
+            WtBindError::AddrNotAvailable(m) => anyhow::anyhow!(m),
+            WtBindError::Unavailable(e) => e.into(),
+        })?;
+        endpoint.reload_config(config, false)?;
+    }
+    Ok(())
+}
+
 /// Browsers accept a self-signed cert via `serverCertificateHashes` only if it is ECDSA
 /// and valid for at most 14 days. It's saved and reused (and replaced before it expires)
 /// so its hash stays stable across restarts, and hosts sharing a config dir share it.
-async fn self_signed_identity(wt_host: Option<&str>) -> Result<Identity> {
-    const MAX_AGE: Duration = Duration::from_secs(10 * 86400);
+/// Returns it with when it was made.
+async fn self_signed_identity(wt_host: Option<&str>) -> Result<(Identity, std::time::SystemTime)> {
     let dir = crate::config_dir().join("certs");
     let (cert, key) = (dir.join("self-signed.crt"), dir.join("self-signed.key"));
-    let fresh = std::fs::metadata(&cert)
-        .and_then(|m| m.modified())
-        .is_ok_and(|t| t.elapsed().unwrap_or(MAX_AGE) < MAX_AGE);
-    if fresh && let Ok(identity) = Identity::load_pemfiles(&cert, &key).await {
-        return Ok(identity);
+    let now = std::time::SystemTime::now();
+    if let Ok(made) = std::fs::metadata(&cert).and_then(|m| m.modified())
+        && !self_signed_due(made, now)
+        && let Ok(identity) = Identity::load_pemfiles(&cert, &key).await
+        // Not half of another host's renewal (or edited): otherwise it's made anew.
+        && check_identity(&identity).is_ok()
+    {
+        return Ok((identity, made));
     }
     let names = ["localhost", "127.0.0.1", "::1"]
         .map(String::from)
         .into_iter()
         .chain(wt_host.map(String::from));
     let identity = Identity::self_signed(names)?;
-    tokio::fs::create_dir_all(&dir).await?;
-    identity.certificate_chain().store_pemfile(&cert).await?;
-    identity.private_key().store_secret_pemfile(&key).await?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600));
+    // Not saving it costs the next restart a new hash, not this run its certificate.
+    if let Err(e) = save_self_signed(&identity, &cert, &key) {
+        warn!("WebTransport certificate: can't save it in {}: {e:#}", dir.display());
     }
-    Ok(identity)
+    Ok((identity, now))
+}
+
+/// Writes the pair, each file whole (a temporary file renamed over it): the key first, as
+/// the certificate's age is what says the pair is current. The key is never readable by others.
+fn save_self_signed(identity: &Identity, cert: &std::path::Path, key: &std::path::Path) -> Result<()> {
+    if let Some(dir) = cert.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let chain: String = identity.certificate_chain().as_slice().iter().map(|c| c.to_pem()).collect();
+    write_whole(key, identity.private_key().to_secret_pem().as_bytes())?;
+    write_whole(cert, chain.as_bytes())
+}
+
+fn write_whole(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    // Its own name, so hosts sharing the directory don't write into each other's.
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let written = opts
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.with_context(|| format!("writing {}", path.display()))
 }
 
 /// Changes whenever a web client file changes, so open tabs know to reload.
@@ -2787,5 +2970,99 @@ mod tests {
         assert!(port > taken && port < taken.saturating_add(crate::PORT_TRIES), "{port}");
         assert_eq!(endpoints[0].local_addr().unwrap().ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert_eq!(endpoints[0].local_addr().unwrap().port(), port);
+    }
+
+    /// A renewed self-signed certificate is taken without rebinding: a viewer pinning the
+    /// old hash is refused, one with the new hash (from /config.json) gets in.
+    #[tokio::test]
+    async fn webtransport_switches_to_a_renewed_certificate() {
+        let old = identity();
+        let listen = crate::listen::Listen::Explicit(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+        let (endpoints, _) = bind_wt(&old, &listen, 0).unwrap();
+        let port = endpoints[0].local_addr().unwrap().port();
+        let endpoints = Arc::new(endpoints);
+        let server = endpoints.clone();
+        tokio::spawn(async move {
+            loop {
+                let incoming = server[0].accept().await;
+                tokio::spawn(async move {
+                    if let Ok(request) = incoming.await
+                        && let Ok(conn) = request.accept().await
+                    {
+                        conn.closed().await;
+                    }
+                });
+            }
+        });
+        let connects = |hash: Vec<u8>| async move {
+            let digest: [u8; 32] = hash.try_into().unwrap();
+            let config = wtransport::ClientConfig::builder()
+                .with_bind_default()
+                .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(digest)])
+                .build();
+            let client = Endpoint::client(config).unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                client.connect(format!("https://127.0.0.1:{port}/")),
+            )
+            .await
+            .map_err(|_| "timeout".to_string())
+            .and_then(|r| r.map(|_| ()).map_err(|e| e.to_string()))
+            .inspect_err(|e| eprintln!("connect: {e}"))
+            .is_ok()
+        };
+        assert!(connects(identity_hash(&old)).await, "the first certificate");
+        let new = identity();
+        reload_wt(&endpoints, &new, &listen, port).unwrap();
+        assert_eq!(endpoints[0].local_addr().unwrap().port(), port, "same socket");
+        assert!(!connects(identity_hash(&old)).await, "the old hash is refused");
+        assert!(connects(identity_hash(&new)).await, "the new hash gets in");
+    }
+
+    #[test]
+    fn self_signed_renewal_goes_by_the_wall_clock() {
+        let made = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let day = Duration::from_secs(86400);
+        assert!(!self_signed_due(made, made));
+        assert!(!self_signed_due(made, made + 9 * day));
+        assert!(self_signed_due(made, made + 10 * day), "ten days old");
+        // Slept through the renewal and past expiry: due as soon as it's checked.
+        assert!(self_signed_due(made, made + 30 * day));
+        assert!(!self_signed_due(made, made - Duration::from_secs(5)), "a small clock correction");
+        assert!(self_signed_due(made, made - day), "made in the future: the clock went back");
+    }
+
+    /// A certificate with another's key is refused before wtransport (which would panic) sees it.
+    #[tokio::test]
+    async fn a_mismatched_certificate_and_key_are_refused() {
+        let (a, b) = (identity(), identity());
+        assert!(check_identity(&a).is_ok());
+        let mixed = Identity::new(a.certificate_chain().clone(), b.private_key().clone_key());
+        assert!(check_identity(&mixed).is_err());
+        let listen = crate::listen::Listen::Explicit(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+        let (endpoints, port) = bind_wt(&a, &listen, 0).unwrap();
+        assert!(reload_wt(&endpoints, &mixed, &listen, port).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_saved_self_signed_pair_loads_back() {
+        let dir = std::env::temp_dir().join(format!("glass-wt-cert-{}", std::process::id()));
+        let (cert, key) = (dir.join("self-signed.crt"), dir.join("self-signed.key"));
+        let first = identity();
+        save_self_signed(&first, &cert, &key).unwrap();
+        // Saved again over the first, as a renewal does.
+        let second = identity();
+        save_self_signed(&second, &cert, &key).unwrap();
+        let loaded = Identity::load_pemfiles(&cert, &key).await.unwrap();
+        assert!(check_identity(&loaded).is_ok());
+        assert_eq!(identity_hash(&loaded), identity_hash(&second));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 2, "no temporary files left: {left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

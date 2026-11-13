@@ -110,7 +110,41 @@ fn broadcast_addrs() -> Vec<Ipv4Addr> {
 }
 
 /// This computer's wired and Wi-Fi MAC addresses (not virtual or tunnel interfaces).
+/// This computer's MAC addresses, as last read. Reading them runs a program (PowerShell on
+/// Windows takes seconds), and every page load asks: so they're read in the background,
+/// first when asked and then every few minutes, and the answer is whatever was read last.
 pub fn own_macs() -> Vec<String> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
+    static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let cached = CACHE.lock().unwrap().clone();
+    let stale = cached.as_ref().is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(300));
+    if stale && !REFRESHING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        let refresh = || {
+            let macs = read_own_macs();
+            *CACHE.lock().unwrap() = Some((Instant::now(), macs));
+            REFRESHING.store(false, std::sync::atomic::Ordering::Release);
+        };
+        match cached {
+            // Never read: this caller waits for it once.
+            None => refresh(),
+            Some(_) => {
+                std::thread::spawn(refresh);
+            }
+        }
+    }
+    CACHE.lock().unwrap().as_ref().map(|(_, m)| m.clone()).unwrap_or_default()
+}
+
+/// Warms the cache so the first page load doesn't wait for it.
+pub fn prefetch_own_macs() {
+    std::thread::spawn(|| {
+        let _ = own_macs();
+    });
+}
+
+fn read_own_macs() -> Vec<String> {
     if crate::testmode::enabled() {
         return vec!["02:00:00:00:00:01".into()];
     }

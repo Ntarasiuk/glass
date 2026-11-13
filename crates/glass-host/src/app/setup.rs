@@ -178,7 +178,7 @@ impl GlassApp {
                         .child(
                             v_flex()
                                 .w_full()
-                                .max_w(px(560.))
+                                .max_w(super::text_size::pt(560.))
                                 .gap_6()
                                 // Progress: one bar per step.
                                 .child(h_flex().gap_1p5().when(index > 0, |d| {

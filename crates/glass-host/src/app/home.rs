@@ -361,7 +361,7 @@ fn address_switch(via: Via, remote_on: bool, me: Entity<GlassApp>) -> impl IntoE
         .dropdown_menu(move |menu, _, _| {
             let tailnet = me.clone();
             let anywhere = me.clone();
-            menu.min_w(px(230.))
+            menu.min_w(px(230. * super::text_size::scale()))
                 .item(PopupMenuItem::new("Your Tailscale network").icon(ui::tailscale()).checked(via == Via::Tailnet).on_click(
                     move |_, _, cx| {
                         tailnet.update(cx, |this, cx| {

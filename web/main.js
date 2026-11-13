@@ -204,6 +204,22 @@ async function reloadIfUpdated(reason) {
     }
   } catch {}
 }
+// The host replaces its self-signed WebTransport certificate before it expires (it's
+// valid for 14 days), so a long-lived tab would keep pinning the old one: when connecting
+// fails, fetch the current hash and hand it to the worker for the next try.
+let certHashCheck = 0;
+async function refreshCertHash() {
+  if (remoteKey || currentHost !== homeHost || performance.now() - certHashCheck < 5000) return;
+  certHashCheck = performance.now();
+  try {
+    const latest = await fetch('config.json').then((r) => r.json());
+    if (JSON.stringify(latest.certHash ?? null) !== JSON.stringify(config.certHash ?? null)) {
+      config.certHash = latest.certHash;
+      log('info', 'new WebTransport certificate hash', { pinned: !!latest.certHash });
+      worker.postMessage({ type: 'certHash', certHash: latest.certHash });
+    }
+  } catch {}
+}
 const worker = new Worker('worker.js', { type: 'module' });
 worker.onerror = (e) => log('error', `worker: ${e.message}`, { src: `${e.filename}:${e.lineno}` });
 
@@ -760,6 +776,7 @@ worker.onmessage = ({ data }) => {
       if (rtpVideo) checkRtpVideoArrives();
       break;
     case 'status':
+      if (data.level === 'error' && /connection failed/.test(data.text)) refreshCertHash();
       if (data.level === 'error' && /connection failed/.test(data.text) && currentHost !== homeHost) {
         if (++machineFailures >= MACHINE_MAX_FAILURES) giveUpOnMachine();
       }
