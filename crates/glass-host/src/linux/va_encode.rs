@@ -122,6 +122,39 @@ pub fn available(backend: Backend) -> Option<&'static str> {
     }
 }
 
+/// The encoder's `bitrate` for `bps`: VA-API takes kbit/s; GStreamer's NVENC multiplies
+/// its value by 1024.
+fn rate_units(backend: Backend, bps: u32) -> u32 {
+    match backend {
+        Backend::Va => bps / 1000,
+        Backend::Nvenc => bps / 1024,
+    }
+    .max(100)
+}
+
+/// Sets a guint property if the element has one, within its range. `set_property` panics
+/// on a missing property, another type or an out-of-range value, which would end this
+/// screen's encode thread. Whether it was set.
+fn set_uint(element: &gst::Element, name: &str, value: u32) -> bool {
+    let Some(spec) = element.find_property(name) else {
+        return false;
+    };
+    let Some(spec) = spec.downcast_ref::<gst::glib::ParamSpecUInt>() else {
+        return false;
+    };
+    if !spec.flags().contains(gst::glib::ParamFlags::WRITABLE) {
+        return false;
+    }
+    element.set_property(name, value.clamp(spec.minimum(), spec.maximum()));
+    true
+}
+
+/// A guint property's value, if the element has one.
+fn get_uint(element: &gst::Element, name: &str) -> Option<u32> {
+    element.find_property(name)?;
+    element.property_value(name).get::<u32>().ok()
+}
+
 fn init() -> Result<()> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     INIT.get_or_init(|| gst::init().map_err(|e| e.to_string()))
@@ -169,7 +202,7 @@ impl VaEncoder {
         anyhow::ensure!(fits(backend, width, height, scale), "{width}x{height} can't be encoded");
         let div = divisor(backend, (width, height), scale);
         let (ow, oh) = output_size(backend, (width, height), scale);
-        let kbps = (bitrate / 1000).max(100);
+        let kbps = rate_units(backend, bitrate);
         let (layout, description) = match backend {
             Backend::Va => {
                 let layout = gstreamer_video::VideoInfo::builder(
@@ -251,7 +284,7 @@ impl VaEncoder {
             sps: None,
             name,
         };
-        this.set_cpb(bitrate);
+        this.set_cpb(bitrate, true);
         this.pipeline
             .set_state(gst::State::Playing)
             .map_err(|_| this.error(&format!("starting the {} pipeline", backend.label())))?;
@@ -266,12 +299,22 @@ impl VaEncoder {
     }
 
     /// The rate controller's buffer: about two frames at the target (rate::short_window),
-    /// so one frame can't take a second's worth of bits on a slow link. Older va plugins
-    /// have no such property; they keep their default.
-    fn set_cpb(&self, bps: u32) {
-        if self.encoder.find_property("cpb-size").is_some() {
-            let kbits = (crate::rate::short_window(bps, self.fps).0 * 8.0 / 1000.0) as u32;
-            self.encoder.set_property("cpb-size", kbits.max(1));
+    /// so one frame can't take a second's worth of bits on a slow link. VA-API calls it
+    /// `cpb-size` (kbit), NVENC `vbv-buffer-size` (units of 1024 bits); older va plugins and
+    /// GPUs without a custom VBV have no such property and keep their default.
+    fn set_cpb(&self, bps: u32, starting: bool) {
+        let bits = crate::rate::short_window(bps, self.fps).0 * 8.0;
+        match self.backend {
+            Backend::Va => {
+                set_uint(&self.encoder, "cpb-size", ((bits / 1000.0) as u32).max(1));
+            }
+            // GStreamer's NVENC (1.28 and older) restarts its session for a new VBV size,
+            // with an IDR and a stall, where a new bitrate alone is applied in place. So
+            // the size set at the start stays.
+            Backend::Nvenc if starting || gst::version() >= (1, 29, 0, 0) => {
+                set_uint(&self.encoder, "vbv-buffer-size", ((bits / 1024.0) as u32).max(1));
+            }
+            Backend::Nvenc => {}
         }
     }
 
@@ -283,8 +326,8 @@ impl VaEncoder {
     fn apply_bitrate(&mut self) {
         let (applied, wanted, at) = self.bitrate;
         if should_apply(applied, wanted, at.elapsed()) {
-            self.encoder.set_property("bitrate", (wanted / 1000).max(100));
-            self.set_cpb(wanted);
+            set_uint(&self.encoder, "bitrate", rate_units(self.backend, wanted));
+            self.set_cpb(wanted, false);
             self.bitrate = (wanted, wanted, Instant::now());
         }
     }
@@ -305,8 +348,13 @@ impl VaEncoder {
                 // The RGB as captured, row by row (capture rows are often padded).
                 let stride = self.layout.stride()[0] as usize;
                 let row = frame.width * 4;
+                // The last row may come without its padding.
+                anyhow::ensure!(
+                    frame.stride >= row && frame.data.len() >= frame.stride * (frame.height - 1) + row,
+                    "frame data shorter than its size"
+                );
                 let mut map = buffer.map_writable()?;
-                if stride == frame.stride {
+                if stride == frame.stride && frame.data.len() >= stride * frame.height {
                     let n = stride * frame.height;
                     map[..n].copy_from_slice(&frame.data[..n]);
                 } else {
@@ -352,9 +400,9 @@ impl VaEncoder {
             // I-frame that isn't an IDR and has no SPS, which a decoder joining the stream
             // can't start from. Reconfiguring starts a new sequence with an IDR, so nudge
             // the bitrate by 1 kbps instead.
-            let kbps = (self.bitrate.0 / 1000).max(100);
-            let now: u32 = self.encoder.property("bitrate");
-            self.encoder.set_property("bitrate", if now == kbps { kbps + 1 } else { kbps });
+            let kbps = rate_units(Backend::Va, self.bitrate.0);
+            let now = get_uint(&self.encoder, "bitrate");
+            set_uint(&self.encoder, "bitrate", if now == Some(kbps) { kbps + 1 } else { kbps });
         } else if force_keyframe {
             let event = gstreamer_video::DownstreamForceKeyUnitEvent::builder()
                 .all_headers(true)

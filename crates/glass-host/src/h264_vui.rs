@@ -104,7 +104,11 @@ fn skip_scaling_list(r: &mut Bits, size: usize) -> Option<()> {
     let (mut last, mut next) = (8i32, 8i32);
     for _ in 0..size {
         if next != 0 {
-            next = (last + r.se()? + 256) % 256;
+            let delta = r.se()?;
+            if !(-128..=127).contains(&delta) {
+                return None;
+            }
+            next = (last + delta + 256) % 256;
         }
         last = if next == 0 { last } else { next };
     }
@@ -113,6 +117,9 @@ fn skip_scaling_list(r: &mut Bits, size: usize) -> Option<()> {
 
 fn skip_hrd(r: &mut Bits) -> Option<()> {
     let count = r.ue()? + 1;
+    if count > 32 {
+        return None;
+    }
     r.bits(8)?; // bit_rate_scale, cpb_size_scale
     for _ in 0..count {
         r.ue()?;
@@ -123,9 +130,20 @@ fn skip_hrd(r: &mut Bits) -> Option<()> {
     Some(())
 }
 
+enum Patch {
+    /// It has a `bitstream_restriction` already.
+    Has,
+    /// The payload with one added.
+    Added(Vec<u8>),
+}
+
 /// The SPS NAL payload (header byte excluded) with `bitstream_restriction` added, or None
-/// if it already has one (or can't be parsed: then it's left alone).
-fn patch_sps(payload: &[u8]) -> Option<Vec<u8>> {
+/// if it can't be parsed (then it's left alone).
+fn patch_sps(payload: &[u8]) -> Option<Patch> {
+    patch(payload, true)
+}
+
+fn patch(payload: &[u8], verify: bool) -> Option<Patch> {
     let rbsp = to_rbsp(payload);
     let mut r = Bits { data: &rbsp, pos: 0 };
     let profile = r.bits(8)?;
@@ -156,13 +174,20 @@ fn patch_sps(payload: &[u8]) -> Option<Vec<u8>> {
             r.bit()?;
             r.se()?;
             r.se()?;
-            for _ in 0..r.ue()? {
+            let cycle = r.ue()?;
+            if cycle > 255 {
+                return None;
+            }
+            for _ in 0..cycle {
                 r.se()?;
             }
         }
         _ => {}
     }
     let max_num_ref_frames = r.ue()?;
+    if max_num_ref_frames > 16 {
+        return None;
+    }
     r.bit()?;
     r.ue()?;
     r.ue()?;
@@ -212,7 +237,7 @@ fn patch_sps(payload: &[u8]) -> Option<Vec<u8>> {
         }
         r.bit()?; // pic_struct_present_flag
         if r.bit()? == 1 {
-            return None; // already restricted
+            return Some(Patch::Has);
         }
     }
     // Everything before the restriction (or before the VUI flag, to add a VUI).
@@ -238,7 +263,12 @@ fn patch_sps(payload: &[u8]) -> Option<Vec<u8>> {
     while w.bits % 8 != 0 {
         w.bit(0);
     }
-    Some(to_ebsp(&w.out))
+    let patched = to_ebsp(&w.out);
+    // What was written must read back, restriction and all; otherwise keep the original.
+    if verify && !matches!(patch(&patched, false)?, Patch::Has) {
+        return None;
+    }
+    Some(Patch::Added(patched))
 }
 
 /// Rewrites every SPS in an Annex B access unit that lacks `bitstream_restriction`.
@@ -274,12 +304,15 @@ pub fn add_reorder_limit(au: Vec<u8>, cache: &mut Option<(Vec<u8>, Vec<u8>)>) ->
         if !nal.is_empty() && nal[0] & 0x1f == 7 {
             let patched = match cache {
                 Some((from, to)) if from.as_slice() == nal => Some(to.clone()),
-                _ => patch_sps(&nal[1..]).map(|body| {
-                    let mut to = vec![nal[0]];
-                    to.extend(body);
-                    *cache = Some((nal.to_vec(), to.clone()));
-                    to
-                }),
+                _ => match patch_sps(&nal[1..]) {
+                    Some(Patch::Added(body)) => {
+                        let mut to = vec![nal[0]];
+                        to.extend(body);
+                        *cache = Some((nal.to_vec(), to.clone()));
+                        Some(to)
+                    }
+                    _ => None,
+                },
             };
             if let Some(p) = patched {
                 out.extend_from_slice(&au[begin..start]);
@@ -314,7 +347,7 @@ mod tests {
         assert!(out.ends_with(&[&[0, 0, 0, 1][..], NVENC_PPS].concat()));
         // Patching again changes nothing: it's there now.
         let sps_end = out.len() - 4 - NVENC_PPS.len();
-        assert!(patch_sps(&out[5..sps_end]).is_none());
+        assert!(matches!(patch_sps(&out[5..sps_end]), Some(Patch::Has)));
         // The cache gives the same answer.
         assert_eq!(add_reorder_limit(au, &mut cache), out);
     }
@@ -330,6 +363,32 @@ mod tests {
         };
         let out = add_reorder_limit(std::fs::read(input).unwrap(), &mut None);
         std::fs::write(output, out).unwrap();
+    }
+
+    /// Whatever comes in, it doesn't panic, and an SPS it can't read goes out as it came.
+    #[test]
+    fn leaves_what_it_cant_read() {
+        let check = |au: Vec<u8>| {
+            let out = add_reorder_limit(au.clone(), &mut None);
+            // Anything it did change now reads back with the restriction.
+            assert!(out == au || matches!(patch_sps(&out[5..]), Some(Patch::Has)), "{au:x?}");
+        };
+        for n in 2..NVENC_SPS.len() {
+            check([&[0, 0, 0, 1][..], &NVENC_SPS[..n]].concat());
+        }
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..20_000 {
+            let len = (seed % 40) as usize + 1;
+            let mut au = vec![0, 0, 0, 1, 0x67];
+            for _ in 0..len {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                // No zero bytes: one NAL, no start codes inside.
+                au.push((seed as u8).max(1));
+            }
+            check(au);
+        }
     }
 
     #[test]
