@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Virtual game controllers on macOS (crates/glass-host/src/gamepad.rs). Restricted: until
+  Apple grants it to a Developer ID team, a binary carrying it only launches on a Mac with
+  SIP off and the boot-arg amfi_get_out_of_my_way=1. Never add it to release signing.
+
+  Sign with: rcodesign sign, passing this file as its entitlements XML file.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.hid.virtual.device</key>
+	<true/>
+</dict>
+</plist>
