@@ -42,9 +42,10 @@ export async function probeDecoders(log, codec = 'avc1.640033', forced = null) {
   }
   const first = DECODER_LADDER.findIndex((c) => supported.includes(c.name));
   // Chosen on this device (?decoder=sw|hw|hw-lowlatency|auto): start there if it works.
-  // Failures still step down the ladder from it.
+  // Failures still step down the ladder from it, and a fallback found with this choice
+  // in an earlier session stays (main.js forgets it when the choice changes).
   const pinned = forced ? DECODER_LADDER.findIndex((c) => c.name === forced) : -1;
-  if (pinned >= 0 && supported.includes(forced)) ladder.step = pinned;
+  if (pinned >= 0 && supported.includes(forced)) ladder.step = Math.max(pinned, ladder.step);
   else if (first > ladder.step) ladder.step = first;
   log(first < 0 ? 'error' : 'info', 'decoder support', {
     supported,
