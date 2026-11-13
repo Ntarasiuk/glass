@@ -20,6 +20,9 @@ mod files;
 mod flow;
 mod forward;
 mod grants;
+// Only the Linux GPU encoders (va_encode) use it.
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
+mod h264_vui;
 mod gamepad;
 mod ipc;
 mod keys;

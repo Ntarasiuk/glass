@@ -34,15 +34,24 @@ const ladder = { step: 0, failures: [] };
  * Skips configurations this browser can't do at all. "prefer-hardware" fails outright
  * where there's no hardware decoder (common on Linux), rather than falling back.
  */
-export async function probeDecoders(log, codec = 'avc1.640033') {
+export async function probeDecoders(log, codec = 'avc1.640033', forced = null) {
   const supported = [];
   for (const config of DECODER_LADDER) {
     const { supported: ok } = await VideoDecoder.isConfigSupported({ codec, ...config }).catch(() => ({}));
     if (ok) supported.push(config.name);
   }
   const first = DECODER_LADDER.findIndex((c) => supported.includes(c.name));
-  if (first > ladder.step) ladder.step = first;
-  log(first < 0 ? 'error' : 'info', 'decoder support', { supported, using: DECODER_LADDER[ladder.step]?.name });
+  // Chosen on this device (?decoder=sw|hw|hw-lowlatency|auto): start there if it works.
+  // Failures still step down the ladder from it, and a fallback found with this choice
+  // in an earlier session stays (main.js forgets it when the choice changes).
+  const pinned = forced ? DECODER_LADDER.findIndex((c) => c.name === forced) : -1;
+  if (pinned >= 0 && supported.includes(forced)) ladder.step = Math.max(pinned, ladder.step);
+  else if (first > ladder.step) ladder.step = first;
+  log(first < 0 ? 'error' : 'info', 'decoder support', {
+    supported,
+    using: DECODER_LADDER[ladder.step]?.name,
+    ...(forced ? { forced, honoured: pinned >= 0 && supported.includes(forced) } : {}),
+  });
 }
 
 // HEVC Main, level 4.1: if this decodes in hardware, the host may send HEVC.

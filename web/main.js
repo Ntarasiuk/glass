@@ -41,6 +41,19 @@ const PASS_KEY = 'glass.pass'; // guest pass from a magic link: { pass, expires 
 const SWAP_KEY = 'glass.swapCmdOption';
 const CTRL_AS_CMD_KEY = 'glass.ctrlAsCmd';
 const DECODER_STEP_KEY = 'glass.decoderStep';
+// A video decoder chosen for this device: ?decoder=hw-lowlatency|hw|sw|auto (kept),
+// ?decoder=default to go back to choosing automatically.
+const DECODER_KEY = 'glass.decoder';
+const DECODER_CHOICES = ['hw-lowlatency', 'hw', 'sw', 'auto'];
+{
+  const asked = new URLSearchParams(location.search).get('decoder');
+  if (asked !== null) {
+    const choice = DECODER_CHOICES.includes(asked) ? asked : null;
+    // Forget a fallback found with another decoder (not one found with this same choice).
+    if (choice !== (storage((s) => s.getItem(DECODER_KEY)) ?? null)) storage((s) => s.removeItem(DECODER_STEP_KEY));
+    storage((s) => (choice ? s.setItem(DECODER_KEY, choice) : s.removeItem(DECODER_KEY)));
+  }
+}
 const PC_KEYBOARD_KEY = 'glass.pcKeyboard';
 const MACHINE_KEY = 'glass.machine';
 const REMOTES_KEY = 'glass.remotes'; // computers opened from anywhere, for glassdesk.dev/computers
@@ -674,6 +687,7 @@ worker.postMessage({
   decoderStep: Number(storage((s) => s.getItem(DECODER_STEP_KEY)) ?? 0),
   // bench/ only: read the test host's frame marker (see bench.js).
   bench: storage((s) => s.getItem('glass.bench')) === '1',
+  decoder: storage((s) => s.getItem(DECODER_KEY)) ?? null,
 }, rtcPort ? [rtcPort] : []);
 armMachineTimeout();
 showStatus('connecting', 'Connecting', machineName(currentHost));
