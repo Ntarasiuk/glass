@@ -164,6 +164,22 @@ fn snapshot() -> Option<ServerMsg> {
     Some(ServerMsg::Clipboard { text, html, image })
 }
 
+/// The clipboard now: text, rich text (HTML), and whether there's an image (the native
+/// viewer's side of copy and paste).
+pub fn read() -> (String, Option<String>, bool) {
+    let Some(open) = Open::new() else { return (String::new(), None, false) };
+    let text = open.text().unwrap_or_default();
+    let html = open.get(html_format()).and_then(|b| from_cf_html(&b)).filter(|h| h.len() <= clip::MAX_HTML);
+    let image = open.has(png_format()) || open.has(CF_DIB.0 as u32);
+    (text, html, image)
+}
+
+/// Changes each time something is copied.
+pub fn sequence() -> isize {
+    // SAFETY: plain query.
+    unsafe { GetClipboardSequenceNumber() as isize }
+}
+
 /// Broadcasts the clipboard whenever it changes on the computer.
 pub fn watch(events: broadcast::Sender<ServerMsg>) {
     std::thread::spawn(move || {

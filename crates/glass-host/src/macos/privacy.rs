@@ -8,7 +8,7 @@
 
 use std::ffi::c_void;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 pub const SUPPORTED: bool = true;
@@ -83,6 +83,8 @@ struct Tap {
 
 static ENGAGED: AtomicBool = AtomicBool::new(false);
 static TAP: Mutex<Option<Tap>> = Mutex::new(None);
+/// Which engagement is on: the thread keeping the displays dark belongs to one.
+static ENGAGEMENT: AtomicU64 = AtomicU64::new(0);
 
 pub fn set(on: bool) -> anyhow::Result<()> {
     if on {
@@ -107,17 +109,26 @@ fn engage() -> anyhow::Result<()> {
     ENGAGED.store(true, Ordering::SeqCst);
     install_panic_restore();
     blank_all();
+    let engagement = ENGAGEMENT.fetch_add(1, Ordering::SeqCst) + 1;
     // Displays come and go (and macOS resets gamma on some changes): keep them dark.
-    std::thread::Builder::new()
+    let kept = std::thread::Builder::new()
         .name("glass-privacy".into())
-        .spawn(|| {
-            while ENGAGED.load(Ordering::SeqCst) {
+        .spawn(move || {
+            while ENGAGED.load(Ordering::SeqCst) && ENGAGEMENT.load(Ordering::SeqCst) == engagement {
                 std::thread::sleep(Duration::from_secs(1));
-                if ENGAGED.load(Ordering::SeqCst) {
+                if ENGAGED.load(Ordering::SeqCst) && ENGAGEMENT.load(Ordering::SeqCst) == engagement {
                     blank_all();
+                    // Released while blanking: its restore came first, so it's on this to redo.
+                    if !ENGAGED.load(Ordering::SeqCst) {
+                        unsafe { CGDisplayRestoreColorSyncSettings() };
+                    }
                 }
             }
-        })?;
+        });
+    if let Err(e) = kept {
+        release();
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -190,11 +201,17 @@ fn start_tap() -> anyhow::Result<()> {
             let rl = CFRunLoopGetCurrent();
             CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes);
             CGEventTapEnable(port, true);
-            let _ = tx.send(Ok(Tap {
+            let sent = tx.send(Ok(Tap {
                 port: port as usize,
                 run_loop: rl as usize,
             }));
-            CFRunLoopRun();
+            // Too late: nobody will ever stop this one.
+            if sent.is_ok() {
+                CFRunLoopRun();
+            } else {
+                CGEventTapEnable(port, false);
+                CFMachPortInvalidate(port);
+            }
             CFRelease(source);
             CFRelease(port);
         })?;

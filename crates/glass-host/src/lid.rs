@@ -89,6 +89,13 @@ pub fn allow() -> anyhow::Result<()> {
 pub fn release() -> anyhow::Result<()> {
     #[cfg(windows)]
     win::release()?;
+    #[cfg(target_os = "macos")]
+    if marker().exists() {
+        if parse_sleep_disabled(&pmset(&["-g"])) {
+            anyhow::ensure!(set_sleep_disabled(false), "couldn't let this Mac sleep again; run `sudo pmset -a disablesleep 0`");
+        }
+        let _ = std::fs::remove_file(marker());
+    }
     Ok(())
 }
 
@@ -146,6 +153,19 @@ fn plan(want: bool, active: &str, saved: Option<&Saved>, lid: impl Fn(&str) -> O
     ops
 }
 
+/// Carries out `ops` in order, each `apply` saying whether it worked. One that couldn't put a
+/// plan back ends it there: holding another plan next would write over the only record of what
+/// that one was.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn carry_out(ops: Vec<Op>, mut apply: impl FnMut(Op) -> bool) {
+    for op in ops {
+        let restoring = matches!(op, Op::Restore { .. });
+        if !apply(op) && restoring {
+            break;
+        }
+    }
+}
+
 /// On power, from GetSystemPowerStatus' ACLineStatus (0 offline, 1 online, 255 unknown: a
 /// desktop that can't tell is plugged in).
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -162,7 +182,7 @@ mod win {
     };
     use windows::core::GUID;
 
-    use super::{Op, Saved, plan, windows_on_power};
+    use super::{Op, Saved, carry_out, plan, windows_on_power};
 
     /// GUID_SYSTEM_BUTTON_SUBGROUP (powercfg's SUB_BUTTONS).
     const SUB_BUTTONS: GUID = GUID::from_u128(0x4f971e89_eebd_4455_a8de_9e59040e7347);
@@ -274,39 +294,40 @@ mod win {
             loop {
                 let want = crate::settings::load().lid_awake && on_power();
                 if let Some(active) = active() {
-                    for op in plan(want, &active, saved().as_ref(), lid) {
-                        match op {
-                            Op::Hold { scheme, original } => {
-                                // Saved first, so a crash after the change can still undo it.
-                                let saved = std::fs::write(marker(), Saved { scheme: scheme.clone(), original }.line());
-                                if saved.is_ok() && set_lid(&scheme, 0).is_ok() {
-                                    warned = false;
-                                    tracing::info!("lid-awake: on power, so closing the lid does nothing");
-                                } else {
-                                    let _ = std::fs::remove_file(marker());
-                                    if !warned {
-                                        warned = true;
-                                        tracing::warn!("lid-awake: can't change the lid setting; run `glass config lid-awake on` again");
-                                    }
-                                }
-                            }
-                            Op::Restore { scheme, value } => match set_lid(&scheme, value) {
-                                Ok(()) => {
-                                    let _ = std::fs::remove_file(marker());
-                                    tracing::info!("lid-awake: closing the lid does what it did before");
-                                }
-                                // Set as administrator: put back when the setting goes off.
-                                Err(_) if !warned => {
-                                    warned = true;
-                                    tracing::warn!("lid-awake: can't put the lid setting back without administrator");
-                                }
-                                Err(_) => {}
-                            },
-                            Op::Forget => {
+                    carry_out(plan(want, &active, saved().as_ref(), lid), |op| match op {
+                        Op::Hold { scheme, original } => {
+                            // Saved first, so a crash after the change can still undo it.
+                            let saved = std::fs::write(marker(), Saved { scheme: scheme.clone(), original }.line());
+                            if saved.is_ok() && set_lid(&scheme, 0).is_ok() {
+                                warned = false;
+                                tracing::info!("lid-awake: on power, so closing the lid does nothing");
+                                true
+                            } else {
                                 let _ = std::fs::remove_file(marker());
+                                if !warned {
+                                    warned = true;
+                                    tracing::warn!("lid-awake: can't change the lid setting; run `glass config lid-awake on` again");
+                                }
+                                false
                             }
                         }
-                    }
+                        Op::Restore { scheme, value } => {
+                            let restored = set_lid(&scheme, value).is_ok();
+                            if restored {
+                                let _ = std::fs::remove_file(marker());
+                                tracing::info!("lid-awake: closing the lid does what it did before");
+                            } else if !warned {
+                                // Set as administrator: put back when the setting goes off.
+                                warned = true;
+                                tracing::warn!("lid-awake: can't put the lid setting back without administrator");
+                            }
+                            restored
+                        }
+                        Op::Forget => {
+                            let _ = std::fs::remove_file(marker());
+                            true
+                        }
+                    });
                 }
                 std::thread::sleep(std::time::Duration::from_secs(5));
             }
@@ -373,6 +394,31 @@ fn marker() -> std::path::PathBuf {
     crate::config_dir().join("lid-awake-applied")
 }
 
+/// What lets a Mac sleep again once the host with this pid is gone. It leaves the marker: a
+/// new host may already have turned sleep off again, and the marker is how it turns it back on.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn restore_script(pid: u32) -> String {
+    format!("while kill -0 {pid} 2>/dev/null; do sleep 5; done; exec /usr/bin/sudo -n {PMSET} -a disablesleep 0")
+}
+
+/// A Mac left with sleep off would stay awake on battery too, however the host ended (quit,
+/// crash, uninstall), so something outlives it to put that back. In its own process group,
+/// or launchd would stop it along with the host.
+#[cfg(target_os = "macos")]
+fn restore_when_host_ends() {
+    use std::os::unix::process::CommandExt;
+    let spawned = Command::new("/bin/sh")
+        .args(["-c", &restore_script(std::process::id())])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn();
+    if let Err(e) = spawned {
+        tracing::warn!("lid-awake: nothing will let this Mac sleep again if the host ends: {e}");
+    }
+}
+
 /// Keeps a closed lid from sleeping while `lid-awake` is on and the laptop is on power, and
 /// lets it again otherwise. Checks every few seconds, for as long as the host runs.
 pub fn watch() {
@@ -417,13 +463,18 @@ pub fn watch() {
     #[cfg(target_os = "macos")]
     std::thread::spawn(|| {
         let mut warned = false;
+        let mut restoring = false;
         loop {
             let want = crate::settings::load().lid_awake && parse_on_power(&pmset(&["-g", "batt"]));
             let off = parse_sleep_disabled(&pmset(&["-g"]));
             let ours = marker().exists();
+            if (want || ours) && !restoring {
+                restoring = true;
+                restore_when_host_ends();
+            }
             if want && !off {
-                if set_sleep_disabled(true) {
-                    let _ = std::fs::write(marker(), b"");
+                // The marker first: a crash in between must not leave sleep off and unclaimed.
+                if std::fs::write(marker(), b"").is_ok() && set_sleep_disabled(true) {
                     warned = false;
                     tracing::info!("lid-awake: on power, so a closed lid won't sleep");
                 } else if !warned {
@@ -500,6 +551,26 @@ mod tests {
         );
         // A plan that's gone (or has no lid setting) has nothing to put back.
         assert_eq!(plan(false, A, Some(&ours), |_| None), [Op::Forget]);
+    }
+
+    #[test]
+    fn a_plan_that_cant_be_put_back_isnt_forgotten_for_another() {
+        const A: &str = "381B4222-F694-41F0-9685-FF5BB260DF2E";
+        const B: &str = "8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635C";
+        let ours = Saved { scheme: A.into(), original: 1 };
+        let ops = || plan(true, B, Some(&ours), |s| Some(if s == A { 0 } else { 1 }));
+        let mut tried = Vec::new();
+        carry_out(ops(), |op| {
+            tried.push(matches!(op, Op::Hold { .. }));
+            false
+        });
+        assert_eq!(tried, [false], "the restore failed, so no hold wrote over the marker");
+        let mut tried = Vec::new();
+        carry_out(ops(), |op| {
+            tried.push(matches!(op, Op::Hold { .. }));
+            true
+        });
+        assert_eq!(tried, [false, true]);
     }
 
     #[test]

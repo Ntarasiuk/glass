@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader, Write};
 
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -23,6 +24,17 @@ enum Helper {
     /// Windows: a thread following the media sessions, until this is set.
     #[cfg(windows)]
     Thread(std::sync::Arc<std::sync::atomic::AtomicBool>),
+}
+
+impl Helper {
+    /// Still going: a helper can exit by itself (a crash, an update to its app).
+    fn alive(&mut self) -> bool {
+        match self {
+            Helper::Process(child) => matches!(child.try_wait(), Ok(None)),
+            #[cfg(windows)]
+            Helper::Thread(_) => true,
+        }
+    }
 }
 
 impl Drop for Helper {
@@ -41,6 +53,11 @@ impl Drop for Helper {
 static HELPER: Mutex<Option<Helper>> = Mutex::new(None);
 /// The latest report (artwork kept from the last report that carried one).
 static LATEST: Mutex<Option<Value>> = Mutex::new(None);
+/// Which helper's reports count. A stopped one can still have lines on their way.
+static RUN: AtomicU64 = AtomicU64::new(0);
+/// How often a helper is looked at while someone is connected (and one that wouldn't start
+/// tried again).
+const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What's playing now, for a viewer that just connected.
 pub fn current() -> Option<Value> {
@@ -51,16 +68,27 @@ pub fn current() -> Option<Value> {
 pub fn watch(events: broadcast::Sender<ServerMsg>) {
     let mut viewers = crate::viewers::subscribe();
     tokio::spawn(async move {
+        let mut check = tokio::time::interval(CHECK_EVERY);
         loop {
             let connected = !viewers.borrow_and_update().is_empty();
+            let dead = HELPER.lock().unwrap().as_mut().is_some_and(|h| !h.alive());
+            if dead {
+                tracing::debug!("now playing: the helper stopped");
+                stop();
+            }
             let running = HELPER.lock().unwrap().is_some();
             if connected && !running {
                 start(events.clone());
             } else if !connected && running {
                 stop();
             }
-            if viewers.changed().await.is_err() {
-                return;
+            tokio::select! {
+                changed = viewers.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                _ = check.tick() => {}
             }
         }
     });
@@ -68,6 +96,7 @@ pub fn watch(events: broadcast::Sender<ServerMsg>) {
 
 fn stop() {
     HELPER.lock().unwrap().take();
+    RUN.fetch_add(1, Ordering::Relaxed);
     *LATEST.lock().unwrap() = None;
 }
 
@@ -75,6 +104,7 @@ fn stop() {
 type Reader = fn(&str) -> Option<Value>;
 
 fn start(events: broadcast::Sender<ServerMsg>) {
+    let run = RUN.load(Ordering::Relaxed);
     #[cfg(windows)]
     if !crate::testmode::enabled() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,7 +113,7 @@ fn start(events: broadcast::Sender<ServerMsg>) {
         std::thread::spawn(move || {
             win::run(&stop, |info| {
                 if !stop.load(Ordering::Relaxed) {
-                    report(info, &events);
+                    report(info, &events, run);
                 }
             })
         });
@@ -103,14 +133,18 @@ fn start(events: broadcast::Sender<ServerMsg>) {
         for line in BufReader::new(out).lines() {
             let Ok(line) = line else { break };
             let Some(info) = read(&line) else { continue };
-            report(info, &events);
+            report(info, &events, run);
         }
     });
 }
 
 /// Keeps a report as the latest and sends it to viewers.
-fn report(mut info: Value, events: &broadcast::Sender<ServerMsg>) {
+fn report(mut info: Value, events: &broadcast::Sender<ServerMsg>, run: u64) {
     let mut latest = LATEST.lock().unwrap();
+    // (`stop` moves on before it clears this, so nothing gets in after.)
+    if RUN.load(Ordering::Relaxed) != run {
+        return;
+    }
     // A report without artwork keeps the last artwork, if it's the same track's.
     if info.get("artwork").is_none()
         && let Some(prev) = latest.as_ref()
@@ -507,6 +541,36 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stopped_helpers_last_words_dont_count() {
+        let (tx, mut rx) = broadcast::channel(4);
+        let run = RUN.load(Ordering::Relaxed);
+        report(json!({ "title": "Live", "artworkId": "1" }), &tx, run);
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(current().unwrap()["title"], "Live");
+        stop();
+        assert!(current().is_none());
+        // A line it had already written, read only now.
+        report(json!({ "title": "Late", "artworkId": "2" }), &tx, run);
+        assert!(current().is_none(), "not what's playing for the next viewer");
+        assert!(rx.try_recv().is_err());
+        // The next helper's do.
+        report(json!({ "title": "Next", "artworkId": "3" }), &tx, RUN.load(Ordering::Relaxed));
+        assert_eq!(current().unwrap()["title"], "Next");
+        stop();
+    }
+
+    #[test]
+    fn a_helper_that_exited_isnt_taken_for_running() {
+        let child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let mut helper = Helper::Process(child);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while helper.alive() {
+            assert!(std::time::Instant::now() < deadline, "it never exited");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn artwork_is_sent_once_per_track() {

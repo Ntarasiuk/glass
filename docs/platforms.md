@@ -40,6 +40,7 @@ Windows shipped in 0.13.0 (beta); a ✅ there means it ran in a Windows 11 Arm V
 | Control elevated windows, UAC prompts | — | — | ✅ SYSTEM helper | Same service; input passes UIPI through SYSTEM |
 | Sign in after a restart (nobody signed in yet) | ❌ | ❌ | ✅ sign-in host | Windows: the same service serves the sign-in screen (screen and input only) until someone signs in, then the user's own host takes over |
 | Send Ctrl+Alt+Del | — | — | ✅ SendSAS | Viewer's More menu. Needs the secure-desktop service (sets the SoftwareSASGeneration policy) |
+| Found on the same network (mDNS) | ✅ | 🧪 | 🧪 | Announcing, and letting a device there ask to connect; listed in the Glass app (macOS, Windows) and by `glass nearby`. Run on a Mac only so far |
 | Wake on LAN, restart Glass/computer | ✅ | ✅ | 🧪 | Windows: restarting Glass works in the VM |
 | Stay awake with the lid closed | ✅ | ✅ | 🧪 power plan lid action | Windows: "Do nothing" on power while it's on, put back after |
 
@@ -82,12 +83,12 @@ Windows shipped in 0.13.0 (beta); a ✅ there means it ran in a Windows 11 Arm V
 | One-line install | ✅ install.sh | ✅ install.sh | ✅ install.ps1 | `irm glassdesk.dev \| iex` |
 | Release builds | ✅ universal | ✅ x86_64 | ✅ x64 + Arm64 zips and MSIs | 0.12.0-windows.1 (pre-release): both pass the VM suite as published |
 | Signed builds | ✅ stable identity | — | 🧪 Authenticode, timestamped | Windows: Azure Artifact Signing, a .pfx or SignPath (release.yml); unsigned until one is set up |
-| Managed deployment | ❌ | ❌ | ✅ per-machine MSI, 🧪 winget manifests | `msiexec /i glass-….msi /qn`; Program Files, starts for every user, firewall rule |
+| Managed deployment | ❌ | ❌ | ✅ per-machine MSI, 🧪 winget manifests | `msiexec /i glass-….msi /qn`; Program Files, starts for every user. The MSI restores one machine-wide FirewallScope (the older private any-address rule when none is saved; that fallback is not stored as `any`). The last `glass setup` wins; each user's bind is separate. A full MSI uninstall clears the scope. `glass uninstall --everything` clears it only when Glass is not installed for everyone. After changing bind, run `glass service install` again so the service copy's rule matches |
 | Admin policies (locked settings) | ❌ | ❌ | ✅ Group Policy / Intune (ADMX) | HKLM/HKCU\SOFTWARE\Policies\Glass; packaging/windows/policies |
 | Background service | ✅ LaunchAgent | ✅ systemd user | ✅ glassw at sign-in | |
 | Secure-desktop service (SYSTEM) | — | — | ✅ optional | `glass service install`; keeps a SYSTEM helper in the console session for the lock screen, UAC and Ctrl+Alt+Del. Host stays the only network/auth endpoint |
 | Self-update | ✅ | ✅ | ✅ | Windows MSI installs update with the MSI or winget; a policy can turn updates off |
-| Guided setup | ✅ | ✅ | ✅ (unattended) | Windows adds a firewall rule and offers the secure-desktop service (one UAC prompt each) |
+| Guided setup | ✅ | ✅ | ✅ (unattended) | Windows adds a firewall rule from the saved bind (Tailscale ranges only when bind is tailscale; none when loopback-only) and offers the secure-desktop service (one UAC prompt each) |
 | Desktop app | ✅ Glass.app | ❌ | ✅ Start menu | Same window |
 | Status icon (who's viewing, quick controls) | ✅ menu bar | ❌ | ✅ notification area | |
 | CLI ↔ host channel | ✅ Unix socket | ✅ Unix socket | ✅ named pipe | |

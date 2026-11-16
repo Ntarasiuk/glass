@@ -13,6 +13,8 @@ const RESTART_EVERY: Duration = Duration::from_secs(8);
 /// Each restart is a fresh launch, and every launch shows the system prompt again, so
 /// stop nudging after a few tries instead of re-prompting forever (e.g. after "Deny").
 const MAX_RESTARTS: u32 = 3;
+/// How long Accessibility is waited for before asking what to do.
+const ACCESSIBILITY_WAIT: Duration = Duration::from_secs(120);
 
 pub async fn prepare() -> Result<()> {
     Ok(())
@@ -181,7 +183,7 @@ fn wait_with_restarts<T>(
     }
 }
 
-fn accessibility_step(mut status: Status) -> Result<Status> {
+fn accessibility_step(status: Status) -> Result<Status> {
     log::step("Accessibility permission (mouse and keyboard)")?;
     if status.accessibility {
         log::success("Already allowed")?;
@@ -193,17 +195,44 @@ fn accessibility_step(mut status: Status) -> Result<Status> {
          If it isn't listed, click + and choose ~/.glass/bin/glass.",
     )?;
     permissions::open_pane(permissions::ACCESSIBILITY_PANE);
-    let sp = spinner();
-    sp.start("Waiting for Accessibility to be allowed");
     loop {
-        if let Some(s) = status::read().filter(|s| s.is_fresh() && s.accessibility) {
-            status = s;
-            break;
+        let sp = spinner();
+        sp.start("Waiting for Accessibility to be allowed");
+        let allowed = wait_until(
+            || status::read().filter(|s| s.is_fresh() && s.accessibility),
+            ACCESSIBILITY_WAIT,
+            Duration::from_millis(500),
+        );
+        if let Some(s) = allowed {
+            sp.stop("Accessibility allowed, remote mouse and keyboard enabled");
+            return Ok(s);
         }
-        std::thread::sleep(Duration::from_millis(500));
+        sp.error("Accessibility still isn't allowed");
+        log::warning(format!(
+            "Switch Glass on in {}.\n\
+             If it isn't listed, click + and choose ~/.glass/bin/glass.",
+            input_settings()
+        ))?;
+        if !crate::setup::ask_retry("Allowed it?", "Quit setup (run `glass setup` again later)")? {
+            // Leave the agent stopped so it doesn't keep prompting in the background.
+            agent::stop();
+            anyhow::bail!("Accessibility isn't allowed yet; run `glass setup` again once it is");
+        }
     }
-    sp.stop("Accessibility allowed, remote mouse and keyboard enabled");
-    Ok(status)
+}
+
+/// Polls `ready` every `tick` until it says yes, for at most `limit`.
+fn wait_until<T>(mut ready: impl FnMut() -> Option<T>, limit: Duration, tick: Duration) -> Option<T> {
+    let start = Instant::now();
+    loop {
+        if let Some(value) = ready() {
+            return Some(value);
+        }
+        if start.elapsed() >= limit {
+            return None;
+        }
+        std::thread::sleep(tick);
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +269,22 @@ mod tests {
         );
         assert_eq!(got, Some("capturing"));
         assert_eq!(restarts.get(), 1);
+    }
+
+    #[test]
+    fn waiting_for_accessibility_gives_up_in_the_end() {
+        assert_eq!(wait_until(|| Some(1), EVERY, TICK), Some(1));
+        let mut looks = 0;
+        let got = wait_until(
+            || {
+                looks += 1;
+                (looks == 3).then_some("allowed")
+            },
+            Duration::from_secs(5),
+            TICK,
+        );
+        assert_eq!(got, Some("allowed"));
+        assert_eq!(wait_until(|| None::<()>, EVERY, TICK), None);
     }
 
     /// "Deny": every restart re-shows the macOS prompt, so it must stop after a few.

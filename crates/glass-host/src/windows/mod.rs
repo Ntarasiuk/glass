@@ -5,6 +5,7 @@ pub mod agent;
 pub mod audio;
 pub mod clipboard;
 pub mod clock;
+pub mod cursor;
 pub mod convert;
 pub mod firewall;
 pub mod front;
@@ -129,9 +130,24 @@ pub fn no_window_tokio(cmd: &mut tokio::process::Command) {
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
-/// A PowerShell single-quoted string literal.
+/// A PowerShell single-quoted string literal. PowerShell closes a single-quoted string on
+/// the curly quotes ‘ ’ ‚ ‛ as well as on ', so every one of them is doubled: anything
+/// else would let text from a viewer (its device name, say) end the string and run code.
 pub fn ps_string(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if is_ps_quote(c) {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
+}
+
+fn is_ps_quote(c: char) -> bool {
+    matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}')
 }
 
 
@@ -162,4 +178,17 @@ pub fn dpi_aware() {
     use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
     // SAFETY: no preconditions; fails harmlessly if already set.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ps_string;
+
+    #[test]
+    fn every_powershell_quote_is_doubled() {
+        assert_eq!(ps_string("it's"), "'it''s'");
+        assert_eq!(ps_string("a\u{2019}+(calc)+\u{2019}"), "'a\u{2019}\u{2019}+(calc)+\u{2019}\u{2019}'");
+        assert_eq!(ps_string("\u{2018}\u{201A}\u{201B}"), "'\u{2018}\u{2018}\u{201A}\u{201A}\u{201B}\u{201B}'");
+        assert_eq!(ps_string("\"$(calc)\""), "'\"$(calc)\"'");
+    }
 }

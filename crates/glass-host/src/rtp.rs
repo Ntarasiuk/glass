@@ -416,6 +416,7 @@ pub async fn pump(outs: Vec<VideoOut>, target: Arc<AtomicU64>, mut viewer: Viewe
     let mut last_capture = [None::<u64>; MAX_TRACKS];
 
     let mut report = tokio::time::interval(Duration::from_millis(500));
+    let mut capped = false;
     let mut sent_bytes = 0usize;
     let mut last_log = Instant::now();
     loop {
@@ -465,8 +466,18 @@ pub async fn pump(outs: Vec<VideoOut>, target: Arc<AtomicU64>, mut viewer: Viewe
                     .await?;
             }
             _ = report.tick() => {
+                // Paused: nothing's sent, so its estimate is about nothing, and the others
+                // shouldn't wait on it.
+                let watching = *viewer.watching.borrow();
+                if !watching && capped {
+                    crate::server::set_remote_cap(viewer.id, None);
+                    capped = false;
+                }
                 let bps = f64::from_bits(target.load(Ordering::Relaxed));
-                crate::server::set_remote_cap(viewer.id, Some((bps * ENCODER_SHARE) as u32));
+                if watching {
+                    crate::server::set_remote_cap(viewer.id, Some((bps * ENCODER_SHARE) as u32));
+                    capped = true;
+                }
                 if last_log.elapsed() >= Duration::from_secs(10) {
                     let sent = sent_bytes as f64 * 8.0 / last_log.elapsed().as_secs_f64() / 1e6;
                     info!("remote video: estimate {:.1} Mb/s, sending {sent:.1} Mb/s", bps / 1e6);

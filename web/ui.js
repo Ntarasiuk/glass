@@ -594,7 +594,8 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     if (progress !== undefined) {
       bar = document.createElement('progress');
       bar.max = 1;
-      bar.value = progress;
+      // null: indeterminate (no total known).
+      if (progress !== null) bar.value = progress;
       el.append(bar);
     }
     let timer;
@@ -620,7 +621,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
     const api = {
       update({ text: t, progress: p }) {
         if (t !== undefined) label.textContent = label.title = t;
-        if (bar && p !== undefined) bar.value = p;
+        if (bar && p != null) bar.value = p;
       },
       dismiss(after = 0) {
         clearTimeout(timer);
@@ -651,6 +652,10 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       input.setAttribute('aria-invalid', String(rejected));
       if (rejected) input.select();
       input.focus();
+    },
+    /** Signed in after all, or on the way to another machine. */
+    hideAuth() {
+      auth.classList.add('hidden');
     },
     /** Guests (signed in with a magic link) can't switch machines. */
     setGuest(guest) {

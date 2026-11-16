@@ -11,7 +11,13 @@
     // The Worker decides who gets the install script and counts downloads.
     // /app/ keeps its slash: the web client's relative URLs (main.js, worker.js) need it.
     // Videos too: static assets ignore Range, and Safari (and link-card players) need it.
-    "run_worker_first": ["/", "/app", "/app/", "/install.sh", "/install.ps1", "/help", "/help.sh", "/help.ps1", "/releases/*", "/api/*", "/signal/*", "/og.mp4", "/mark.mp4"]
+    // Pages and agent-facing files (llms.txt, skills, markdown twins) also pass the Worker so AgentLens
+    // (src/agentlens/) sees them; scripts, styles, fonts and images stay asset-only.
+    "run_worker_first": [
+      "/", "/app", "/app/", "/install.sh", "/install.ps1", "/help", "/help.sh", "/help.ps1", "/releases/*", "/api/*", "/signal/*", "/og.mp4", "/mark.mp4",
+      "/_al/*", "/docs", "/docs/*", "/features", "/features/*", "/guides", "/guides/*", "/vs", "/vs/*", "/changelog", "/changelog/*", "/computers", "/computers/*",
+      "/robots.txt", "/sitemap.xml", "/llms.txt", "/llms-full.txt", "/index.md", "/docs.md", "/changelog.md", "/skill.md", "/.well-known/*"
+    ]
   },
   "d1_databases": [
     {
@@ -24,10 +30,11 @@
   // Remote access: introduces browsers to hosts (see src/introducer.js).
   "durable_objects": { "bindings": [{ "name": "INTRODUCER", "class_name": "Introducer" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Introducer"] }],
-  // Feedback is emailed to FEEDBACK_TO (a secret); downloads also go to Google Analytics
-  // (GA_API_SECRET is a secret too).
+  // Feedback is emailed to FEEDBACK_TO (a secret).
   "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["feedback@glassdesk.dev"] }],
-  "vars": { "GA_MEASUREMENT_ID": "G-LCYDPMQMLD" },
+  // AgentLens analytics (src/agentlens/): one row per request, page beacon and download goal, read by the
+  // agentlens-dashboard Worker. Needs the AL_SECRET secret; without it analytics stays off.
+  "analytics_engine_datasets": [{ "binding": "AGENTLENS", "dataset": "agentlens_events" }],
   "routes": [{ "pattern": "glassdesk.dev", "custom_domain": true }],
   "workers_dev": true,
   "observability": { "enabled": true }

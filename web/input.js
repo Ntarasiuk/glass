@@ -1,8 +1,9 @@
 // Pointer, touch, keyboard and clipboard input → remote input events.
 
-import { Input, penFields } from './proto.js';
+import { Input, penFields, textEvents } from './proto.js';
 import { MAC_KEYCODES, charToKey, KVK_SHIFT } from './keymap.js';
 import { log } from './log.js';
+import { pointsPerPx, scrollBatcher, wheelPixels } from './scroll.js';
 
 const LONG_PRESS_MS = 500;
 const TAP_SLOP_PX = 10;
@@ -22,6 +23,8 @@ const MAX_ZOOM = 5;
 // A two-finger gesture becomes a pinch once the finger spread changes this much.
 const PINCH_THRESHOLD = 0.08;
 const PASTE_FALLBACK_MS = 150;
+// A paste event this soon after giving up on it is for the ⌘V already sent as a keystroke.
+const LATE_PASTE_MS = 3000;
 
 const MODIFIER_CODES = ['MetaLeft', 'MetaRight', 'ShiftLeft', 'ShiftRight', 'AltLeft', 'AltRight', 'ControlLeft', 'ControlRight'];
 const MODIFIER_KEYCODES = new Set(MODIFIER_CODES.map((c) => MAC_KEYCODES[c]));
@@ -37,8 +40,8 @@ const MODIFIER_KEYCODES = new Set(MODIFIER_CODES.map((c) => MAC_KEYCODES[c]));
  * @param onLocalShortcut (code) => void, for Ctrl+Shift+<key> shortcuts handled locally
  */
 export function attachInput({
-  screens, keySink, send, control, nextClipboard, onMacCopy = () => {}, onPaste, onLocalShortcut, swapCmdOption = false,
-  ctrlAsCmd = true, pcKeyboard = false, onZoom,
+  screens, keySink, send: sendNow, control, nextClipboard, onMacCopy = () => {}, onPaste, onLocalShortcut, swapCmdOption = false,
+  ctrlAsCmd = true, pcKeyboard = false, onZoom, onResize = () => {},
 }) {
   // With iPadOS set to turn the physical ⌘ key into ⌥ (so it can't claim ⌘Tab etc.),
   // swap them back here so the Mac gets the keys the user actually pressed.
@@ -49,7 +52,7 @@ export function attachInput({
   // iPadOS claims these ⌘ shortcuts before any page sees them, so Ctrl+<key> stands in:
   // the Mac receives ⌘ for the rest of that chord (holding Ctrl and tapping Tab cycles apps).
   let remapCtrl = ctrlAsCmd;
-  let remappedCtrl; // the Ctrl keycode currently standing in for ⌘, if any
+  let cmdForCtrl = false; // a Ctrl key stands in for ⌘, until the last one is released
   const CMD = MAC_KEYCODES.MetaLeft;
   const CTRL_KEYCODES = [MAC_KEYCODES.ControlLeft, MAC_KEYCODES.ControlRight];
   const stolenByIPad = (code, shift) =>
@@ -79,6 +82,7 @@ export function attachInput({
   const resize = new ResizeObserver(() => {
     rects.clear();
     drawCursor();
+    onResize();
   });
   const streamOf = (canvas) => Number(canvas.dataset.stream);
   // A display is a canvas (WebTransport) or a <video> (remote, over WebRTC).
@@ -99,6 +103,21 @@ export function attachInput({
 
   // Pointer lock (Capture mouse): relative motion only, the local position means nothing.
   let locked = false;
+
+  // Scrolling goes in the host's desktop points (what a display's `points_width` counts),
+  // so content moves as far as the fingers did whatever size it's shown at. One send a frame.
+  const pointsWidths = []; // stream -> width in desktop points
+  const scrolls = scrollBatcher((a, b) => sendNow(Input.SCROLL, { a, b }));
+  function scrollBy(dx, dy, canvas) {
+    const k = canvas ? pointsPerPx(pointsWidths[streamOf(canvas)] ?? videoSizes[streamOf(canvas)]?.width, contentRect(canvas)?.width) : 1;
+    scrolls.add(dx * k, dy * k);
+  }
+  // Moves don't wait for a pending scroll; clicks and keys go after it.
+  const UNBATCHED = new Set([Input.MOVE, Input.MOVE_BY, Input.PEN]);
+  const send = (kind, fields) => {
+    if (!UNBATCHED.has(kind)) scrolls.flush();
+    sendNow(kind, fields);
+  };
 
   function sendMove(x, y, canvas) {
     if (locked) return;
@@ -150,6 +169,13 @@ export function attachInput({
 
   // ---- Mouse, trackpad and pen: direct mapping ----
 
+  const buttons = new Set(); // pressed on the host by a mouse or pen
+  /** `pointerup` means no button is left down, whichever it names. */
+  function releaseButtons() {
+    for (const button of buttons) send(Input.UP, { button });
+    buttons.clear();
+  }
+
   const moveEvent = 'onpointerrawupdate' in window ? 'pointerrawupdate' : 'pointermove';
   screens.addEventListener(moveEvent, (e) => {
     if (locked) {
@@ -186,6 +212,7 @@ export function attachInput({
     penGone(e);
     if (e.pointerType === 'pen') sendPen(e);
     sendMove(e.clientX, e.clientY, canvas);
+    buttons.add(e.button);
     send(Input.DOWN, { button: e.button });
   });
   screens.addEventListener('pointerup', (e) => {
@@ -193,18 +220,29 @@ export function attachInput({
     if (e.pointerType === 'touch') return trackpad ? tpUp(e) : touchUp(e);
     if (e.pointerType === 'pen') sendPen(e);
     sendMove(e.clientX, e.clientY, canvasOf(e));
-    send(Input.UP, { button: e.button });
+    releaseButtons();
   });
   screens.addEventListener('pointercancel', (e) => {
     if (e.pointerType === 'touch') (trackpad ? tpUp : touchUp)(e, true);
+    else releaseButtons();
     if (e.pointerType === 'pen') sendPen(null);
   });
+  // A pointer that ended away from the screens (capture failed, or the display under it went)
+  // never reaches the handlers above: don't leave it pressed.
+  for (const type of ['pointerup', 'pointercancel']) {
+    window.addEventListener(type, (e) => {
+      if (screens.contains(e.target)) return;
+      if (e.pointerType !== 'touch') releaseButtons();
+      else if (touches.has(e.pointerId)) (trackpad ? tpUp : touchUp)(e, true);
+    }, true);
+  }
   screens.addEventListener('contextmenu', (e) => e.preventDefault());
   screens.addEventListener('wheel', (e) => {
-    const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 400 : 1;
+    const canvas = canvasOf(e);
     // Point at the screen being scrolled first, so the scroll lands on that display.
-    sendMove(e.clientX, e.clientY, canvasOf(e));
-    send(Input.SCROLL, { a: e.deltaX * unit, b: e.deltaY * unit });
+    sendMove(e.clientX, e.clientY, canvas);
+    const { dx, dy } = wheelPixels(e);
+    scrollBy(dx, dy, canvas);
     e.preventDefault();
   }, { passive: false });
 
@@ -243,6 +281,7 @@ export function attachInput({
         if (gesture.scrolling || gesture.done || touches.size !== 1) return;
         // Long press without moving: right-click instead of the pending left press.
         if (gesture.pressed) send(Input.UP, { button: 0 });
+        gesture.pressed = false;
         send(Input.DOWN, { button: 2 });
         send(Input.UP, { button: 2 });
         gesture.done = true;
@@ -311,7 +350,7 @@ export function attachInput({
         zoomTo(start.zoom.s * (spread() / (start.spread || 1)), c, start);
       } else if (gesture.mode === 'scroll') {
         // Natural scrolling: content follows the fingers.
-        send(Input.SCROLL, { a: gesture.last.x - c.x, b: gesture.last.y - c.y });
+        scrollBy(gesture.last.x - c.x, gesture.last.y - c.y, gesture.canvas);
       }
       gesture.last = c;
       return;
@@ -393,11 +432,13 @@ export function attachInput({
     return best.a.canvas;
   }
 
+  /** Sends the cursor's position; returns the picture it's on. */
   function sendCursor() {
     const canvas = placeCursor();
-    if (!canvas) return;
+    if (!canvas) return undefined;
     const c = toClient(cursor);
     sendMove(c.x, c.y, canvas);
+    return canvas;
   }
 
   function drawCursor() {
@@ -487,8 +528,7 @@ export function attachInput({
       if (two.mode === 'zoom') {
         zoomTo(two.zoom.s * (spread() / (two.spread || 1)), c, two);
       } else if (two.mode === 'scroll') {
-        sendCursor();
-        send(Input.SCROLL, { a: two.last.x - c.x, b: two.last.y - c.y });
+        scrollBy(two.last.x - c.x, two.last.y - c.y, sendCursor());
       }
       two.last = c;
       return;
@@ -532,10 +572,25 @@ export function attachInput({
     tp = undefined;
   }
 
-  function setTrackpad(on) {
-    trackpad = on;
-    tp = undefined;
+  /** Ends a gesture cut short: what it pressed on the host doesn't stay pressed. */
+  function endGestures() {
+    clearTimers();
+    if (gesture?.pressed) send(Input.UP, { button: 0 });
+    gesture = undefined;
+    if (tp) {
+      clearTimeout(tp.longTimer);
+      if (tp.dragging) {
+        send(Input.UP, { button: 0 });
+        cursorEl.classList.remove('down');
+      }
+      tp = undefined;
+    }
     touches.clear();
+  }
+
+  function setTrackpad(on) {
+    endGestures();
+    trackpad = on;
     cursorEl.classList.toggle('hidden', !on);
     if (on) {
       placeCursor();
@@ -547,6 +602,8 @@ export function attachInput({
 
   const heldKeys = new Set();
   let pasteHandled = true;
+  let pasteTimer;
+  let pasteSentAt = -Infinity; // when ⌘V last went as a keystroke, no paste event having come
   // Safari fires `paste` only into a focused text field, so ⌘ going down focuses the hidden
   // one until ⌘ is released: ⌘V then pastes this device's clipboard rather than the Mac's own.
   let focusedForPaste = false;
@@ -563,12 +620,30 @@ export function attachInput({
       }
     }
   }
+  function releaseAllKeys() {
+    releaseKeys();
+    cmdForCtrl = false;
+  }
 
   function tapKey(keycode, shift) {
     if (shift) send(Input.KEY_DOWN, { keycode: KVK_SHIFT });
     send(Input.KEY_DOWN, { keycode });
     send(Input.KEY_UP, { keycode });
     if (shift) send(Input.KEY_UP, { keycode: KVK_SHIFT });
+  }
+
+  /**
+   * Typed text: as key presses when each character has a key on a US keyboard (as before),
+   * else as text the host types as is: IME results, emoji, accented letters.
+   */
+  function typeText(text) {
+    if (!text) return;
+    const keys = [...text].map(charToKey);
+    if (keys.every(Boolean)) {
+      for (const key of keys) tapKey(key.keycode, key.shift);
+      return;
+    }
+    for (const bytes of textEvents(text)) send(Input.TEXT, { bytes });
   }
 
   // Typing in Glass's own fields (token prompt, share link) stays local.
@@ -585,7 +660,8 @@ export function attachInput({
       onLocalShortcut(e.code);
       return;
     }
-    if (e.isComposing) return;
+    // An IME is composing (229: the key that starts it): the result comes as compositionend.
+    if (e.isComposing || e.keyCode === 229) return;
     const code = codeOf(e);
     const keycode = MAC_KEYCODES[code];
     // On-screen keyboards often report no code; their text arrives via beforeinput.
@@ -603,8 +679,11 @@ export function attachInput({
       // the Mac pastes what's on this device's clipboard. Without a focused text field some
       // browsers never fire it, so fall back to sending ⌘V as a plain keystroke.
       pasteHandled = false;
-      setTimeout(() => {
+      pasteSentAt = -Infinity;
+      clearTimeout(pasteTimer);
+      pasteTimer = setTimeout(() => {
         if (pasteHandled) return;
+        pasteSentAt = performance.now();
         log('info', 'paste: no paste event, sent ⌘V as a keystroke', { focused: document.activeElement === keySink });
         send(Input.KEY_DOWN, { keycode });
         send(Input.KEY_UP, { keycode });
@@ -622,14 +701,13 @@ export function attachInput({
     }
 
     e.preventDefault();
-    if (macHost && remapCtrl && !pc && !remappedCtrl && e.ctrlKey && !cmdHeld(e) && stolenByIPad(code, e.shiftKey)) {
-      // Swap the Ctrl the Mac already sees for ⌘, until Ctrl is released.
+    if (macHost && remapCtrl && !pc && !cmdForCtrl && e.ctrlKey && !cmdHeld(e) && stolenByIPad(code, e.shiftKey)) {
+      // Swap the Ctrl the Mac already sees (it may see none: held since before this page had
+      // focus) for ⌘, until Ctrl is released.
       for (const ctrl of CTRL_KEYCODES) {
-        if (heldKeys.delete(ctrl)) {
-          send(Input.KEY_UP, { keycode: ctrl });
-          remappedCtrl = ctrl;
-        }
+        if (heldKeys.delete(ctrl)) send(Input.KEY_UP, { keycode: ctrl });
       }
+      cmdForCtrl = true;
       heldKeys.add(CMD);
       send(Input.KEY_DOWN, { keycode: CMD });
     }
@@ -644,8 +722,9 @@ export function attachInput({
     const keycode = MAC_KEYCODES[code];
     if (keycode === undefined) return;
     e.preventDefault();
-    if (keycode === remappedCtrl) {
-      remappedCtrl = undefined;
+    if (cmdForCtrl && CTRL_KEYCODES.includes(keycode)) {
+      if (e.ctrlKey) return; // the other Ctrl is still down
+      cmdForCtrl = false;
       if (heldKeys.delete(CMD)) send(Input.KEY_UP, { keycode: CMD });
       return;
     }
@@ -656,8 +735,8 @@ export function attachInput({
   });
 
   window.addEventListener('blur', () => {
-    releaseKeys();
-    remappedCtrl = undefined;
+    releaseAllKeys();
+    releaseButtons();
     unfocusAfterPaste();
   });
 
@@ -665,6 +744,12 @@ export function attachInput({
     if (localField(e.target)) return;
     e.preventDefault();
     pasteHandled = true;
+    clearTimeout(pasteTimer);
+    if (performance.now() - pasteSentAt < LATE_PASTE_MS) {
+      pasteSentAt = -Infinity;
+      log('info', 'paste: came after ⌘V went as a keystroke, not pasting twice');
+      return;
+    }
     const data = e.clipboardData;
     const text = data?.getData('text/plain') ?? '';
     const html = data?.getData('text/html') || undefined;
@@ -675,17 +760,29 @@ export function attachInput({
     else control({ t: 'clipboard', text, paste: true });
   });
 
+  // An IME (Chinese, Japanese, Korean; Android keyboards for every word) composes in the
+  // key sink, which can't be stopped; what it settles on is typed, and the field emptied.
+  let composed; // { text, at }: Safari can follow compositionend with the same insertText
+  keySink.addEventListener('compositionend', (e) => {
+    typeText(e.data);
+    composed = { text: e.data, at: performance.now() };
+    keySink.value = '';
+  });
+
   // On-screen keyboard text (and anything else that bypassed keydown).
   keySink.addEventListener('beforeinput', (e) => {
+    // Composition steps can't be cancelled; compositionend types the result.
+    if (e.isComposing || /Composition/.test(e.inputType)) return;
     e.preventDefault();
     switch (e.inputType) {
       case 'insertText':
-      case 'insertReplacementText':
-        for (const ch of e.data ?? '') {
-          const key = charToKey(ch);
-          if (key) tapKey(key.keycode, key.shift);
-        }
+      case 'insertReplacementText': {
+        const text = e.data ?? e.dataTransfer?.getData('text/plain') ?? '';
+        const again = composed && composed.text === text && performance.now() - composed.at < 100;
+        composed = undefined;
+        if (!again) typeText(text);
         break;
+      }
       case 'insertLineBreak':
       case 'insertParagraph':
         tapKey(MAC_KEYCODES.Enter, false);
@@ -701,6 +798,8 @@ export function attachInput({
 
   return {
     setTrackpad,
+    /** A display's picture in client pixels (letterboxed), or undefined before its size is known. */
+    contentRect,
     /** The displays changed size or layout: keep the trackpad cursor on a picture. */
     refreshCursor() {
       if (!trackpad) return;
@@ -714,6 +813,11 @@ export function attachInput({
     sendCombo(keycodes) {
       for (const keycode of keycodes) send(Input.KEY_DOWN, { keycode });
       for (const keycode of [...keycodes].reverse()) send(Input.KEY_UP, { keycode });
+    },
+    /** The streamed displays (index = stream), for their size in desktop points. */
+    setStreams(streams) {
+      pointsWidths.length = 0;
+      streams.forEach((d, i) => { pointsWidths[i] = d.points_width; });
     },
     setVideoSize(stream, width, height) {
       videoSizes[stream] = { width, height };
@@ -729,22 +833,19 @@ export function attachInput({
     focusKeys,
     resetZoom,
     setCtrlAsCmd(on) {
-      releaseKeys();
-      remappedCtrl = undefined;
+      releaseAllKeys();
       remapCtrl = on;
     },
     setHostOs(os) {
-      releaseKeys();
-      remappedCtrl = undefined;
+      releaseAllKeys();
       macHost = os === 'macos';
     },
     setPcKeyboard(on) {
-      releaseKeys();
-      remappedCtrl = undefined;
+      releaseAllKeys();
       pc = on;
     },
     setSwapCmdOption(on) {
-      releaseKeys();
+      releaseAllKeys();
       swap = on;
     },
   };

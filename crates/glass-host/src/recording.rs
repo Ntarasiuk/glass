@@ -31,6 +31,32 @@ pub struct Recording {
     /// The first file; later parts sit next to it.
     pub path: PathBuf,
     state: Arc<Mutex<Option<Recorder>>>,
+    made: Arc<Mutex<Made>>,
+}
+
+/// What a recording wrote.
+#[derive(Debug, Clone, Default)]
+pub struct Made {
+    /// The files, in order (none when no keyframe ever came).
+    pub files: Vec<PathBuf>,
+    /// HEVC frames came, and were left out.
+    pub hevc: bool,
+    /// It stopped by itself, for this reason (what's in `files` ends there).
+    pub error: Option<String>,
+}
+
+impl Recording {
+    /// Still recording: writing to the file can fail, and that ends it.
+    pub fn running(&self) -> bool {
+        self.state.lock().unwrap().is_some()
+    }
+
+    /// Ends the recording and says what it wrote.
+    pub fn finish(self) -> Made {
+        let made = self.made.clone();
+        drop(self);
+        made.lock().unwrap().clone()
+    }
 }
 
 impl Drop for Recording {
@@ -43,26 +69,26 @@ impl Drop for Recording {
     }
 }
 
-/// Starts recording what's streamed, for `who`.
-pub fn start(who: &str) -> Result<Recording> {
-    let shared = crate::server::shared().context("the host isn't ready yet")?;
+/// Starts recording what's streamed, for `who`. `stopped` hears if it ends by itself: the
+/// first file and why.
+pub fn start(who: &str, stopped: impl FnOnce(PathBuf, String) + Send + 'static) -> Result<Recording> {
     let settings = crate::settings::load();
-    let dir = crate::settings::recordings_dir(&settings);
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let base = format!("Glass {} {}", local_stamp(), sanitize(who));
-    let path = crate::control::unique_path(&dir, &format!("{base}.mp4"));
-    let recorder = Recorder {
-        dir,
-        base,
-        first: path.clone(),
-        part: 1,
-        file: None,
-        warned_hevc: false,
-    };
+    start_in(&crate::settings::recordings_dir(&settings), who, stopped)
+}
+
+/// Starts recording what's streamed into `dir`, for `who`.
+pub fn start_in(dir: &Path, who: &str, stopped: impl FnOnce(PathBuf, String) + Send + 'static) -> Result<Recording> {
+    let shared = crate::server::shared().context("the host isn't ready yet")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let (mut recorder, made) = Recorder::new(dir, who);
+    let path = recorder.first.clone();
+    // Before the first keyframe is asked for, so the recording starts with the pointer in.
+    recorder._cursor = Some(crate::cursor::bake());
     let state = Arc::new(Mutex::new(Some(recorder)));
     let mut frames = shared.frames.subscribe();
     shared.video.request_keyframe(Some(0));
     let thread_state = state.clone();
+    let (thread_made, first) = (made.clone(), path.clone());
     std::thread::Builder::new()
         .name("recording".into())
         .spawn(move || {
@@ -86,12 +112,16 @@ pub fn start(who: &str) -> Result<Recording> {
                     if let Some(r) = guard.take() {
                         r.finish();
                     }
+                    drop(guard);
+                    let why = format!("{e:#}");
+                    thread_made.lock().unwrap().error = Some(why.clone());
+                    stopped(first, why);
                     return;
                 }
             }
         })?;
     tracing::info!("recording to {}", path.display());
-    Ok(Recording { path, state })
+    Ok(Recording { path, state, made })
 }
 
 struct Recorder {
@@ -101,9 +131,20 @@ struct Recorder {
     part: u32,
     file: Option<Mp4Writer>,
     warned_hevc: bool,
+    made: Arc<Mutex<Made>>,
+    /// The file records the video as sent: the pointer has to be in it for as long as this is.
+    _cursor: Option<crate::cursor::Bake>,
 }
 
 impl Recorder {
+    fn new(dir: &Path, who: &str) -> (Self, Arc<Mutex<Made>>) {
+        let base = format!("Glass {} {}", local_stamp(), sanitize(who));
+        let first = crate::control::unique_path(dir, &format!("{base}.mp4"));
+        let made = Arc::new(Mutex::new(Made::default()));
+        let r = Recorder { dir: dir.to_path_buf(), base, first, part: 1, file: None, warned_hevc: false, made: made.clone(), _cursor: None };
+        (r, made)
+    }
+
     fn frame(&mut self, frame: &EncodedFrame) -> Result<()> {
         if frame.stream != 0 {
             return Ok(());
@@ -111,6 +152,7 @@ impl Recorder {
         if frame.hevc {
             if !self.warned_hevc {
                 self.warned_hevc = true;
+                self.made.lock().unwrap().hevc = true;
                 tracing::warn!("recording: HEVC frames aren't recorded (H.264 only)");
             }
             return Ok(());
@@ -136,6 +178,7 @@ impl Recorder {
                 crate::control::unique_path(&self.dir, &format!("{} part {}.mp4", self.base, self.part))
             };
             self.file = Some(Mp4Writer::create(&path, sps, pps)?);
+            self.made.lock().unwrap().files.push(path);
         }
         let w = self.file.as_mut().unwrap();
         if w.waiting_for_keyframe && !frame.keyframe {
@@ -673,6 +716,26 @@ mod tests {
             }
             _ => eprintln!("ffprobe not found; skipped the decode check"),
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn says_what_it_wrote() {
+        let dir = std::env::temp_dir().join(format!("glass-rec-made-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut r, made) = Recorder::new(&dir, "an agent");
+        // HEVC is left out, and said so; then H.264 makes one file.
+        let hevc = EncodedFrame { stream: 0, data: vec![0, 0, 1, 0x40], keyframe: true, capture_us: 0, hevc: true, refresh: false };
+        r.frame(&hevc).unwrap();
+        for (n, (data, keyframe)) in frames(10).into_iter().enumerate() {
+            let f = EncodedFrame { stream: 0, data, keyframe, capture_us: n as u64 * 33_333, hevc: false, refresh: false };
+            r.frame(&f).unwrap();
+        }
+        r.finish();
+        let made = made.lock().unwrap().clone();
+        assert!(made.hevc);
+        assert_eq!(made.files.len(), 1);
+        assert!(std::fs::metadata(&made.files[0]).unwrap().len() > 1000);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

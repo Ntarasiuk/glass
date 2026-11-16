@@ -59,6 +59,8 @@ fn info_plist() -> String {
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSLocalNetworkUsageDescription</key><string>Glass finds your other computers on this network, and lets them find this one.</string>
+  <key>NSBonjourServices</key><array><string>_glass._tcp</string></array>
 </dict>
 </plist>
 "#,

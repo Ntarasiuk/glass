@@ -20,7 +20,10 @@ struct Viewer {
 
 static VIEWERS: Mutex<Option<HashMap<u64, Viewer>>> = Mutex::new(None);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// 4:2:2 is in use (the encoders may have turned it down).
 static REXT: AtomicBool = AtomicBool::new(false);
+/// What the encoders were last asked for: (text policy, 4:2:2).
+static ASKED: Mutex<(bool, bool)> = Mutex::new((false, false));
 
 /// What the encoders should do: (stricter text policy, HEVC 4:2:2).
 pub fn decide(viewers: &[(bool, bool)], hevc_on: bool, encoder_rext: bool) -> (bool, bool) {
@@ -84,24 +87,29 @@ pub fn session_on(session: u64) -> bool {
         .is_some_and(|v| v.on)
 }
 
-/// Re-decides after a change (viewers, their choice, or the codec).
+/// Re-decides after a change (viewers, their choice, or the codec). Restarting encoders blocks
+/// on ScreenCaptureKit.
 pub fn recompute() {
+    if let Some(shared) = crate::server::shared() {
+        crate::media::reconfigure(move || apply(&shared));
+    }
+}
+
+fn apply(shared: &crate::server::Shared) {
     let viewers: Vec<(bool, bool)> = VIEWERS
         .lock()
         .unwrap()
         .as_ref()
         .map(|m| m.values().map(|v| (v.on, v.can_rext)).collect())
         .unwrap_or_default();
-    let Some(shared) = crate::server::shared() else {
-        return;
-    };
     let hevc_on = crate::codec::current() == "hevc";
     let (sharp, rext) = decide(&viewers, hevc_on, shared.video.supports_rext());
-    let changed = ACTIVE.swap(sharp, Ordering::Relaxed) != sharp
-        | (REXT.load(Ordering::Relaxed) != rext);
-    if !changed {
+    // Against what was asked, not what's in use: encoders that turned 4:2:2 down would otherwise
+    // be restarted to be asked again on every change.
+    if std::mem::replace(&mut *ASKED.lock().unwrap(), (sharp, rext)) == (sharp, rext) {
         return;
     }
+    ACTIVE.store(sharp, Ordering::Relaxed);
     if crate::testmode::enabled() {
         crate::testmode::record("sharp", serde_json::json!({ "on": sharp, "rext": rext }));
     }
@@ -115,15 +123,12 @@ pub fn recompute() {
             "off"
         }
     );
-    // Restarting encoders blocks on ScreenCaptureKit; the policy change is immediate.
-    std::thread::spawn(move || {
-        // Full-colour capture, so a still screen can also go out losslessly (4:4:4).
-        shared.video.set_full_colour(sharp);
-        let used = shared.video.set_rext(rext);
-        REXT.store(used, Ordering::Relaxed);
-        crate::server::reapply_policy();
-        let _ = shared.events.send(crate::control::ServerMsg::Sharp { mode: mode() });
-    });
+    // Full-colour capture, so a still screen can also go out losslessly (4:4:4).
+    shared.video.set_full_colour(sharp);
+    let used = shared.video.set_rext(rext);
+    REXT.store(used, Ordering::Relaxed);
+    crate::server::reapply_policy();
+    let _ = shared.events.send(crate::control::ServerMsg::Sharp { mode: mode() });
 }
 
 #[cfg(test)]

@@ -1,10 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/glass-proto", "crates/glass-host"]
+members = ["crates/glass-proto", "crates/glass-host", "crates/glass-gst"]
+# glass-gst needs the GStreamer development files; build it with `-p glass-gst`.
+default-members = ["crates/glass-proto", "crates/glass-host"]
 
 [workspace.package]
 edition = "2024"
-version = "0.13.1"
+version = "0.15.3"
 license = "MIT"
 repository = "https://github.com/Ntarasiuk/glass"
 

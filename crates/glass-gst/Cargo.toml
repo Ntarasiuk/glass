@@ -1,0 +1,18 @@
+[package]
+name = "glass-gst"
+description = "GStreamer for the Glass host's GPU encoders, loaded at run time"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A shared library the host opens with dlopen (libglass_gst.so), so the host itself
+# doesn't link GStreamer and starts without it; GPU encoding needs both.
+[lib]
+crate-type = ["cdylib"]
+
+# Linux only (the host's GPU encoders); elsewhere it builds empty.
+[target.'cfg(target_os = "linux")'.dependencies]
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-video = "0.25"

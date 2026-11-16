@@ -42,7 +42,26 @@ pub enum ClientMsg {
         /// The browser's user agent, for device posture checks.
         #[serde(default)]
         ua: Option<String>,
+        /// The viewer draws the pointer itself (`cursor` messages, KIND_CURSOR datagrams)
+        /// rather than needing it in the video. See `crate::cursor`.
+        #[serde(default)]
+        cursor: bool,
+        /// The viewer acknowledges frames (KIND_FRAME_ACK), so its bitrate comes from those
+        /// from the start, not from its reports. See `rate::AckRate`.
+        #[serde(default)]
+        acks: bool,
+        /// Nothing to show (no token, link or pass): ask the person at the computer. Only
+        /// from the same network. See `crate::nearby`.
+        #[serde(default)]
+        ask: bool,
+        /// Nothing to show, but a secret the owner's passkey may say yes to (through
+        /// glassdesk.dev/computers): see `crate::actions`.
+        #[serde(default)]
+        grant: Option<String>,
     },
+    /// The viewer now draws the pointer itself, or (trackpad mode, which has its own) wants
+    /// it back in the video.
+    LocalCursor { on: bool },
     /// The browser's answer to a `passkey` request (WebAuthn), all fields base64url.
     Passkey(crate::passkey::Response),
     /// A chat message to the host and the other viewers.
@@ -111,8 +130,11 @@ pub enum ClientMsg {
         #[serde(default)]
         paste: bool,
     },
-    /// Send the host clipboard's image (a `STREAM_CLIPBOARD` stream back).
-    ClipboardImage,
+    /// Send the host clipboard's image (a `STREAM_CLIPBOARD` stream back, with this `id`).
+    ClipboardImage {
+        #[serde(default)]
+        id: Option<u32>,
+    },
     /// Opens a file chooser on the Mac; chosen files are streamed back.
     PickFiles,
     /// Start or stop sending system audio to this session.
@@ -151,6 +173,9 @@ pub enum ClientMsg {
         path: String,
         #[serde(default)]
         hidden: bool,
+        /// Comes back on the listing: they can answer out of order.
+        #[serde(default)]
+        req: Option<u32>,
     },
     /// Send this file (as a file stream, like picked files).
     FilesFetch { path: String },
@@ -188,8 +213,18 @@ pub enum ServerMsg {
     },
     /// Waiting for the person at the computer to allow this connection.
     Waiting { msg: String },
-    /// Not let in; the client stops retrying until the user asks again.
-    Denied { msg: String },
+    /// Waiting for the owner's passkey: the viewer opens glassdesk.dev/computers, which asks
+    /// for it and tells this computer (`host`, its id there).
+    AccountPasskey { host: String },
+    /// Not let in; the client stops retrying until the user asks again. `ended`: its pass
+    /// went with the answer, so asking again can't work.
+    Denied {
+        msg: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        ended: bool,
+    },
+    /// The answer to asking for a second display: `on` if it's up and showing.
+    Extended { on: bool },
     /// Something worth a (non-error) toast.
     Notice { msg: String },
     /// A folder in the file browser (`error` instead when it can't be read). `ticket`
@@ -200,6 +235,9 @@ pub enum ServerMsg {
         truncated: bool,
         ticket: String,
         error: Option<String>,
+        /// The request this answers; none when a change in the folder prompted it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req: Option<u32>,
     },
     FilesThumb { path: String, data: Option<String> },
     /// The microphone driver just got installed: the mic works now.
@@ -286,6 +324,18 @@ pub enum ServerMsg {
         name: String,
         path: String,
     },
+    /// The pointer's image (to viewers drawing it themselves): `id` is what datagrams name,
+    /// `w`×`h` straight RGBA (base64) at `scale` pixels to a point, hotspot `hx`, `hy` in
+    /// pixels.
+    Cursor {
+        id: u32,
+        w: u32,
+        h: u32,
+        hx: u32,
+        hy: u32,
+        scale: f32,
+        rgba: String,
+    },
     Error {
         msg: String,
     },
@@ -340,14 +390,20 @@ pub struct Features {
     pub lossless: bool,
     /// The key browsers subscribe to notifications with (VAPID, base64url).
     pub push: Option<String>,
+    /// Sends lost fragments again when asked (`KIND_NACK`).
+    pub nack: bool,
     /// The file browser (owners with files allowed).
     pub browse: bool,
     /// The viewer can become a second display ("Use as a second display").
     pub extend: bool,
+    /// It answers `Extend` with `Extended`, so an unrelated error doesn't read as a failure.
+    pub extend_ack: bool,
     /// The host's desktop can be reshaped to the viewer's screen ("Fit this device", macOS).
     pub fit: bool,
     /// A quick-support session (`glass support`): the viewer is someone helping.
     pub support: bool,
+    /// The viewer may draw the pointer itself (`localCursor`).
+    pub cursor: bool,
 }
 
 /// Header that follows the `STREAM_FILE` tag in either direction.
@@ -359,6 +415,10 @@ pub struct FileHeader {
     /// Downloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
+    /// host -> client: a folder zipped as it's sent, so `size` isn't known (0). It's
+    /// complete when the stream ends with the zip's end record.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub streamed: bool,
 }
 
 pub async fn read_json<T: for<'de> Deserialize<'de>>(stream: &mut RecvStream) -> Result<Option<T>> {
@@ -499,6 +559,28 @@ pub fn unique_path(dir: &Path, name: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answers_stay_the_same_for_older_viewers_unless_they_asked() {
+        let v = |m: &ServerMsg| serde_json::to_value(m).unwrap();
+        let denied = v(&ServerMsg::Denied { msg: "no".into(), ended: false });
+        assert_eq!(denied, serde_json::json!({ "t": "denied", "msg": "no" }));
+        assert_eq!(v(&ServerMsg::Denied { msg: "no".into(), ended: true })["ended"], true);
+        let files = |req| ServerMsg::Files { path: "a".into(), entries: Vec::new(), truncated: false, ticket: String::new(), error: None, req };
+        assert!(v(&files(None)).get("req").is_none());
+        assert_eq!(v(&files(Some(3)))["req"], 3);
+        assert_eq!(v(&ServerMsg::Extended { on: false }), serde_json::json!({ "t": "extended", "on": false }));
+    }
+
+    #[test]
+    fn requests_without_an_id_still_parse() {
+        let image: ClientMsg = serde_json::from_str(r#"{"t":"clipboardImage"}"#).unwrap();
+        assert!(matches!(image, ClientMsg::ClipboardImage { id: None }));
+        let image: ClientMsg = serde_json::from_str(r#"{"t":"clipboardImage","id":4}"#).unwrap();
+        assert!(matches!(image, ClientMsg::ClipboardImage { id: Some(4) }));
+        let list: ClientMsg = serde_json::from_str(r#"{"t":"filesList","path":"a"}"#).unwrap();
+        assert!(matches!(list, ClientMsg::FilesList { req: None, .. }));
+    }
 
     #[test]
     fn token_validation() {

@@ -31,7 +31,7 @@ New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
     Info 'Downloading Glass for this session (nothing is installed)'
     $zip = Join-Path $tmp 'glass.zip'
-    try { Invoke-WebRequest -UseBasicParsing -Uri "$Base/releases/$Archive" -OutFile $zip }
+    try { Invoke-WebRequest -UseBasicParsing -Headers @{ 'X-Glass-Via' = 'quick-support' } -Uri "$Base/releases/$Archive" -OutFile $zip }
     catch { Fail 'Download failed. Check your connection and try again.' }
     try { $sum = (Invoke-WebRequest -UseBasicParsing -Uri "$Base/releases/$Archive.sha256").Content }
     catch { Fail "Couldn't fetch the checksum." }

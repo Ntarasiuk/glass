@@ -12,7 +12,7 @@ function storage(fn) {
   try { return fn(localStorage); } catch { return undefined; }
 }
 
-export function createDevice({ ui, push, control, log, input, screens, streams, displays, onPause, onPressure, standalone, sendClip = (c) => control({ t: 'clipboard', text: c.text }) }) {
+export function createDevice({ ui, push, control, log, input, screens, streams, displays, onPause, onPressure, onFloatWindow = () => {}, standalone, sendClip = (c) => control({ t: 'clipboard', text: c.text }) }) {
   const touch = matchMedia('(hover: none)').matches;
   let connected = false;
   let installPrompt; // Chromium's beforeinstallprompt, kept for the menu
@@ -50,20 +50,13 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
   // ---- Keep the screen awake while watching ----
 
   let awake = storage((s) => s.getItem(AWAKE_KEY)) !== '0';
-  let wakeLock;
-  async function holdAwake() {
-    if (!('wakeLock' in navigator) || !awake || !connected || document.visibilityState !== 'visible' || wakeLock) return;
-    try {
-      wakeLock = await navigator.wakeLock.request('screen');
-      wakeLock.addEventListener('release', () => { wakeLock = undefined; });
-    } catch (e) {
-      log('info', `wake lock: ${e.message ?? e}`);
-    }
-  }
-  function releaseAwake() {
-    wakeLock?.release().catch(() => {});
-    wakeLock = undefined;
-  }
+  const wakeLock = wakeHolder({
+    request: () => navigator.wakeLock.request('screen'),
+    wanted: () => 'wakeLock' in navigator && awake && connected && document.visibilityState === 'visible',
+    log,
+  });
+  const holdAwake = () => wakeLock.hold();
+  const releaseAwake = () => wakeLock.release();
 
   // ---- Picture in picture ----
 
@@ -74,6 +67,7 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
   // A canvas floats as a <video> of its live picture. Safari starts picture in picture only
   // within the tap and only once the video has a frame, so it's readied when the menu opens.
   let pipIdle;
+  let pipOpening = false; // a Document Picture-in-Picture window is on its way
   function preparePip() {
     const el = streams()[0];
     if ('documentPictureInPicture' in window || !document.pictureInPictureEnabled || !(el instanceof HTMLCanvasElement)) return;
@@ -99,6 +93,7 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
   }
 
   async function pictureInPicture() {
+    if (pipOpening) return;
     if (pipWindow) return pipWindow.close();
     if (document.pictureInPictureElement) return document.exitPictureInPicture();
     const el = streams()[0];
@@ -107,7 +102,9 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
       if ('documentPictureInPicture' in window) {
         const r = el.getBoundingClientRect();
         const width = Math.min(640, Math.round(r.width / 2)) || 480;
-        pipWindow = await documentPictureInPicture.requestWindow({ width, height: Math.round(width * (r.height / r.width || 0.625)) });
+        pipOpening = true;
+        pipWindow = await documentPictureInPicture.requestWindow({ width, height: Math.round(width * (r.height / r.width || 0.625)) }).finally(() => { pipOpening = false; });
+        onFloatWindow(true);
         const style = pipWindow.document.createElement('style');
         style.textContent = 'html,body{margin:0;height:100%;background:#000;overflow:hidden}#screens{position:fixed;inset:0;display:flex;gap:2px}#screens>canvas,#screens>video{flex:1 1 0;min-width:0;width:100%;height:100%;object-fit:contain;outline:none}#screens>.hidden{display:none}';
         pipWindow.document.head.append(style);
@@ -117,6 +114,7 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
         pipWindow.addEventListener('pagehide', () => {
           home.insertBefore(screens, next);
           pipWindow = undefined;
+          onFloatWindow(false);
           render();
         });
       } else if (el instanceof HTMLVideoElement) {
@@ -252,12 +250,16 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
 
   let pauseAway = storage((s) => s.getItem(AWAY_KEY)) === '1';
   let idleAbort;
+  let idleWatches = 0; // which watchIdle is the latest
   async function watchIdle() {
+    const watch = ++idleWatches;
     idleAbort?.abort();
     idleAbort = undefined;
     if (!pauseAway || !('IdleDetector' in window)) return;
     try {
       if ((await IdleDetector.requestPermission()) !== 'granted') throw new Error('not allowed');
+      // Turned off (or on again) while the browser was asking.
+      if (watch !== idleWatches) return;
       const detector = new IdleDetector();
       idleAbort = new AbortController();
       detector.addEventListener('change', () => {
@@ -268,6 +270,7 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
       });
       await detector.start({ threshold: 10 * 60_000, signal: idleAbort.signal });
     } catch (e) {
+      if (watch !== idleWatches) return;
       pauseAway = false;
       storage((s) => s.setItem(AWAY_KEY, '0'));
       ui.toast({ text: `Can't tell when you're away: ${e.message ?? e}`, kind: 'error' });
@@ -460,6 +463,38 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
       if (on) holdAwake();
       else releaseAwake();
       render();
+    },
+  };
+}
+
+/**
+ * Keeps a screen wake lock while `wanted()`. The browser's answer takes a moment, and the
+ * reason for asking can be gone by the time it comes.
+ */
+export function wakeHolder({ request, wanted, log }) {
+  let lock;
+  let asking = false;
+  return {
+    async hold() {
+      if (lock || asking || !wanted()) return;
+      asking = true;
+      try {
+        const got = await request();
+        if (!wanted()) {
+          got.release().catch(() => {});
+          return;
+        }
+        lock = got;
+        got.addEventListener('release', () => { if (lock === got) lock = undefined; });
+      } catch (e) {
+        log('info', `wake lock: ${e.message ?? e}`);
+      } finally {
+        asking = false;
+      }
+    },
+    release() {
+      lock?.release().catch(() => {});
+      lock = undefined;
     },
   };
 }

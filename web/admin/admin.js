@@ -61,10 +61,14 @@ function scopeText(s) {
   return parts.length ? parts.join(', ') : 'full control';
 }
 
+let refreshes = 0;
 async function refresh() {
+  const mine = ++refreshes;
   let state;
   try {
     state = await api('state');
+    // One asked for since has newer news (it can answer first): only that one draws.
+    if (mine !== refreshes) return;
   } catch (e) {
     if (e.status === 403) {
       $('denied').classList.remove('hidden');

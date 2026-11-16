@@ -4,12 +4,146 @@ What changed in each release of Glass. `glass update` (or the Glass app) install
 
 ## Unreleased
 
-- Your own tailnet devices connect without a token even when Tailscale isn't ready when Glass starts (common right after signing in to Windows). Glass checks again on the next connection and then remembers the owner. For a minute and a half after startup, a viewer who didn't bring a token or a link reconnects instead of seeing the token screen.
+## 0.15.3
+
+November 16, 2026
+
+- **The Glass app's access-token field can be clicked and typed into.** When a computer asked for its token, the screen area behind the field took every click and keystroke, so nothing could be entered. The field now has the keyboard as soon as it appears, and the keys go to the other computer only once its screen is showing.
+- **Machines always shows On this network.** With nothing found the section was hidden, so it looked as if it wasn't there; it now says what a computer needs to appear (Glass 0.15.2 or newer, the same network, no VPN in the way).
+- The same prompt says how to use your passkey instead: update Glass on that computer and press Let your passkey open this computer on its Home page.
+
+## 0.15.2
+
+November 16, 2026
+
+### Computers on the same network
+
+- **Glass finds the other computers on your network by itself: no Tailscale, no address to type.** A host announces itself the way a printer does (mDNS, `_glass._tcp`), and the Glass app lists what it hears under Machines → On this network. `glass nearby` lists them in a terminal.
+- Being found isn't being let in. The first time you connect, the person at that computer sees which device is asking and allows it (the prompt on screen, the Glass app, or `glass allow`); the device then keeps its own pass for 30 days, like one a link gives, listed under Links to revoke. Only a device on the same subnet can ask; a "no" keeps that address from asking again for ten minutes, and one device asks at a time. Your tailnet devices, the token and links work as before.
+- `glass config nearby off` (or Settings → Found on this network) stops both the announcing and the asking. Turning guest links off by policy stops the asking too.
+- Connecting from the browser to a computer that isn't on your tailnet still takes a link: browsers need HTTPS, which a bare network address doesn't have.
+
+### Your account, in the Glass app
+
+- **Sign the Glass app in to your glassdesk.dev account and it lists your account's computers, to open from anywhere in the app's own viewer.** Press Sign in with a passkey (Home, Machines or Settings): your browser opens, where your passkey is, and you say yes. Machines → On your account then shows each computer and whether it's online. In a terminal: `glass account sign-in`, `glass account list`, `glass account sign-out`.
+- The app's sign-in can only read that list: no details, no actions, no changes to the account. The website shows which apps are signed in, to sign any of them out.
+
+### Your passkey opens your computers
+
+- **The Glass app opens your computers with your passkey, no access token.** Adding a computer to your glassdesk.dev account (Add this computer in Glass, or `glass account add`) also pins the account's passkeys on that computer. Connect to it from the Glass app on another computer and your browser opens for a passkey confirmation (your fingerprint, face or PIN); the screen then opens, and that app keeps a pass for 30 days.
+- The computer checks the passkey's signature itself, against what it pinned from a link made on the computer: glassdesk.dev passes the signed yes along and can't make one. A device let in this way is a guest, as with a link (screen, keyboard, files, clipboard); the access token still gives full access.
+- A computer that was on your account already pins nothing until you press Add this computer on it again (Home shows "Let your passkey open this computer"). Until then, and for computers on older versions, the app asks for the computer's access token once and remembers it.
+- `glass config account-open off` (or Settings → Your passkey opens this computer) turns it off; `glass account remove` forgets the pinned passkeys.
+
+### The Glass app
+
+- **Home starts with your computers.** Sign in to your glassdesk.dev account, or add this computer to it in one click: Glass makes the one-time link and opens it, and you sign in there with a passkey (Reach from anywhere goes on if it was off). Once the app is signed in, it knows whether this computer is on the account already. Next to it: the command that sets Glass up on another computer, to copy; the computers found on this network, to connect to; Machines; and a link for someone else.
+- Settings is in order: Who can connect (with the access token and your account, to add or remove this computer), While someone's connected, Video and recording, AI agents, Notifications, Appearance (text size and the viewer's name and colour), Network, and Glass (version, service, logs, feedback, turning it off). Nothing was removed.
+
+### Fixes
+
+- A host with a Tailscale certificate starts again: the certificate check added after 0.15.0 only read keys in PKCS#8 form, and `tailscale cert` writes them in SEC1.
+- **A host that ran for more than two weeks without `--cert` couldn't be connected to until it was restarted.** Its self-signed WebTransport certificate (which browsers accept for 14 days at most) is now renewed while the host runs, by the wall clock so a sleeping computer doesn't miss it; sessions carry on, and an open page picks up the new one.
+- A guest told no for good no longer sees "You're in" or gets offered "Ask again" with a pass that's gone.
+- A decoder fallback chosen with `?decoder=` stays across loads instead of repeating the decoder's errors each session.
+
+### Reliability
+
+- States that could get stuck, race or outlive what they belonged to, in the host and the viewer: sessions, approvals, agents (a stopped agent stays stopped until allowed), files, game controllers, the microphone, WebRTC and notifications. A drag always lets go of the button.
+- **Mac:** a capture that's replaced goes live only once the new one has started, so a failed start keeps the picture; window streams that end restart; a capture stopped from the Mac's recording indicator stays stopped until a viewer picks again. Held keys and the pen are released when a session ends.
+- **Windows:** the sign-in screen's helper and the host's encoders hand over on a keyframe; a hardware encoder that fails falls back for that display and is tried again later; the service and the tray app restart themselves with a growing wait.
+- **Linux:** a screen share that ends can be got back (it rejoins and restores the layout), the share dialog no longer blocks listing monitors, sound reconnects, and paste keeps a held Ctrl.
+- glassdesk.dev: a host's signed request works once, and claim links can't be used twice by two browsers at the same moment.
+
+### Linux
+
+- **NVIDIA GPUs encode with NVENC**, next to VA-API: `GLASS_ENCODER=vaapi`, `nvenc` or `gpu` (the first that works). On a 3440x1440 screen at 60 fps it took about a quarter of a core, against one and a half for OpenH264 at half the size.
+- The host no longer links GStreamer, so it starts on computers without it. When the GPU is asked for and something is missing, startup says what and the command that installs it for your distribution, and Glass encodes with OpenH264.
+- VA-API: a viewer joining or recovering gets a real keyframe at once instead of waiting for the next periodic one.
+
+## 0.15.1
+
+November 16, 2026
+
+Security fixes. Update if you run Glass on Windows.
+
+- **Windows:** a viewer waiting to be let in could run commands on the host with a crafted device name. When Glass asks the person at the computer first (`glass config ask-guests on`, `ask-everyone on`, or a link made with `--ask`), the name went into the prompt's PowerShell with a curly quote PowerShell reads as the end of the string. Every string Glass hands PowerShell now has all its quote characters escaped.
+- **Windows:** a guest sending files could save them outside Downloads, on another drive, with a name like `D:/folder/file`. A `:` in a sent name now becomes `_`.
+- Device names shown in prompts and the viewer list lose invisible characters (text-direction overrides, zero-width spaces) that could make one device look like another.
+- The browser log the page sends (`POST /log`, which needs no sign-in) is capped per request and starts over past 8 MB, so it can't fill the disk.
+- **Windows:** links Glass opens (the tray's Open logs, setup's Tailscale pages) go straight to the shell instead of through `cmd /C start`.
+
+## 0.15.0
+
+November 11, 2026
+
+### Connect from the Glass app
+
+- **Connect to your other computers right in the Glass app, on a Mac or Windows PC.** Machines → Connect shows the computer's screen in the window, no browser: the same QUIC datagrams the web viewer gets; on a Mac decoded in hardware straight into what the window draws. H.264, HEVC and HEVC 4:2:2 for sharp text, on Windows too where it has an HEVC decoder (the HEVC Video Extensions): each is offered only once a sample frame has decoded.
+- Everything the web viewer does is there: every display (one, all side by side as they're arranged, or live previews to switch with), a single window, sound, the microphone, sharp text, files both ways (drop them on the screen; theirs land in Downloads), a file browser, a terminal, chat, drawing on the screen, what's playing, game controllers, privacy mode, fit to the window or use it as another display, recording, restart and update, answering an agent's questions, and links made with `--passkey` (the app keeps its own passkey, unlocked with Touch ID or Windows Hello).
+- Beyond the browser: the keyboard can be captured, so system shortcuts go to the other computer (⌘Tab, ⌘Space and Mission Control on a Mac, the Windows key and Alt+Tab on Windows; ⌃⌥⎋ or Ctrl+Alt+Esc lets go; a Mac needs Accessibility for Glass), the mouse too for games. ⌘Q still quits Glass. On a Mac the pointer is the Mac's own, in the other computer's shapes, so it never lags. Copy on one and paste on the other with nothing to press. The speaker opens what's playing there with its controls, a volume slider and mute. Several computers stay open at once, switched from the sidebar; ⌘ as Ctrl, sound and its volume are remembered for each computer. End closes the session.
+- Machines → Open a link takes a link someone sent you, including ones that work from anywhere (over WebRTC, through glassdesk.dev, the host's answer checked against the link's key).
+
+### The Glass app
+
+- Text can be made bigger (or smaller): View → Bigger Text and Smaller Text, ⌘+ / ⌘− / ⌘0 (Ctrl on Windows), or Settings → Appearance. The whole window grows with it, from 12 to 24 pt, and Glass remembers it.
+
+### Windows
+
+- Viewers can type into Windows' own credential prompts (such as "verify your account password" or a Windows Hello PIN) when the secure-desktop service is installed: input goes through it whenever the window in front is out of the host's reach, not only when it's elevated.
+- Pages from a Windows host load seconds sooner: the computer's network addresses (for Wake-on-LAN) are read in the background and kept, not by running PowerShell on every page load.
+- The Glass firewall rule follows `glass config bind`. `tailscale` allows only 100.64.0.0/10 and fd7a:115c:a1e0::/48. A loopback-only bind removes the rule. The default listen address is unchanged: private networks, any remote address. `glass setup` and `glass service install` apply it. An elevated `glass config bind` applies it; otherwise Glass says to run `glass setup`. A silent install or upgrade restores the saved scope; with none saved it restores the older private-network rule, and a firewall failure does not stop the install. One existing Glass rule is updated in place; several rules with that name are replaced by one. A failed update of a single rule leaves it as it was. The any-address fallback is not stored, so a later `glass service install` with no scope leaves that copy's rule alone. A saved loopback scope adds no rule and says so. `glass uninstall --everything` clears the saved scope only when Glass is not installed for everyone; a full MSI uninstall clears it.
+
+### Reliability
+
+- If Glass starts before Tailscale, as it can at boot, it no longer stays on plain HTTP and out of reach of the tailnet until someone restarts it. For five minutes it watches for Tailscale, then restarts itself with its HTTPS certificate as soon as nobody is connected. On Windows this covers the background app and the sign-in screen; on macOS and Linux, the background service once `glass setup` has run again. `glass` run in a terminal stays as it is.
+- The picture no longer freezes while you're using a page the browser wrongly reports as hidden (Edge on Windows did this under an always-on-top overlay, for minutes at a time). Input now counts as the page being on screen: video keeps going, and resumes if it had paused. A tab that's really in the background still pauses as before.
+
+### Mac
+
+- The menu bar icon no longer turns black while someone is viewing, which left it nearly invisible next to white icons on a dark menu bar. It now matches the other icons in any menu bar, and shows macOS's screen sharing symbol with the count.
+
+## 0.14.0
+
+November 4, 2026
+
+### Faster on slow links
+
+- **The first picture on a slow link usually takes about a second, not ten.** Lost video fragments are sent again instead of whole new keyframes piling onto a full queue. A new viewer's first keyframe goes out at its screen's size, and viewers far away start at a lower bitrate and climb quickly. Sharp text turns on after the first picture.
+- Sound from the computer takes about a tenth of the bandwidth: browsers that can decode Opus (Chrome, Edge, Firefox, Safari 26) get it as Opus at 96 kbps instead of 1.5 Mbps of raw audio, so on a slow or relayed connection (a car's browser) sound no longer crowds out the picture. Older Safari keeps getting raw audio.
+- On a slow or lossy link, the picture no longer sticks waiting for a keyframe: while a viewer's connection is still busy with the last frames, Glass waits before capturing the next one, and that frame then carries everything that changed. Fewer frames get through, but none are dropped.
+- On a slow link, below 3 Mbps frames may be coarser so they fit, instead of huge ones holding up everything behind them; a still screen sharpens afterwards. On Windows and Linux hardware encoders, no single frame takes much more than its share of the bitrate.
+- A still screen sharpens without slowing down what comes next on a slow link: on the Mac, Glass refines it a few times (fewer and smaller the lower the bitrate) and only once the frames before have arrived, instead of re-sending the whole picture a dozen times a second for 3 seconds.
+- The viewer tells Glass when each frame is on screen. Glass uses that to send the next frame only when there's room, and to set the bitrate ten times a second from how long frames take to arrive and how much gets through: it backs off before a queue builds, and finds a fast link's rate within a second or two. It can go as low as 0.25 Mbps when that's all the link carries, but a keyframe arriving, a hidden tab, or the delay swings of a phone network don't count against it. Older viewers keep the once-a-second adjustment.
+- Viewers whose browser can't take WebRTC video (a Tesla's, for one) on a slow or relayed connection get a steadier picture: Glass keeps about a tenth of a second of video waiting and lowers the bitrate to what the link carries, instead of queuing most of a second and dropping frames in bursts.
+
+### Security
+
+- Web pages on other sites can no longer drive or read your computer through a browser on one of your devices. Glass answers only for its own names (its tailnet name, IP addresses, localhost; `glass config allowed-hosts` adds more), so a site can't point its own domain at it (DNS rebinding), and it turns away requests and WebTransport sessions from other sites' pages (`glass config allowed-origins` lets one in). A refused request gets a 403 that says why. `POST /agent/v1/act` now needs `Content-Type: application/json`.
+
+### Using the remote computer
+
+- On a Mac or Windows PC, the pointer moves with your mouse at once instead of trailing it by the connection's delay, and moving it no longer costs a video frame: your browser draws it, at the size the screen is shown. When someone or something else moves it (another viewer, an agent, the person at the computer) you still see where it is. It stays in the video while it's needed there: during a recording, in trackpad mode, for an older viewer, and on Windows while an agent works. Linux keeps the pointer in the video.
+- Scrolling keeps up with your fingers on a phone or tablet: two-finger and wheel scrolling move the remote content as far as they move it on your screen, whatever size the remote display is shown at (before, a Mac shown at a quarter size scrolled about four times too slowly). On a Mac, slow trackpad scrolling no longer gets lost to rounding, and apps scroll as smoothly as with a trackpad.
+- Chinese, Japanese and Korean input methods, emoji, and accented letters from a phone or tablet keyboard now type on the remote computer (before, they were dropped). On Linux hosts, characters a US keyboard doesn't have still can't be typed.
+- The file browser downloads folders: select one and press Download to get it as a zip, made as it downloads (nothing is staged on the computer, however big the folder). On the computer's own page you can also drag a folder out. Symlinks inside the folder are left out.
+
+### Agents
+
+- Agents can record the screen (`record`): for some seconds, or started and stopped by id. It's the video Glass already encodes, saved as an MP4 without re-encoding, at most 10 minutes. The agent gets the MP4 back (when it's 20 MB or less) and its path on the computer; recordings are removed after a day.
+- Agents' `wait_for_change` follows what capture says changed instead of comparing small screenshots, so a caret, a spinner or one text field changing counts. It waits for the screen to settle (`idle_ms`), or for a change first (`change`), in part of the screen if asked (`region`). Screenshots and actions return a `seq` that a wait takes as `since`, so a change that happened before the wait isn't missed. A Mac display no viewer is watching is followed while an agent uses it, and stops a minute after.
+
+### Reliability
+
 - If macOS's screen capture service stops answering (it can after Glass restarts), Glass restarts it and carries on, instead of hanging with no picture until someone restarts the Mac. Tailscale commands Glass runs at startup time out instead of holding it up.
 - Letting someone in after more than 10 seconds no longer leaves them with a picture but no mouse or keyboard.
 - `glass support` on a computer already running Glass shares through it, instead of starting a second copy that fought it for the screen (the picture froze in one of them). Ending support removes the helper's access and nothing else.
 - If `glass support` is closed without ending the session (killed, crashed), Glass removes the helper's access within seconds.
-- Viewers whose browser can't take WebRTC video (a Tesla's, for one) on a slow or relayed connection get a steadier picture: Glass keeps about a tenth of a second of video waiting and lowers the bitrate to what the link carries, instead of queuing most of a second and dropping frames in bursts.
+- Your own tailnet devices connect without a token even when Tailscale isn't ready when Glass starts (common right after signing in to Windows). Glass checks again on the next connection and then remembers the owner. For a minute and a half after startup, a viewer who didn't bring a token or a link reconnects instead of seeing the token screen.
+
+### For developers
+
+- `bench/` measures frame rate and end-to-end latency on a test host (no screen capture) through LAN and slow shaped links, to catch regressions. See `bench/README.md`.
 
 ## 0.13.1
 

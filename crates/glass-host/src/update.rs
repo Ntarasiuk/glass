@@ -3,6 +3,7 @@
 //! in its own process group so it survives the service restart it triggers.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
@@ -95,12 +96,32 @@ fn installer() -> std::process::Command {
     cmd
 }
 
+/// This process has an installer running. Two at once would write over each other.
+static INSTALLING: AtomicBool = AtomicBool::new(false);
+
+/// Held while an installer runs.
+struct Installing;
+
+impl Installing {
+    fn begin() -> anyhow::Result<Self> {
+        anyhow::ensure!(!INSTALLING.swap(true, Ordering::SeqCst), "An update is already running.");
+        Ok(Self)
+    }
+}
+
+impl Drop for Installing {
+    fn drop(&mut self) {
+        INSTALLING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Re-runs the installer in a new process group, detached, so it outlives this process
 /// when it restarts the service.
 pub fn start_self_update() -> anyhow::Result<()> {
     if let Some(why) = blocked() {
         anyhow::bail!(why);
     }
+    let installing = Installing::begin()?;
     let log = crate::platform::log_dir().join("update.log");
     let _ = std::fs::create_dir_all(log.parent().unwrap());
     let mut cmd = installer();
@@ -117,8 +138,13 @@ pub fn start_self_update() -> anyhow::Result<()> {
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
     }
-    cmd.spawn()?;
+    let mut child = cmd.spawn()?;
     tracing::info!("self-update started; log: {}", log.display());
+    // Done without restarting us (it failed, or there was nothing to do): it may be asked again.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        drop(installing);
+    });
     Ok(())
 }
 
@@ -127,6 +153,7 @@ pub fn run_logged() -> anyhow::Result<()> {
     if let Some(why) = blocked() {
         anyhow::bail!(why);
     }
+    let _installing = Installing::begin()?;
     let log = crate::platform::log_dir().join("update.log");
     let _ = std::fs::create_dir_all(log.parent().unwrap());
     let mut cmd = installer();
@@ -162,7 +189,15 @@ pub fn newer(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::newer;
+    use super::{Installing, newer};
+
+    #[test]
+    fn one_installer_at_a_time() {
+        let first = Installing::begin().unwrap();
+        assert!(Installing::begin().is_err());
+        drop(first);
+        assert!(Installing::begin().is_ok(), "it may be asked again when that one's done");
+    }
 
     #[test]
     fn compares_versions_numerically() {

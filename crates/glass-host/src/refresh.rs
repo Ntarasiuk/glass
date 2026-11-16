@@ -31,7 +31,10 @@ pub fn set(session: u64, fps: Option<u32>) {
     {
         tracing::info!("frame rate: up to {after} fps for this host's viewers");
         // Reconfiguring capture talks to ScreenCaptureKit, which blocks.
-        std::thread::spawn(move || shared.video.set_max_fps(after));
+        crate::media::reconfigure(move || {
+            let now = WANTS.lock().unwrap().as_ref().map_or(DEFAULT, |all| combine(all.values().copied()));
+            shared.video.set_max_fps(now);
+        });
     }
 }
 

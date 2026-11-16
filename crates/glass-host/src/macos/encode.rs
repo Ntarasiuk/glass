@@ -57,9 +57,9 @@ fn note_skipped_frame() {
     }
 }
 
-/// The average target, plus a loose ceiling of twice that over any second, so a runaway
-/// burst can't swamp a slow link. Tighter limits make the encoder drop frames outright
-/// (a frozen picture) instead of lowering quality, so the adaptive rate does the rest.
+/// The average target, plus a loose ceiling of twice that over any second. With low-latency
+/// rate control VideoToolbox was measured to ignore this limit, at any setting (see
+/// `vt_at_low_bitrates`); what steers it is the average and the QP cap (`apply_policy`).
 fn set_rate(session: &VTCompressionSession, bps: u32) {
     let bytes_per_sec = bps as f64 / 8.0;
     let limits = [
@@ -91,6 +91,36 @@ fn set_rate(session: &VTCompressionSession, bps: u32) {
 
 pub use crate::media::EncodedFrame;
 
+/// MaxAllowedFrameQP, lifted for keyframes: capping them makes them bigger, not sharper
+/// (measured 661 → 981 KB), which stalls a slow link. The cap returns on the next frame.
+#[derive(Debug, Default)]
+struct QpCap {
+    /// From `apply_policy`; 0 = none.
+    qp: u32,
+    /// Lifted for the keyframe just submitted.
+    lifted: bool,
+}
+
+impl QpCap {
+    /// What to set the session to for a new policy.
+    fn set(&mut self, qp: u32) -> Option<i32> {
+        let changed = std::mem::replace(&mut self.qp, qp) != qp;
+        (changed && !self.lifted).then_some(qp as i32)
+    }
+
+    /// What to set the session to before submitting a frame.
+    fn frame(&mut self, keyframe: bool) -> Option<i32> {
+        if keyframe && self.qp != 0 {
+            self.lifted = true;
+            Some(51)
+        } else if !keyframe && std::mem::take(&mut self.lifted) && self.qp != 0 {
+            Some(self.qp as i32)
+        } else {
+            None
+        }
+    }
+}
+
 pub struct Encoder {
     session: CFRetained<VTCompressionSession>,
     hevc: bool,
@@ -98,14 +128,15 @@ pub struct Encoder {
     rext: bool,
     force_keyframe: Arc<AtomicBool>,
     on_frame: Arc<dyn Fn(EncodedFrame) + Send + Sync>,
-    /// The sharpness cap in force (MaxAllowedFrameQP; 0 = none), from `apply_policy`.
-    qp_cap: AtomicU32,
-    /// The cap is lifted for the keyframe just submitted; restore it on the next frame.
-    cap_lifted: AtomicBool,
+    /// The sharpness cap. Locked while it's set on the session, so the policy thread and the
+    /// capture queue can't leave the session at a value this doesn't say.
+    cap: std::sync::Mutex<QpCap>,
     /// Bytes produced, for sharing the bitrate between displays by activity.
     bytes: Arc<AtomicU64>,
     /// Size of the latest output frame (an idle refresh stops once these get tiny).
     last_size: Arc<AtomicU64>,
+    /// The bitrate its policy was last applied for.
+    bps: AtomicU32,
 }
 
 // VTCompressionSession is thread-safe; frames are submitted from the capture queue only.
@@ -221,10 +252,10 @@ impl Encoder {
             rext,
             force_keyframe,
             on_frame,
-            qp_cap: AtomicU32::new(0),
-            cap_lifted: AtomicBool::new(false),
+            cap: Default::default(),
             bytes: Arc::new(AtomicU64::new(0)),
             last_size: Arc::new(AtomicU64::new(0)),
+            bps: AtomicU32::new(bitrate as u32),
         })
     }
 
@@ -233,24 +264,28 @@ impl Encoder {
     /// ceiling for capture (at most `max_fps`: what the display and viewers can show).
     pub fn apply_policy(&self, bps: u32, max_fps: u32) -> u32 {
         let (fps, qp) = crate::rate::sharp_policy(bps, max_fps);
+        self.bps.store(bps, Ordering::Relaxed);
         set_rate(&self.session, bps);
         self.set(
             unsafe { kVTCompressionPropertyKey_ExpectedFrameRate },
             fps as i32,
             "frame rate",
         );
-        if self.qp_cap.swap(qp, Ordering::Relaxed) != qp && !self.cap_lifted.load(Ordering::Relaxed)
         {
-            self.set(
-                unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP },
-                qp as i32,
-                "QP cap",
-            );
+            let mut cap = self.cap.lock().unwrap();
+            if let Some(value) = cap.set(qp) {
+                self.set(unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP }, value, "QP cap");
+            }
         }
         fps
     }
 
     /// Capture should deliver BGRA (full colour) rather than 4:2:0, for HEVC 4:2:2.
+    /// Waits for every submitted frame to come out.
+    pub fn flush(&self) {
+        unsafe { self.session.complete_frames(kCMTimeInvalid) };
+    }
+
     pub fn wants_bgra(&self) -> bool {
         self.rext
     }
@@ -268,6 +303,10 @@ impl Encoder {
         self.bytes.swap(0, Ordering::Relaxed)
     }
 
+    pub fn bitrate(&self) -> u32 {
+        self.bps.load(Ordering::Relaxed)
+    }
+
     pub fn last_frame_size(&self) -> u64 {
         self.last_size.load(Ordering::Relaxed)
     }
@@ -279,22 +318,11 @@ impl Encoder {
     /// `refresh`: the picture is unchanged since the last encode (see FLAG_REFRESH).
     pub fn encode(&self, image: &CVImageBuffer, pts: CMTime, capture_us: u64, refresh: bool) {
         let keyframe = self.force_keyframe.swap(false, Ordering::Relaxed);
-        // Keyframes go uncapped: capping them makes them bigger, not sharper (measured
-        // 661 → 981 KB), which stalls a slow link. The cap returns on the next frame.
-        let cap = self.qp_cap.load(Ordering::Relaxed);
-        if keyframe && cap != 0 {
-            self.set(
-                unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP },
-                51,
-                "QP cap",
-            );
-            self.cap_lifted.store(true, Ordering::Relaxed);
-        } else if !keyframe && self.cap_lifted.swap(false, Ordering::Relaxed) && cap != 0 {
-            self.set(
-                unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP },
-                cap as i32,
-                "QP cap",
-            );
+        {
+            let mut cap = self.cap.lock().unwrap();
+            if let Some(value) = cap.frame(keyframe) {
+                self.set(unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP }, value, "QP cap");
+            }
         }
         let props = keyframe.then(|| {
             let keys = unsafe { [kVTEncodeFrameOptionKey_ForceKeyFrame] };
@@ -303,15 +331,27 @@ impl Encoder {
         let on_frame = self.on_frame.clone();
         let hevc = self.hevc;
         let (bytes, last_size) = (self.bytes.clone(), self.last_size.clone());
+        let force_keyframe = self.force_keyframe.clone();
         let handler = RcBlock::new(
             move |status: i32, _flags: VTEncodeInfoFlags, sample: *mut CMSampleBuffer| {
                 if status != 0 {
                     tracing::warn!("encode failed: {status}");
+                    // A keyframe someone is waiting for is asked for again.
+                    if keyframe {
+                        force_keyframe.store(true, Ordering::Relaxed);
+                    }
                     return;
                 }
                 if sample.is_null() {
                     // Dropped by rate control to stay within the limits: count, don't shout.
+                    // A keyframe someone is waiting for (never seen dropped; see
+                    // `vt_at_low_bitrates`) would be asked for again.
                     note_skipped_frame();
+                    // A keyframe someone is waiting for is asked for again.
+                    if keyframe {
+                        tracing::info!("encoder dropped a keyframe; asking again");
+                        force_keyframe.store(true, Ordering::Relaxed);
+                    }
                     return;
                 }
                 if let Some(frame) = unsafe { annex_b(&*sample, hevc) } {
@@ -337,6 +377,9 @@ impl Encoder {
         };
         if status != 0 {
             tracing::warn!("VTCompressionSessionEncodeFrame failed: {status}");
+            if keyframe {
+                self.force_keyframe.store(true, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -481,6 +524,30 @@ unsafe fn parameter_set(format: &CMFormatDescription, idx: usize, hevc: bool) ->
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn keyframes_go_uncapped_and_the_cap_returns() {
+        let mut cap = QpCap::default();
+        assert_eq!(cap.frame(true), None, "no cap to lift yet");
+        assert_eq!(cap.set(30), Some(30));
+        assert_eq!(cap.frame(false), None);
+        assert_eq!(cap.frame(true), Some(51));
+        assert_eq!(cap.frame(true), Some(51), "two in a row stay uncapped");
+        assert_eq!(cap.frame(false), Some(30));
+        assert_eq!(cap.frame(false), None, "only once");
+    }
+
+    #[test]
+    fn a_policy_change_during_a_keyframe_waits_and_then_applies() {
+        let mut cap = QpCap::default();
+        cap.set(30);
+        assert_eq!(cap.frame(true), Some(51));
+        assert_eq!(cap.set(42), None, "the keyframe stays uncapped");
+        assert_eq!(cap.frame(false), Some(42), "the new cap, not the old one");
+        assert_eq!(cap.set(42), None, "already there");
+    }
+
     #[test]
     fn keyframe_nals() {
         // H.264: IDR (5) yes, non-IDR slice (1) no.
@@ -491,5 +558,99 @@ mod tests {
         assert!(super::is_keyframe_nal(&[21 << 1, 1], true));
         assert!(!super::is_keyframe_nal(&[1 << 1, 1], true));
         assert!(!super::is_keyframe_nal(&[33 << 1, 1], true));
+    }
+
+    /// A 420v picture of text-like lines, scrolled by `scroll` rows. Made here, not
+    /// captured, so this runs next to a live session without touching the screen.
+    fn test_picture(w: usize, h: usize, scroll: usize) -> CFRetained<CVImageBuffer> {
+        use objc2_core_video::*;
+        let mut raw: *mut CVPixelBuffer = ptr::null_mut();
+        let status = unsafe {
+            CVPixelBufferCreate(None, w, h, u32::from_be_bytes(*b"420v"), None, NonNull::from(&mut raw))
+        };
+        assert_eq!(status, 0, "CVPixelBufferCreate");
+        let image = unsafe { CFRetained::from_raw(NonNull::new(raw).unwrap()) };
+        unsafe { CVPixelBufferLockBaseAddress(&image, CVPixelBufferLockFlags(0)) };
+        let (y, ys) = (CVPixelBufferGetBaseAddressOfPlane(&image, 0) as *mut u8, CVPixelBufferGetBytesPerRowOfPlane(&image, 0));
+        let (uv, uvs) = (CVPixelBufferGetBaseAddressOfPlane(&image, 1) as *mut u8, CVPixelBufferGetBytesPerRowOfPlane(&image, 1));
+        for row in 0..h {
+            let s = row + scroll;
+            let (line, in_line) = (s / 24, s % 24);
+            let len = 40 + (line * 7919) % (w - 200);
+            for x in 0..w {
+                let ink = (5..18).contains(&in_line)
+                    && x > 40
+                    && x < len
+                    && (x / 9 + line * 31) % 7 != 0
+                    && x % 9 < 7
+                    && (x * 13 + s * 7 + line) % 5 < 3;
+                unsafe { *y.add(row * ys + x) = if ink { 40 } else { 230 } };
+            }
+        }
+        for row in 0..h / 2 {
+            for x in 0..w {
+                let c = 128u8.wrapping_add((((row + scroll / 2) / 60 + x / 200) % 5) as u8 * 6);
+                unsafe { *uv.add(row * uvs + x) = c };
+            }
+        }
+        unsafe { CVPixelBufferUnlockBaseAddress(&image, CVPixelBufferLockFlags(0)) };
+        image
+    }
+
+    /// What real VideoToolbox does at a bitrate: 3 s of a scrolling 2560×1440 page of text,
+    /// starting on a keyframe. Hardware only, and no screen capture:
+    /// `cargo test -p glass-host vt_at_low_bitrates -- --ignored --nocapture`
+    ///
+    /// Measured on this Mac (H.264, low-latency rate control), 2026-11-04:
+    /// - `DataRateLimits` changed nothing, byte for byte, at any setting tried: two times
+    ///   the rate over 1 s, half the rate over 1 s, the rate over 100 ms, 1.5 times over
+    ///   33 ms. Only `AverageBitRate` and the QP cap steer this encoder.
+    /// - A keyframe is 350–510 KB whatever the bitrate, and it isn't dropped.
+    /// - After one, the encoder skips deltas to pay it back: of 30, 14 came out at 1 Mbps
+    ///   and 3 at 0.3 Mbps. So below about 1 Mbps the picture all but stops.
+    /// - The QP cap: at 1 Mbps with a cap of 28, 4 of 30 deltas, up to 200 KB each; with 42,
+    ///   14 of 30, up to 4 KB each. A tight cap at a low rate is what makes frames huge.
+    #[test]
+    #[ignore = "real VideoToolbox: run by hand"]
+    fn vt_at_low_bitrates() {
+        use std::sync::Mutex;
+        println!("bps fps qp | keyframe bytes | deltas out/asked, biggest | kbps");
+        for (bps, fps) in [(6_000_000u32, 45u32), (2_400_000, 15), (1_000_000, 10), (300_000, 10)] {
+            let policy_qp = crate::rate::policy(bps, false, 60).1;
+            for qp in [28, policy_qp] {
+                let out = Arc::new(Mutex::new(Vec::<(bool, usize)>::new()));
+                let o = out.clone();
+                let enc = Encoder::new(
+                    2560, 1440, 60, bps as i32, false, false, false,
+                    Arc::new(AtomicBool::new(true)),
+                    Arc::new(move |f: EncodedFrame| o.lock().unwrap().push((f.keyframe, f.data.len()))),
+                )
+                .unwrap();
+                set_rate(&enc.session, bps);
+                enc.cap.lock().unwrap().qp = qp;
+                enc.set(unsafe { kVTCompressionPropertyKey_MaxAllowedFrameQP }, qp as i32, "QP cap");
+                enc.set(unsafe { kVTCompressionPropertyKey_ExpectedFrameRate }, fps as i32, "frame rate");
+                let total = fps * 3;
+                let start = std::time::Instant::now();
+                for i in 0..total {
+                    let picture = test_picture(2560, 1440, i as usize * 6);
+                    let us = 1_000 + i as u64 * 1_000_000 / fps as u64;
+                    enc.encode(&picture, unsafe { CMTime::new(us as i64, 1_000_000) }, us, false);
+                    let due = start + std::time::Duration::from_secs_f64((i + 1) as f64 / fps as f64);
+                    std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
+                }
+                unsafe { enc.session.complete_frames(kCMTimeInvalid) };
+                let out = out.lock().unwrap();
+                let keys: Vec<usize> = out.iter().filter(|f| f.0).map(|f| f.1).collect();
+                let deltas: Vec<usize> = out.iter().filter(|f| !f.0).map(|f| f.1).collect();
+                let bytes: usize = out.iter().map(|f| f.1).sum();
+                println!(
+                    "{bps} {fps} {qp} | {keys:?} | {}/{total}, {} | {}",
+                    deltas.len(),
+                    deltas.iter().max().unwrap_or(&0),
+                    bytes * 8 / 3 / 1000
+                );
+            }
+        }
     }
 }

@@ -120,6 +120,17 @@ test.describe('asking first', () => {
     const log = JSON.parse(host.cli('log', '--json')).connections;
     expect(log.some((e) => e.how === 'refused' && e.detail === 'not allowed')).toBe(true);
   });
+  it('a guest told no loses its pass, and is told to ask for a new link', async ({ browser, host }) => {
+    const made = await makeLink(host, '--ask');
+    const guest = await (await browser.newContext()).newPage();
+    await guest.goto(made.url);
+    await expect.poll(async () => (await host.get('/test/approvals')).pending.length).toBe(1);
+    host.cli('deny');
+    await expect(guest.locator('.toast', { hasText: 'ask them for a new link' })).toBeVisible();
+    await expect(guest.locator('.toast button', { hasText: 'Ask again' })).toHaveCount(0);
+    await expect(guest.locator('.toast', { hasText: "You're in" })).toHaveCount(0);
+    expect(await guest.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('glass.pass')))).toEqual([]);
+  });
 });
 
 test.describe('chat', () => {

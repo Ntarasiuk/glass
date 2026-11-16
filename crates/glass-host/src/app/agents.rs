@@ -199,6 +199,17 @@ impl GlassApp {
                 cx,
             ));
         }
+        for (id, name) in agent.installed.clone() {
+            anywhere.push(ui::row(
+                format!("{name} is installed"),
+                "It can see and use this computer with nobody approving each run.",
+                Button::new(SharedString::from(format!("uninstall-{id}"))).small().ghost().label("Uninstall").on_click(move |_, window, cx| {
+                    let id = id.clone();
+                    act(window, cx, move || actions::uninstall_agent(&id))
+                }),
+                cx,
+            ));
+        }
         let recent: Vec<AnyElement> = agent.recent.iter().map(|line| ui::note(line.clone(), cx)).collect();
 
         let mut clients: Vec<AnyElement> = self

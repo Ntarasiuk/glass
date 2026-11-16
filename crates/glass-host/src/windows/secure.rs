@@ -17,7 +17,7 @@
 //! helper validates, so nothing it reads can grow unbounded.
 
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use glass_proto::InputEvent as Ev;
@@ -37,6 +37,7 @@ const OP_INPUT: u8 = b'I'; // 12 bytes: a glass_proto::InputEvent (not MouseMove
 const OP_MOVE_ABS: u8 = b'M'; // 8 bytes: i32 x, i32 y (desktop pixels)
 const OP_SAS: u8 = b'S'; // 0 bytes: SendSAS (Ctrl+Alt+Del)
 const OP_RELEASE: u8 = b'R'; // 0 bytes: release everything held
+const OP_PASTE: u8 = b'P'; // 0 bytes: the paste shortcut
 const OP_CAPTURE: u8 = b'V'; // 1 byte: 1 start sending frames, 0 stop
 const OP_KEYFRAME: u8 = b'K'; // 1 byte: stream (0xFF = all)
 const OP_BITRATE: u8 = b'B'; // 4 bytes: u32 LE bits per second
@@ -53,8 +54,11 @@ struct Link {
 }
 
 static LINK: Mutex<Option<Arc<Link>>> = Mutex::new(None);
-/// The host is currently sourcing viewers' video from the helper (secure desktop up).
+/// The host is currently sourcing viewers' video from the helper (secure desktop up). Only
+/// with a link. Its own encoders send nothing meanwhile (video.rs), so a stream has one source.
 static CAPTURING: AtomicBool = AtomicBool::new(false);
+/// Viewers' latest bitrate, for the helper when it becomes the source.
+static BITRATE: AtomicU32 = AtomicU32::new(0);
 
 /// Starts keeping a connection to the helper (if the service is installed) and driving it:
 /// while the secure desktop is up, the helper becomes the video source and its frames are
@@ -81,14 +85,21 @@ fn driver(frames: broadcast::Sender<Arc<EncodedFrame>>) {
         // The secure desktop (lock screen, UAC) is up when the input desktop isn't ours.
         let secure = !super::session::input_desktop_is_ours();
         if secure != CAPTURING.load(Ordering::Relaxed) {
+            // The switch first: the helper's first keyframe mustn't come back to find its
+            // frames still being dropped.
+            CAPTURING.store(secure, Ordering::Relaxed);
             if secure {
                 tracing::info!("secure desktop up: viewers now see the SYSTEM helper's capture");
-                send(OP_CAPTURE, &[1]);
+                if send(OP_CAPTURE, &[1]) {
+                    let bps = BITRATE.load(Ordering::Relaxed);
+                    if bps != 0 {
+                        send(OP_BITRATE, &bps.to_le_bytes());
+                    }
+                }
             } else {
                 tracing::info!("secure desktop gone: viewers back on the user host's capture");
                 send(OP_CAPTURE, &[0]);
             }
-            CAPTURING.store(secure, Ordering::Relaxed);
         }
         std::thread::sleep(std::time::Duration::from_millis(400));
     }
@@ -125,17 +136,17 @@ fn connect(frames: broadcast::Sender<Arc<EncodedFrame>>) -> bool {
 /// Reads encoded frames from the helper and rebroadcasts them to viewers while the secure
 /// desktop is up. Ends (dropping the link) when the pipe closes.
 fn read_frames(pipe: Arc<Pipe>, frames: broadcast::Sender<Arc<EncodedFrame>>) {
-    let mut pipe = &*pipe;
+    let mut reader = &*pipe;
     loop {
         let mut op = [0u8; 1];
-        if pipe.read_exact(&mut op).is_err() {
+        if reader.read_exact(&mut op).is_err() || !is_current(&pipe) {
             break;
         }
         if op[0] != OP_FRAME {
             break; // unexpected: the helper only ever sends frames
         }
         let mut header = [0u8; 14];
-        if pipe.read_exact(&mut header).is_err() {
+        if reader.read_exact(&mut header).is_err() {
             break;
         }
         let stream = header[0];
@@ -146,7 +157,7 @@ fn read_frames(pipe: Arc<Pipe>, frames: broadcast::Sender<Arc<EncodedFrame>>) {
             break; // out of range: a corrupt or hostile stream, drop the link
         }
         let mut data = vec![0u8; len];
-        if pipe.read_exact(&mut data).is_err() {
+        if reader.read_exact(&mut data).is_err() {
             break;
         }
         if CAPTURING.load(Ordering::Relaxed) {
@@ -160,8 +171,24 @@ fn read_frames(pipe: Arc<Pipe>, frames: broadcast::Sender<Arc<EncodedFrame>>) {
             }));
         }
     }
-    *LINK.lock().unwrap() = None;
-    CAPTURING.store(false, Ordering::Relaxed);
+    link_ended(&pipe);
+}
+
+fn is_current(pipe: &Arc<Pipe>) -> bool {
+    LINK.lock().unwrap().as_ref().is_some_and(|l| Arc::ptr_eq(&l.pipe, pipe))
+}
+
+/// `pipe` is finished with. If it's still the link, viewers go back to the host's own capture.
+/// Either way its reader lets go, or the helper (one connection at a time) stays taken.
+fn link_ended(pipe: &Arc<Pipe>) {
+    {
+        let mut link = LINK.lock().unwrap();
+        if link.as_ref().is_some_and(|l| Arc::ptr_eq(&l.pipe, pipe)) {
+            *link = None;
+            CAPTURING.store(false, Ordering::Relaxed);
+        }
+    }
+    pipe.cancel();
 }
 
 /// Whether the helper is connected.
@@ -169,7 +196,7 @@ pub fn available() -> bool {
     LINK.lock().unwrap().is_some()
 }
 
-/// The host is sourcing video from the helper right now (so its own capture is paused).
+/// The host is sourcing video from the helper right now, so its own encoders hold off.
 pub fn capturing() -> bool {
     CAPTURING.load(Ordering::Relaxed)
 }
@@ -190,7 +217,7 @@ fn send(op: u8, payload: &[u8]) -> bool {
         w.write_all(&[op]).and_then(|_| w.write_all(payload)).is_ok()
     };
     if !ok {
-        *LINK.lock().unwrap() = None;
+        link_ended(&link.pipe);
     }
     ok
 }
@@ -212,6 +239,10 @@ pub fn release() -> bool {
     send(OP_RELEASE, &[])
 }
 
+pub fn paste() -> bool {
+    send(OP_PASTE, &[])
+}
+
 /// Ctrl+Alt+Del. False when the service isn't installed (the caller tells the viewer).
 pub fn send_sas() -> bool {
     send(OP_SAS, &[])
@@ -225,6 +256,7 @@ pub fn request_keyframe(stream: Option<u8>) {
 }
 
 pub fn set_bitrate(bps: u32) {
+    BITRATE.store(bps, Ordering::Relaxed);
     if capturing() {
         send(OP_BITRATE, &bps.to_le_bytes());
     }
@@ -238,6 +270,7 @@ enum InputCmd {
     Event(Ev),
     MoveAbs(i32, i32),
     Release,
+    Paste,
 }
 
 /// The whole life of the SYSTEM helper: create the strict-ACL pipe, then serve the per-user
@@ -306,6 +339,9 @@ fn serve(pipe: Arc<Pipe>) {
             OP_RELEASE => {
                 let _ = tx.send(InputCmd::Release);
             }
+            OP_PASTE => {
+                let _ = tx.send(InputCmd::Paste);
+            }
             OP_SAS => {
                 send_sas_now();
             }
@@ -350,9 +386,9 @@ fn serve(pipe: Arc<Pipe>) {
 }
 
 /// The helper's capture: created once (lazily, on the first lock) and kept for the helper's
-/// life — `video::Video` has no shutdown, and one duplication is cheaper than making a new
-/// one each time the screen locks. Forwarding is gated by `forward` and the current host's
-/// pipe, so nothing is captured or sent while unlocked or between connections.
+/// life, as `video::Video` has no shutdown. While nothing is being forwarded its duplications
+/// are given up and nothing is captured or encoded (`capture_paused`), so it costs nothing
+/// while unlocked or between connections.
 struct CaptureState {
     video: Arc<super::video::Video>,
     forward: AtomicBool,
@@ -360,6 +396,14 @@ struct CaptureState {
 }
 
 static CAPTURE: OnceLock<CaptureState> = OnceLock::new();
+
+/// The helper isn't forwarding, so its capture threads stand down. (Never in the host.)
+static CAPTURE_PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this process's capture has nobody to capture for.
+pub fn capture_paused() -> bool {
+    CAPTURE_PAUSED.load(Ordering::Relaxed)
+}
 
 /// Starts forwarding the secure desktop to `writer`; makes the capture the first time.
 fn capture_enable(writer: &Arc<Mutex<Arc<Pipe>>>) {
@@ -370,19 +414,22 @@ fn capture_enable(writer: &Arc<Mutex<Arc<Pipe>>>) {
             frames,
         ));
         if let Err(e) = video.set_layout(crate::media::Layout::Single(None)) {
-            log_helper(&format!("secure helper: can't capture the secure desktop ({e:#})"));
+            log_helper(&format!("secure helper: can't capture the secure desktop yet ({e:#})"));
         }
         spawn_forward(rx);
+        spawn_capture_upkeep();
         CaptureState { video, forward: AtomicBool::new(false), writer: Mutex::new(None) }
     });
     *state.writer.lock().unwrap() = Some(writer.clone());
     state.forward.store(true, Ordering::Relaxed);
+    CAPTURE_PAUSED.store(false, Ordering::Relaxed);
     state.video.request_keyframe(None); // a fresh keyframe so the viewer can switch codec
 }
 
 fn capture_disable() {
     if let Some(c) = CAPTURE.get() {
         c.forward.store(false, Ordering::Relaxed);
+        CAPTURE_PAUSED.store(true, Ordering::Relaxed);
     }
 }
 
@@ -390,8 +437,37 @@ fn capture_disable() {
 fn capture_detach() {
     if let Some(c) = CAPTURE.get() {
         c.forward.store(false, Ordering::Relaxed);
+        CAPTURE_PAUSED.store(true, Ordering::Relaxed);
         *c.writer.lock().unwrap() = None;
     }
+}
+
+/// While forwarding, what the host's once-a-second `heal` does for its own capture: follows
+/// the displays, keeps showing the main one, and tries again if capture couldn't start.
+fn spawn_capture_upkeep() {
+    let _ = std::thread::Builder::new().name("glass-secure-upkeep".into()).spawn(|| {
+        let mut said = false;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let Some(state) = CAPTURE.get() else { continue };
+            if !state.forward.load(Ordering::Relaxed) {
+                continue;
+            }
+            state.video.heal();
+            let shown = state.video.streams().first().map(|d| d.id);
+            let main = state.video.displays().ok().and_then(|all| all.iter().find(|d| d.main).map(|d| d.id));
+            if shown.is_none() || (main.is_some() && main != shown) {
+                match state.video.set_layout(crate::media::Layout::Single(None)) {
+                    Ok(_) => said = false,
+                    Err(e) if !said => {
+                        said = true;
+                        log_helper(&format!("secure helper: still can't capture the secure desktop ({e:#})"));
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+    });
 }
 
 /// The single, long-lived thread that pushes encoded frames to the current host while
@@ -441,6 +517,7 @@ fn inject_loop(rx: std::sync::mpsc::Receiver<InputCmd>) {
             InputCmd::Event(ev) => injector.handle(ev),
             InputCmd::MoveAbs(x, y) => injector.move_abs(x, y),
             InputCmd::Release => injector.release_all(),
+            InputCmd::Paste => injector.paste(),
         }
     }
     injector.release_all();

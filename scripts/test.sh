@@ -9,7 +9,13 @@ step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 if [ "$only" = all ] || [ "$only" = rust ]; then
   step "Rust unit tests"
-  cargo test --workspace
+  # glass-gst (GPU encoding) needs GStreamer's dev files on Linux; without them it's left out.
+  if [ "$(uname -s)" = Linux ] && ! pkg-config --exists gstreamer-app-1.0 gstreamer-video-1.0 2>/dev/null; then
+    echo "no GStreamer dev files: skipping glass-gst"
+    cargo test --workspace --exclude glass-gst
+  else
+    cargo test --workspace
+  fi
 fi
 if [ "$only" = all ] || [ "$only" = js ]; then
   step "JS unit tests"

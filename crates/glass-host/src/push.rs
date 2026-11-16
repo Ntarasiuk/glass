@@ -75,6 +75,49 @@ pub struct Subscription {
     /// Notifications since this device last looked (its home-screen badge).
     #[serde(default)]
     pub unread: u32,
+    /// What let it subscribe: when that ends, so does the subscription. One saved before this
+    /// was kept is dropped the same way, and made again when the device next connects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<Credential>,
+}
+
+/// What a subscription stands on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Credential {
+    /// The access token, by its hash.
+    Token(String),
+    /// The owner's own tailnet device.
+    Tailnet,
+    /// Someone else on the tailnet, while the access rules name them.
+    TailnetGuest(String),
+    /// A guest pass, by its short id.
+    Pass(String),
+}
+
+/// What's in force now, to check credentials against.
+struct Standing {
+    token: Option<String>,
+    passes: Vec<String>,
+}
+
+impl Standing {
+    fn now(shared: &crate::server::Shared) -> Self {
+        Self {
+            token: crate::control::load_or_create_token(&shared.token_file).ok().filter(|t| !t.is_empty()).map(|t| crate::grants::hash(&t)),
+            passes: crate::access::list(&crate::access::file_for(&shared.token_file)).into_iter().map(|p| p.id).collect(),
+        }
+    }
+
+    fn holds(&self, c: Option<&Credential>, tailnet_guest: impl Fn(&str) -> bool) -> bool {
+        match c {
+            Some(Credential::Token(h)) => self.token.as_ref().is_some_and(|t| keys_match(t, h)),
+            Some(Credential::Tailnet) => true,
+            Some(Credential::TailnetGuest(login)) => tailnet_guest(login),
+            Some(Credential::Pass(id)) => self.passes.contains(id),
+            None => false,
+        }
+    }
 }
 
 impl Subscription {
@@ -131,8 +174,28 @@ pub struct NewSubscription {
     pub kinds: Kinds,
 }
 
+/// Forgets subscriptions whose credential has ended (a token reset, a pass revoked or
+/// expired, an access rule gone). Only the running host: it knows which token file is its own.
+fn drop_lapsed() {
+    let Some(shared) = crate::server::shared() else { return };
+    let standing = Standing::now(&shared);
+    let holds = |x: &Subscription| standing.holds(x.credential.as_ref(), |login| crate::acl::tailnet_guest_scope(login).is_some());
+    if load().subscriptions.iter().all(holds) {
+        return;
+    }
+    let _ = update(|s| {
+        s.subscriptions.retain(|x| {
+            let keep = holds(x);
+            if !keep {
+                tracing::info!("push: {} no longer holds what it subscribed with; forgetting it", x.device);
+            }
+            keep
+        });
+    });
+}
+
 /// Adds (or refreshes) a device's subscription; returns its action key.
-pub fn subscribe(new: NewSubscription, device: &str, owner: bool) -> Result<String> {
+pub fn subscribe(new: NewSubscription, device: &str, owner: bool, credential: Credential) -> Result<String> {
     check_endpoint(&new.endpoint)?;
     let p256dh = B64.decode(new.p256dh.trim_end_matches('=')).context("p256dh")?;
     let auth = B64.decode(new.auth.trim_end_matches('=')).context("auth")?;
@@ -158,6 +221,7 @@ pub fn subscribe(new: NewSubscription, device: &str, owner: bool) -> Result<Stri
             kinds: new.kinds,
             created: crate::access::now(),
             unread: old.map_or(0, |o| o.unread),
+            credential: Some(credential),
         });
         let extra = s.subscriptions.len().saturating_sub(MAX_SUBSCRIPTIONS);
         s.subscriptions.drain(..extra);
@@ -185,6 +249,7 @@ pub fn seen(endpoint: &str) {
 
 /// The owner subscription holding this action key.
 pub fn owner_by_key(key: &str) -> Option<Subscription> {
+    drop_lapsed();
     load().subscriptions.into_iter().find(|x| x.owner && keys_match(&x.key, key))
 }
 
@@ -338,6 +403,7 @@ pub struct Note {
 
 /// Sends to every device that wants this kind. Never blocks; failures are logged.
 pub fn send(note: Note) {
+    drop_lapsed();
     let subs: Vec<Subscription> = load().subscriptions.into_iter().filter(|s| s.wants(note.kind)).collect();
     if subs.is_empty() {
         return;
@@ -520,7 +586,7 @@ async fn act(axum::Json(a): axum::Json<Act>) -> (axum::http::StatusCode, axum::J
     let ok = match a.what.as_str() {
         "connect" => crate::approval::decide(a.id, a.yes),
         "agent" => {
-            crate::computer::answer(a.id, crate::computer::Answer { ok: a.yes, note: None });
+            crate::computer::answer_from(a.id, crate::computer::Answer { ok: a.yes, note: None }, false);
             true
         }
         _ => false,
@@ -547,6 +613,31 @@ mod tests {
             B64.encode(body),
             "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN"
         );
+    }
+
+    #[test]
+    fn a_subscription_lasts_as_long_as_what_let_it_subscribe() {
+        let s = Standing { token: Some(crate::grants::hash("new")), passes: vec!["abcd1234".into()] };
+        let token = |t: &str| Credential::Token(crate::grants::hash(t));
+        assert!(s.holds(Some(&token("new")), |_| false));
+        assert!(!s.holds(Some(&token("old")), |_| true), "the token was reset");
+        assert!(s.holds(Some(&Credential::Tailnet), |_| false));
+        assert!(s.holds(Some(&Credential::Pass("abcd1234".into())), |_| false));
+        assert!(!s.holds(Some(&Credential::Pass("gone".into())), |_| true), "the pass was revoked");
+        assert!(s.holds(Some(&Credential::TailnetGuest("a@b.c".into())), |l| l == "a@b.c"));
+        assert!(!s.holds(Some(&Credential::TailnetGuest("a@b.c".into())), |_| false), "no rule names them now");
+        assert!(!s.holds(None, |_| true), "saved before credentials were kept: made again on connecting");
+        let no_token = Standing { token: None, passes: Vec::new() };
+        assert!(!no_token.holds(Some(&token("new")), |_| true));
+    }
+
+    #[test]
+    fn older_subscriptions_still_load() {
+        let s: Store = serde_json::from_str(
+            r#"{"subscriptions":[{"id":"i","endpoint":"e","p256dh":"p","auth":"a","key":"k","device":"d","url":"u","owner":true,"kinds":{},"created":1}]}"#,
+        )
+        .unwrap();
+        assert_eq!(s.subscriptions[0].credential, None);
     }
 
     #[test]

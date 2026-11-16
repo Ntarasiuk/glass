@@ -36,6 +36,9 @@ pub struct Header {
     /// Press Cmd+V once it's set (a paste on the viewer).
     #[serde(default)]
     pub paste: bool,
+    /// The viewer's request this image answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u32>,
 }
 
 /// Reads one clipboard stream (tag already consumed): the clip, and whether to paste it.
@@ -63,8 +66,8 @@ pub async fn receive(stream: &mut RecvStream) -> Result<(Clip, bool)> {
 }
 
 /// Sends the host clipboard's image (PNG) to one viewer.
-pub async fn send_image(conn: &Connection, png: &[u8]) -> Result<()> {
-    let header = serde_json::to_vec(&Header { mime: "image/png".into(), size: png.len() as u64, ..Default::default() })?;
+pub async fn send_image(conn: &Connection, png: &[u8], id: Option<u32>) -> Result<()> {
+    let header = serde_json::to_vec(&Header { mime: "image/png".into(), size: png.len() as u64, id, ..Default::default() })?;
     let mut stream = conn.open_uni().await?.await?;
     let mut prefix = vec![STREAM_CLIPBOARD];
     prefix.extend_from_slice(&(header.len() as u32).to_le_bytes());

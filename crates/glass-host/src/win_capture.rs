@@ -47,6 +47,28 @@ impl Rotation {
             Self::Cw270 => (h - 1 - y, x),
         }
     }
+
+    /// A rectangle of the scanned-out picture (`scanned` pixels; left, top, right, bottom,
+    /// as Desktop Duplication's dirty and move rectangles are) in the upright one, as
+    /// (x0, y0, x1, y1). `None` when it's empty or off the picture.
+    pub fn upright_rect(self, scanned: (usize, usize), [l, t, r, b]: [i32; 4]) -> Option<(u32, u32, u32, u32)> {
+        let clamp = |v: i32, max: usize| (v.max(0) as usize).min(max);
+        let (l, r) = (clamp(l, scanned.0), clamp(r, scanned.0));
+        let (t, b) = (clamp(t, scanned.1), clamp(b, scanned.1));
+        if r <= l || b <= t {
+            return None;
+        }
+        let (w, h) = self.upright(scanned);
+        // Inverse of `source`, on the first and last pixels inside.
+        let up = |sx: usize, sy: usize| match self {
+            Self::None => (sx, sy),
+            Self::Cw90 => (w - 1 - sy, sx),
+            Self::Cw180 => (w - 1 - sx, h - 1 - sy),
+            Self::Cw270 => (sy, h - 1 - sx),
+        };
+        let ((ax, ay), (bx, by)) = (up(l, t), up(r - 1, b - 1));
+        Some((ax.min(bx) as u32, ay.min(by) as u32, ax.max(bx) as u32 + 1, ay.max(by) as u32 + 1))
+    }
 }
 
 /// A rectangle of a picture, in pixels.
@@ -173,6 +195,60 @@ impl SteadySize {
             _ => self.pending = Some((wanted, now)),
         }
         size
+    }
+}
+
+/// How long an encoder's thread waits for the next picture: until the frame that's waiting is
+/// due, when there is one and it's for a stream being shown; else a while. A picture nobody
+/// is shown stays unsent, and waiting for it to be "due" would spin.
+pub fn encode_wait(shown: bool, unsent: bool, due: Instant, now: Instant, idle: Duration) -> Duration {
+    if shown && unsent { due.saturating_duration_since(now) } else { idle }
+}
+
+/// Whether the hardware encoder may be tried. One asked not to be used, or that isn't there,
+/// never is. One that failed is given a rest, longer each time, and tried again: a stall of
+/// half a second or a GPU reset shouldn't mean software encoding until the host restarts.
+/// Each display's encoder falls back on its own; others keep what's working for them.
+#[derive(Debug)]
+pub struct HardwarePolicy {
+    never: bool,
+    failures: u32,
+    retry_at: Option<Instant>,
+}
+
+/// The first rest, doubling up to the longest.
+const HARDWARE_REST: Duration = Duration::from_secs(60);
+const HARDWARE_MAX_REST: Duration = Duration::from_secs(3600);
+/// An encoder that ran this long had its failure forgiven: it's a new problem.
+const HARDWARE_PROVEN: Duration = Duration::from_secs(600);
+
+impl HardwarePolicy {
+    pub const fn new() -> Self {
+        Self { never: false, failures: 0, retry_at: None }
+    }
+
+    /// Asked for software, or no hardware encoder is installed.
+    pub fn never(&mut self) {
+        self.never = true;
+    }
+
+    pub fn is_never(&self) -> bool {
+        self.never
+    }
+
+    pub fn allowed(&self, now: Instant) -> bool {
+        !self.never && self.retry_at.is_none_or(|at| now >= at)
+    }
+
+    /// One failed after running for `ran`; how long until it's tried again.
+    pub fn failed(&mut self, now: Instant, ran: Duration) -> Duration {
+        if ran >= HARDWARE_PROVEN {
+            self.failures = 0;
+        }
+        let rest = HARDWARE_REST.saturating_mul(1u32 << self.failures.min(10)).min(HARDWARE_MAX_REST);
+        self.failures = self.failures.saturating_add(1);
+        self.retry_at = Some(now + rest);
+        rest
     }
 }
 
@@ -398,6 +474,27 @@ mod tests {
     }
 
     #[test]
+    fn changed_rects_turn_upright_with_the_picture() {
+        let scanned = (30, 20);
+        for rotation in [Rotation::None, Rotation::Cw90, Rotation::Cw180, Rotation::Cw270] {
+            let (l, t, r, b) = (3, 4, 11, 9);
+            let (x0, y0, x1, y1) = rotation.upright_rect(scanned, [l, t, r, b]).unwrap();
+            let (w, h) = rotation.upright(scanned);
+            // Exactly the upright pixels that come from inside the rect.
+            for y in 0..h {
+                for x in 0..w {
+                    let (sx, sy) = rotation.source((w, h), x, y);
+                    let inside = (l as usize..r as usize).contains(&sx) && (t as usize..b as usize).contains(&sy);
+                    let mapped = (x0 as usize..x1 as usize).contains(&x) && (y0 as usize..y1 as usize).contains(&y);
+                    assert_eq!(inside, mapped, "{rotation:?} at {x}, {y}");
+                }
+            }
+        }
+        assert_eq!(Rotation::None.upright_rect(scanned, [-5, 0, 40, 3]), Some((0, 0, 30, 3)));
+        assert_eq!(Rotation::None.upright_rect(scanned, [31, 0, 40, 3]), None);
+    }
+
+    #[test]
     fn rotating_four_quarter_turns_is_the_identity() {
         // Bigger than a tile, odd sizes, padded rows: exercises the tiled, banded path.
         let (w, h) = (75, 41);
@@ -459,6 +556,43 @@ mod tests {
         assert_eq!(s.update((820, 600), ms(200)), (800, 600));
         assert_eq!(s.update((820, 600), ms(400)), (820, 600), "held still");
         assert_eq!(s.update((820, 600), ms(410)), (820, 600));
+    }
+
+    #[test]
+    fn hardware_failures_get_longer_rests_and_are_forgiven() {
+        let t = Instant::now();
+        let mut p = HardwarePolicy::new();
+        assert!(p.allowed(t));
+        assert_eq!(p.failed(t, Duration::ZERO), Duration::from_secs(60));
+        assert!(!p.allowed(t + Duration::from_secs(59)));
+        assert!(p.allowed(t + Duration::from_secs(60)), "tried again");
+        assert_eq!(p.failed(t, Duration::from_secs(5)), Duration::from_secs(120), "failed again soon");
+        assert_eq!(p.failed(t, Duration::from_secs(5)), Duration::from_secs(240));
+        for _ in 0..20 {
+            p.failed(t, Duration::ZERO);
+        }
+        assert_eq!(p.failed(t, Duration::ZERO), Duration::from_secs(3600), "at most an hour");
+        assert_eq!(p.failed(t, Duration::from_secs(600)), Duration::from_secs(60), "it had been fine");
+    }
+
+    #[test]
+    fn hardware_nobody_wants_is_never_tried() {
+        let t = Instant::now();
+        let mut p = HardwarePolicy::new();
+        p.never();
+        assert!(p.is_never());
+        assert!(!p.allowed(t + Duration::from_secs(1_000_000)));
+    }
+
+    #[test]
+    fn an_encoder_only_waits_for_a_due_frame_on_a_shown_stream() {
+        let t = Instant::now();
+        let (idle, soon) = (Duration::from_millis(100), Duration::from_millis(5));
+        assert_eq!(encode_wait(true, true, t + soon, t, idle), soon);
+        assert_eq!(encode_wait(true, true, t, t + soon, idle), Duration::ZERO, "overdue");
+        assert_eq!(encode_wait(true, false, t, t, idle), idle, "nothing waiting");
+        // A display not shown keeps its newest picture unsent, already "due": no spinning.
+        assert_eq!(encode_wait(false, true, t, t + soon, idle), idle);
     }
 
     #[test]

@@ -166,13 +166,15 @@ fn focus_window() -> Option<HWND> {
     }
 }
 
-/// Whether the foreground window belongs to an elevated (higher-integrity) process, which
-/// this unelevated host's SendInput can't reach (UIPI). Such input must go through the
-/// SYSTEM secure-desktop helper instead (see `windows::secure`).
+/// Whether the foreground window is out of this host's reach for SendInput (UIPI): an
+/// elevated process, one at a higher integrity level (Windows' own credential prompts,
+/// such as "verify your account password" or a Windows Hello PIN, run that way without
+/// being "elevated"), or a protected process it isn't even allowed to look at. Such input
+/// must go through the SYSTEM secure-desktop helper instead (see `windows::secure`).
 pub fn foreground_is_elevated() -> bool {
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
-    use windows::Win32::System::Threading::OpenProcessToken;
+    use windows::Win32::Security::TOKEN_QUERY;
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     // SAFETY: plain queries; the process and token handles are closed before returning.
     unsafe {
         let fg = GetForegroundWindow();
@@ -180,25 +182,54 @@ pub fn foreground_is_elevated() -> bool {
             return false;
         }
         let pid = window_pid(fg);
-        let Ok(proc) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        if pid == 0 {
+            return false;
+        }
+        let Ok(proc) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            // Not even this much access: a protected process, so certainly beyond SendInput.
+            return true;
+        };
         let mut token = HANDLE::default();
         let opened = OpenProcessToken(proc, TOKEN_QUERY, &mut token).is_ok();
         let _ = CloseHandle(proc);
         if !opened {
-            return false;
+            return true;
         }
+        let theirs = token_level(token);
+        let _ = CloseHandle(token);
+        let mut own = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut own).is_err() {
+            return theirs.0;
+        }
+        let ours = token_level(own);
+        let _ = CloseHandle(own);
+        theirs.0 || theirs.1 > ours.1
+    }
+}
+
+/// (elevated, integrity level RID) of a token.
+unsafe fn token_level(token: windows::Win32::Foundation::HANDLE) -> (bool, u32) {
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TokenElevation, TokenIntegrityLevel,
+    };
+    // SAFETY: the buffers are sized as GetTokenInformation asks; the SID is read within them.
+    unsafe {
         let mut elevation = TOKEN_ELEVATION::default();
         let mut len = 0u32;
-        let ok = GetTokenInformation(
-            token,
-            TokenElevation,
-            Some((&raw mut elevation).cast()),
-            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-            &mut len,
-        )
-        .is_ok();
-        let _ = CloseHandle(token);
-        ok && elevation.TokenIsElevated != 0
+        let elevated = GetTokenInformation(token, TokenElevation, Some((&raw mut elevation).cast()), std::mem::size_of::<TOKEN_ELEVATION>() as u32, &mut len).is_ok()
+            && elevation.TokenIsElevated != 0;
+        let mut need = 0u32;
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut need);
+        let mut buf = vec![0u8; need.max(64) as usize];
+        let level = if GetTokenInformation(token, TokenIntegrityLevel, Some(buf.as_mut_ptr().cast()), buf.len() as u32, &mut need).is_ok() {
+            let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+            let sid = label.Label.Sid;
+            let count = *GetSidSubAuthorityCount(sid) as u32;
+            if count > 0 { *GetSidSubAuthority(sid, count - 1) } else { 0 }
+        } else {
+            0
+        };
+        (elevated, level)
     }
 }
 
@@ -335,41 +366,61 @@ pub fn run_hook_helper(host_pid: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Starts watching local input (once) through the hook helper. False if it couldn't start
-/// or Windows refused its hooks.
+/// How often a hook helper that died or was refused is started again.
+const HOOK_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The hook helper, and when it was last started.
+static HOOK_HELPER: std::sync::Mutex<(Option<std::process::Child>, Option<std::time::Instant>)> = std::sync::Mutex::new((None, None));
+
+/// Keeps local input watched through the hook helper, starting it (again) if it isn't running.
+/// True while its hooks are in; call it to find out, as it can die at any time. Its counters
+/// outlive it, so a new one takes up what the last was doing (privacy mode's blocking too).
 pub fn watch() -> bool {
-    static STARTED: OnceLock<bool> = OnceLock::new();
-    *STARTED.get_or_init(|| {
-        let pid = std::process::id();
+    let pid = std::process::id();
+    if SHARED.get().is_none() {
         let Some(shared) = map_shared(pid, true) else {
             tracing::warn!("local input: no shared memory for the hook helper");
             return false;
         };
         let _ = SHARED.set(shared);
-        let mut cmd = match std::env::current_exe() {
-            Ok(exe) => std::process::Command::new(exe),
-            Err(_) => return false,
-        };
-        cmd.args([HOOK_HELPER_ARG, &pid.to_string()])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        super::no_window(&mut cmd);
-        if let Err(e) = cmd.spawn() {
+    }
+    let Some(shared) = SHARED.get() else { return false };
+    let mut helper = HOOK_HELPER.lock().unwrap_or_else(|e| e.into_inner());
+    let running = helper.0.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)));
+    let retry_due = helper.1.is_none_or(|at| at.elapsed() >= HOOK_RETRY);
+    match super::convert::hook_step(running, shared.ready.load(Ordering::SeqCst), retry_due) {
+        super::convert::HookStep::Ready => return true,
+        super::convert::HookStep::Waiting | super::convert::HookStep::Down => return false,
+        super::convert::HookStep::Start => {}
+    }
+    helper.1 = Some(std::time::Instant::now());
+    shared.ready.store(0, Ordering::SeqCst);
+    let mut cmd = match std::env::current_exe() {
+        Ok(exe) => std::process::Command::new(exe),
+        Err(_) => return false,
+    };
+    cmd.args([HOOK_HELPER_ARG, &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    super::no_window(&mut cmd);
+    match cmd.spawn() {
+        Ok(child) => helper.0 = Some(child),
+        Err(e) => {
             tracing::warn!("local input: couldn't start the hook helper: {e}");
             return false;
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while std::time::Instant::now() < deadline {
-            match shared.ready.load(Ordering::SeqCst) {
-                1 => return true,
-                2 => break,
-                _ => std::thread::sleep(std::time::Duration::from_millis(20)),
-            }
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        match shared.ready.load(Ordering::SeqCst) {
+            1 => return true,
+            2 => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(20)),
         }
-        tracing::warn!("local input: the hook helper didn't set its hooks");
-        false
-    })
+    }
+    tracing::warn!("local input: the hook helper didn't set its hooks");
+    false
 }
 
 /// Privacy mode: drop (or stop dropping) local keyboard and mouse input.

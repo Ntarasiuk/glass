@@ -40,6 +40,7 @@ export function createPush({ control, log, toast, url, actions = true }) {
   let owner = false;
   let subscription; // this browser's PushSubscription, if notifications are on
   let listeners = [];
+  let welcomes = 0; // which `connected` is the latest: a later host's supersedes an earlier one's
   let kinds = { chat: true, asks: true, activity: false, ...JSON.parse(storage((s) => s.getItem(KINDS_KEY)) ?? '{}') };
 
   const ready = 'serviceWorker' in navigator
@@ -73,11 +74,13 @@ export function createPush({ control, log, toast, url, actions = true }) {
 
     /** From welcome: re-sends an existing subscription (it may be new to this host). */
     async connected({ key, isOwner }) {
+      const welcome = ++welcomes;
       hostKey = key;
       owner = isOwner;
       subscription = undefined;
       if (supported && key && Notification.permission === 'granted') {
         const sub = await current();
+        if (welcome !== welcomes) return;
         // Made for another key (the host's was replaced): start over.
         const made = sub?.options?.applicationServerKey;
         if (sub && made && b64(made) !== key) await sub.unsubscribe().catch(() => {});

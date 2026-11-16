@@ -39,8 +39,41 @@ struct LastFrame(Option<CFRetained<CVImageBuffer>>, u64);
 // CVPixelBuffers are thread-safe, reference-counted CF objects.
 unsafe impl Send for LastFrame {}
 
+/// Whether a capture is the one its stream number goes out from. A replacement starts shut, so
+/// a failed start leaves the old capture running; the old one is shut first and the new one
+/// opened after, and from then on nothing of the old one reaches viewers, however late it
+/// comes out of VideoToolbox. A stream number only ever has one encoder feeding it.
+#[derive(Default)]
+pub struct Gate(std::sync::Mutex<bool>);
+
+impl Gate {
+    pub fn open(&self) {
+        *self.0.lock().unwrap() = true;
+    }
+
+    /// Once this returns, `pass` runs nothing more.
+    pub fn close(&self) {
+        *self.0.lock().unwrap() = false;
+    }
+
+    pub fn is_open(&self) -> bool {
+        *self.0.lock().unwrap()
+    }
+
+    /// Runs `send` if open; held meanwhile, so `close` waits for one under way.
+    pub fn pass(&self, send: impl FnOnce()) {
+        let open = self.0.lock().unwrap();
+        if *open {
+            send();
+        }
+    }
+}
+
 pub struct FrameState {
     encoder: Arc<Encoder>,
+    gate: Arc<Gate>,
+    /// Its stream number, for flow control (crate::flow).
+    stream: u8,
     last: std::sync::Mutex<LastFrame>,
     /// Frame-rate ceiling from the sharpness policy (fewer, sharper frames on a slow link).
     fps_cap: Arc<std::sync::atomic::AtomicU32>,
@@ -49,22 +82,33 @@ pub struct FrameState {
     /// Bumped on every new image; a pending check that sees it unchanged knows the screen
     /// has gone still.
     generation: std::sync::atomic::AtomicU64,
-    /// The newest image was skipped by the frame-rate ceiling and still needs sending.
+    /// The newest image was skipped (by the frame-rate ceiling, or held while a viewer's
+    /// link is full) and still needs sending.
     unsent: std::sync::atomic::AtomicBool,
-    /// Idle refreshes done since the screen went still, and how many came out tiny.
+    /// Idle refreshes done since the screen went still, how many came out tiny, and the
+    /// bytes they took.
     refreshes: std::sync::atomic::AtomicU32,
     tiny: std::sync::atomic::AtomicU32,
+    refresh_bytes: std::sync::atomic::AtomicU64,
+    /// When the picture last changed (capture time of the last real frame encoded).
+    changed_us: std::sync::atomic::AtomicU64,
     queue: dispatch2::DispatchRetained<DispatchQueue>,
     /// ScreenCaptureKit ended the stream (e.g. its display slept); it won't resume by itself.
     stopped: std::sync::atomic::AtomicBool,
+    /// The person at this Mac stopped it (the screen-recording indicator): not to be restarted
+    /// unless a viewer picks what to show again.
+    user_stopped: std::sync::atomic::AtomicBool,
 }
 
 /// A still screen is re-encoded this often for a while, so it sharpens to near-lossless
-/// after motion (each pass refines the previous one).
+/// after motion (each pass refines the previous one). How many, and how many bytes they
+/// may take, follows the bitrate (rate::refresh_budget); they stop after 3 tiny outputs
+/// (already sharp), and wait while a frame is still on its way to a viewer (crate::flow),
+/// so a refinement never queues ahead of the next real change.
 const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(83);
-/// At most this many refreshes (3 s), and stop after 3 tiny outputs (already sharp).
-const MAX_REFRESHES: u32 = 36;
 const TINY_FRAME: u64 = 1024;
+/// Refining starts once the picture has been still this long (voxl waits 150 ms too).
+const STILL_FOR_US: u64 = 150_000;
 
 impl FrameState {
     /// `refresh`: the image was encoded before (only refining it), not a new one.
@@ -75,8 +119,17 @@ impl FrameState {
         let now = now_us();
         self.last_encoded_us
             .store(now, std::sync::atomic::Ordering::Relaxed);
+        if !refresh {
+            self.changed_us.store(now, std::sync::atomic::Ordering::Relaxed);
+        }
         self.encoder
             .encode(&image, unsafe { CMTime::new(now as i64, 1_000_000) }, now, refresh);
+    }
+
+    /// Capture should wait: a viewer's link is still busy (crate::flow). A keyframe someone
+    /// is waiting for goes anyway.
+    fn held(&self) -> bool {
+        crate::flow::held(self.stream) && !self.encoder.keyframe_pending()
     }
 
     /// After a frame (sent or skipped): if nothing newer arrives, send what was skipped,
@@ -85,26 +138,56 @@ impl FrameState {
         use std::sync::atomic::Ordering::Relaxed;
         let fps = self.fps_cap.load(Relaxed).max(1);
         let wait = REFRESH_INTERVAL.max(std::time::Duration::from_micros(1_000_000 / fps as u64));
+        self.schedule_check(wait);
+    }
+
+    fn schedule_check(self: &Arc<Self>, wait: std::time::Duration) {
+        use std::sync::atomic::Ordering::Relaxed;
         let generation = self.generation.load(Relaxed);
         let state = self.clone();
         let Ok(when) = dispatch2::DispatchTime::try_from(wait) else {
             return;
         };
         let _ = self.queue.after(when, move || {
+            if !state.gate.is_open() {
+                return; // replaced, or not yet in use
+            }
             if state.generation.load(Relaxed) != generation {
                 return; // newer frames took over
+            }
+            // Held: look again shortly, and send the newest picture once the link has room.
+            if state.held() {
+                state.schedule_check(crate::flow::POLL);
+                return;
             }
             if state.unsent.swap(false, Relaxed) {
                 state.encode_last(false);
             } else {
-                if state.encoder.last_frame_size() < TINY_FRAME {
-                    state.tiny.fetch_add(1, Relaxed);
-                }
-                if state.refreshes.fetch_add(1, Relaxed) >= MAX_REFRESHES
-                    || state.tiny.load(Relaxed) >= 3
-                {
+                // Not yet still for long enough, or a frame is still on its way: later.
+                let still = now_us().saturating_sub(state.changed_us.load(Relaxed));
+                if still < STILL_FOR_US {
+                    state.schedule_check(std::time::Duration::from_micros(STILL_FOR_US - still));
                     return;
                 }
+                if !crate::flow::idle(state.stream) {
+                    state.schedule_check(crate::flow::POLL);
+                    return;
+                }
+                let done = state.refreshes.load(Relaxed);
+                if done > 0 {
+                    // The last refresh has come out by now: count it.
+                    let size = state.encoder.last_frame_size();
+                    state.refresh_bytes.fetch_add(size, Relaxed);
+                    if size < TINY_FRAME {
+                        state.tiny.fetch_add(1, Relaxed);
+                    }
+                }
+                let fps = state.fps_cap.load(Relaxed);
+                let (count, bytes) = crate::rate::refresh_budget(state.encoder.bitrate(), fps);
+                if done >= count || state.refresh_bytes.load(Relaxed) >= bytes || state.tiny.load(Relaxed) >= 3 {
+                    return;
+                }
+                state.refreshes.fetch_add(1, Relaxed);
                 state.encode_last(true);
             }
             state.schedule_idle_check();
@@ -116,6 +199,8 @@ pub struct Ivars {
     state: Arc<FrameState>,
     audio: Option<Arc<std::sync::Mutex<Packetizer>>>,
     display: CGDirectDisplayID,
+    /// Capturing a whole display (not a window): its changes go to crate::damage.
+    damage: bool,
     started: std::time::Instant,
     frames: std::sync::atomic::AtomicU64,
     idle: std::sync::atomic::AtomicU64,
@@ -138,7 +223,9 @@ define_class!(
             kind: SCStreamOutputType,
         ) {
             if kind == SCStreamOutputType::Audio {
-                if let Some(audio) = &self.ivars().audio {
+                if let Some(audio) = &self.ivars().audio
+                    && self.ivars().state.gate.is_open()
+                {
                     audio.lock().unwrap().push(sample);
                 }
                 return;
@@ -155,12 +242,16 @@ define_class!(
                 }
                 return;
             };
-            if ivars.frames.fetch_add(1, Relaxed) == 0 {
+            let first = ivars.frames.fetch_add(1, Relaxed) == 0;
+            if first {
                 tracing::info!(
                     "display {}: first frame after {} ms",
                     ivars.display,
                     ivars.started.elapsed().as_millis()
                 );
+            }
+            if ivars.damage {
+                note_damage(ivars.display, sample, &image, first);
             }
             let pts = unsafe { sample.presentation_time_stamp() };
             let capture_us = match cmtime_us(pts) {
@@ -168,22 +259,36 @@ define_class!(
                 us => us,
             };
             let state = &ivars.state;
+            // Not in use yet: keep the picture, for when it is.
+            if !state.gate.is_open() {
+                state.unsent.store(true, Relaxed);
+                *state.last.lock().unwrap() = LastFrame(Some(image), capture_us);
+                return;
+            }
             state.generation.fetch_add(1, Relaxed);
             state.refreshes.store(0, Relaxed);
             state.tiny.store(0, Relaxed);
-            // Over the frame-rate ceiling: keep the image, send it later if it's the last.
+            state.refresh_bytes.store(0, Relaxed);
+            // Over the frame-rate ceiling, or a viewer's link is full: keep the image, and
+            // send it later if it's the last (a held one goes as soon as there's room).
             let fps = state.fps_cap.load(Relaxed);
             let since = capture_us.saturating_sub(state.last_encoded_us.load(Relaxed));
             let too_soon = fps > 0 && since < 900_000 / fps as u64;
-            if too_soon && !state.encoder.keyframe_pending() {
+            let held = state.held();
+            if (too_soon && !state.encoder.keyframe_pending()) || held {
                 state.unsent.store(true, Relaxed);
             } else {
                 state.unsent.store(false, Relaxed);
                 state.last_encoded_us.store(capture_us, Relaxed);
+                state.changed_us.store(capture_us, Relaxed);
                 state.encoder.encode(&image, pts, capture_us, false);
             }
             *state.last.lock().unwrap() = LastFrame(Some(image), capture_us);
-            state.schedule_idle_check();
+            if held {
+                state.schedule_check(crate::flow::POLL);
+            } else {
+                state.schedule_idle_check();
+            }
         }
     }
 
@@ -194,6 +299,7 @@ define_class!(
             // Stopped from this Mac's screen-recording indicator: leave it stopped.
             if error.code() == SCStreamErrorCode::UserStopped.0 {
                 tracing::info!("display {}: capture stopped from this Mac", ivars.display);
+                ivars.state.user_stopped.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
             tracing::warn!(
@@ -214,11 +320,13 @@ impl StreamOutput {
         state: Arc<FrameState>,
         audio: Option<Arc<std::sync::Mutex<Packetizer>>>,
         display: CGDirectDisplayID,
+        damage: bool,
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(Ivars {
             state,
             audio,
             display,
+            damage,
             started: std::time::Instant::now(),
             frames: Default::default(),
             idle: Default::default(),
@@ -250,6 +358,15 @@ impl Capture {
             self.stream.updateConfiguration_completionHandler(&self.config, None);
         }
     }
+
+    /// Draws the pointer into the picture from now on, or leaves it out (`crate::cursor`),
+    /// without restarting the stream.
+    pub fn set_shows_cursor(&self, on: bool) {
+        unsafe {
+            self.config.setShowsCursor(on);
+            self.stream.updateConfiguration_completionHandler(&self.config, None);
+        }
+    }
 }
 
 /// A display's refresh rate (60 when it doesn't say).
@@ -278,9 +395,34 @@ impl Capture {
         let state = self.state.clone();
         // A skipped (newer) image is news; otherwise it's the picture already sent.
         self.queue.exec_async(move || {
+            if !state.gate.is_open() {
+                return;
+            }
             let fresh = state.unsent.swap(false, std::sync::atomic::Ordering::Relaxed);
             state.encode_last(!fresh)
         });
+    }
+
+    /// This capture is now the one its stream goes out from: what it has goes out, and a still
+    /// screen goes on to sharpen as usual.
+    pub fn go_live(&self) {
+        self.state.gate.open();
+        let state = self.state.clone();
+        self.queue.exec_async(move || {
+            let fresh = state.unsent.swap(false, std::sync::atomic::Ordering::Relaxed);
+            state.encode_last(!fresh);
+            state.schedule_idle_check();
+        });
+    }
+
+    /// Stops anything of this capture reaching viewers from now on.
+    pub fn retire(&self) {
+        self.state.gate.close();
+    }
+
+    /// Someone at this Mac stopped it.
+    pub fn user_stopped(&self) -> bool {
+        self.state.user_stopped.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Bumped on every new image.
@@ -304,6 +446,185 @@ impl Capture {
             .stopped
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+}
+
+/// Where a frame of display `display` changed, for crate::damage: ScreenCaptureKit's dirty
+/// rects (in the frame's pixels). A capture's first frame is how the display looks, not a
+/// change (ScreenCaptureKit calls all of it dirty).
+fn note_damage(display: CGDirectDisplayID, sample: &CMSampleBuffer, image: &CVImageBuffer, first: bool) {
+    use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+    let size = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
+    if first {
+        crate::damage::note(display, size, &[]);
+        return;
+    }
+    match dirty_rects(sample, size) {
+        Some(rects) => crate::damage::note(display, size, &rects),
+        None => crate::damage::note_all(display, size),
+    }
+}
+
+/// A frame's dirty rects (SCStreamFrameInfoDirtyRects), clipped to its `w`×`h` pixels, as
+/// (x0, y0, x1, y1); `None` when it doesn't have them.
+fn dirty_rects(sample: &CMSampleBuffer, (w, h): (usize, usize)) -> Option<Vec<(u32, u32, u32, u32)>> {
+    use objc2_core_foundation::{CFArray, CFDictionary, CGRect};
+    use objc2_screen_capture_kit::SCStreamFrameInfoDirtyRects;
+    let attachments = unsafe { sample.sample_attachments_array(false) }?;
+    if attachments.count() == 0 {
+        return None;
+    }
+    // SAFETY: a sample's attachments are dictionaries; the dirty rects an array of
+    // CGRect dictionaries. NSString keys are toll-free bridged to CFString.
+    let info = unsafe { (attachments.value_at_index(0) as *const CFDictionary).as_ref() }?;
+    let key: &objc2_foundation::NSString = unsafe { SCStreamFrameInfoDirtyRects };
+    let list = unsafe { (info.value((key as *const objc2_foundation::NSString).cast()) as *const CFArray).as_ref() }?;
+    let mut out = Vec::with_capacity(list.count().max(0) as usize);
+    for i in 0..list.count() {
+        let dict = unsafe { (list.value_at_index(i) as *const CFDictionary).as_ref() };
+        let mut r = CGRect::default();
+        if !unsafe { objc2_core_graphics::CGRectMakeWithDictionaryRepresentation(dict, &mut r) } {
+            continue;
+        }
+        let x0 = r.origin.x.floor().clamp(0.0, w as f64) as u32;
+        let y0 = r.origin.y.floor().clamp(0.0, h as f64) as u32;
+        let x1 = (r.origin.x + r.size.width).ceil().clamp(0.0, w as f64) as u32;
+        let y1 = (r.origin.y + r.size.height).ceil().clamp(0.0, h as f64) as u32;
+        if x1 > x0 && y1 > y0 {
+            out.push((x0, y0, x1, y1));
+        }
+    }
+    Some(out)
+}
+
+pub struct WatchIvars {
+    display: CGDirectDisplayID,
+    frames: std::sync::atomic::AtomicU64,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+define_class!(
+    /// Hears a display's changes for crate::damage, and nothing else.
+    #[unsafe(super(NSObject))]
+    #[name = "GlassDamageOutput"]
+    #[ivars = WatchIvars]
+    struct DamageOutput;
+
+    unsafe impl NSObjectProtocol for DamageOutput {}
+
+    unsafe impl SCStreamOutput for DamageOutput {
+        #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
+        unsafe fn stream_did_output(
+            &self,
+            _stream: &SCStream,
+            sample: &CMSampleBuffer,
+            kind: SCStreamOutputType,
+        ) {
+            if kind != SCStreamOutputType::Screen {
+                return;
+            }
+            let Some(image) = (unsafe { sample.image_buffer() }) else {
+                return;
+            };
+            let ivars = self.ivars();
+            let first = ivars.frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0;
+            note_damage(ivars.display, sample, &image, first);
+        }
+    }
+
+    unsafe impl SCStreamDelegate for DamageOutput {
+        #[unsafe(method(stream:didStopWithError:))]
+        unsafe fn stream_did_stop(&self, _stream: &SCStream, _error: &NSError) {
+            self.ivars().stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+);
+
+/// A display watched for changes alone (an agent waits on it and no viewer streams it);
+/// stops when dropped.
+pub struct Watch {
+    stream: Retained<SCStream>,
+    _output: Retained<DamageOutput>,
+    _queue: dispatch2::DispatchRetained<DispatchQueue>,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+// As Capture.
+unsafe impl Send for Watch {}
+
+impl Watch {
+    pub fn stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
+    }
+}
+
+/// The widest a watched display is captured: its dirty rects still find a caret.
+const WATCH_WIDTH: usize = 1920;
+
+/// Starts watching `display` for changes: a small capture with no encoder, whose dirty
+/// rects go to crate::damage.
+pub fn watch(display: &Display) -> Result<Watch> {
+    let (w, h) = (display.info.width.max(1), display.info.height.max(1));
+    let scale = (WATCH_WIDTH as f64 / w as f64).min(1.0);
+    let (width, height) = (((w as f64 * scale) as usize).max(2) & !1, ((h as f64 * scale) as usize).max(2) & !1);
+    let filter = unsafe {
+        SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display.sc, &NSArray::new())
+    };
+    let config = unsafe { SCStreamConfiguration::new() };
+    unsafe {
+        config.setWidth(width);
+        config.setHeight(height);
+        config.setMinimumFrameInterval(CMTime::new(1, 30));
+        config.setPixelFormat(PIXEL_FORMAT_420V);
+        // The pointer moving isn't the screen changing.
+        config.setShowsCursor(false);
+        config.setQueueDepth(3);
+    }
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let output = DamageOutput::alloc().set_ivars(WatchIvars {
+        display: display.info.id,
+        frames: Default::default(),
+        stopped: stopped.clone(),
+    });
+    let output: Retained<DamageOutput> = unsafe { msg_send![super(output), init] };
+    let stream = unsafe {
+        SCStream::initWithFilter_configuration_delegate(
+            SCStream::alloc(),
+            &filter,
+            &config,
+            Some(ProtocolObject::from_ref(&*output)),
+        )
+    };
+    let queue = DispatchQueue::new("glass.damage", DispatchQueueAttr::SERIAL);
+    unsafe {
+        stream
+            .addStreamOutput_type_sampleHandlerQueue_error(
+                ProtocolObject::from_ref(&*output),
+                SCStreamOutputType::Screen,
+                Some(&queue),
+            )
+            .map_err(|e| anyhow!("addStreamOutput: {}", e.localizedDescription()))?;
+    }
+    let (tx, rx) = mpsc::channel();
+    let handler = RcBlock::new(move |err: *mut NSError| {
+        let _ = tx.send(unsafe { err.as_ref() }.map(|e| e.localizedDescription().to_string()));
+    });
+    unsafe { stream.startCaptureWithCompletionHandler(Some(&handler)) };
+    let started = answer(&rx, "starting a watch");
+    if started.is_err() {
+        unsafe { stream.stopCaptureWithCompletionHandler(None) };
+    }
+    if let Some(err) = started? {
+        bail!("startCapture: {err}");
+    }
+    let id = display.info.id;
+    tracing::info!("display {id}: watching for changes for an agent ({width}x{height})");
+    Ok(Watch { stream, _output: output, _queue: queue, stopped })
 }
 
 /// A BGRA pixel buffer's pixels, rows packed (`None` for other formats).
@@ -381,6 +702,7 @@ pub fn screenshot(display_id: CGDirectDisplayID, max: [u32; 2]) -> Result<crate:
 
 impl Drop for Capture {
     fn drop(&mut self) {
+        self.retire();
         let (tx, rx) = mpsc::channel();
         let handler = RcBlock::new(move |_err: *mut NSError| {
             let _ = tx.send(());
@@ -595,16 +917,21 @@ pub fn list_displays() -> Result<Vec<Display>> {
 
 pub fn start(
     source: Source<'_>,
+    stream: u8,
     width: usize,
     height: usize,
     fps: i32,
     encoder: Arc<Encoder>,
+    // Shut until `go_live`.
+    gate: Arc<Gate>,
     fps_cap: Arc<std::sync::atomic::AtomicU32>,
     audio: Option<Arc<std::sync::Mutex<Packetizer>>>,
     // Full colour: for the 4:2:2 encoder, or for lossless refreshes (sharp text).
     bgra: bool,
     // Capture in Display P3 (a wide-colour display) instead of sRGB.
     p3: bool,
+    // Draw the pointer in; viewers that draw their own leave it out (`crate::cursor`).
+    shows_cursor: bool,
 ) -> Result<Capture> {
     let captures_audio = audio.is_some();
     let (filter, source_id) = match source {
@@ -638,7 +965,7 @@ pub fn start(
         if p3 {
             config.setColorSpaceName(objc2_core_graphics::kCGColorSpaceDisplayP3);
         }
-        config.setShowsCursor(true);
+        config.setShowsCursor(shows_cursor);
         // One buffer is held as the last frame, so leave the pool room for new ones.
         config.setQueueDepth(4);
         config.setCapturesAudio(captures_audio);
@@ -650,6 +977,8 @@ pub fn start(
     let queue = DispatchQueue::new("glass.capture", DispatchQueueAttr::SERIAL);
     let state = Arc::new(FrameState {
         encoder,
+        gate,
+        stream,
         last: std::sync::Mutex::new(LastFrame(None, 0)),
         fps_cap,
         last_encoded_us: Default::default(),
@@ -657,10 +986,13 @@ pub fn start(
         unsent: Default::default(),
         refreshes: Default::default(),
         tiny: Default::default(),
+        refresh_bytes: Default::default(),
+        changed_us: Default::default(),
         queue: queue.clone(),
         stopped: Default::default(),
+        user_stopped: Default::default(),
     });
-    let output = StreamOutput::new(state.clone(), audio, source_id);
+    let output = StreamOutput::new(state.clone(), audio, source_id, matches!(source, Source::Display(_)));
     // The output is also the delegate, to hear when ScreenCaptureKit ends the stream.
     let stream = unsafe {
         SCStream::initWithFilter_configuration_delegate(
@@ -717,6 +1049,23 @@ pub fn start(
 
 #[cfg(test)]
 mod tests {
+    use super::Gate;
+
+    #[test]
+    fn a_gate_lets_through_only_while_open() {
+        let gate = Gate::default();
+        let mut sent = 0;
+        gate.pass(|| sent += 1);
+        assert_eq!(sent, 0, "a replacement starts shut");
+        gate.open();
+        gate.pass(|| sent += 1);
+        assert!(gate.is_open());
+        assert_eq!(sent, 1);
+        gate.close();
+        gate.pass(|| sent += 1);
+        assert_eq!(sent, 1, "nothing of a retired capture goes out");
+    }
+
     /// Needs Screen Recording permission: `cargo test -- --ignored screenshot`.
     #[test]
     #[ignore]

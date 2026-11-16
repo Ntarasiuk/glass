@@ -12,6 +12,7 @@ export function attachGamepads({ send, onConnect = () => {}, log = () => {} }) {
   const last = new Map(); // pad slot -> { buttons: [], axes: [] }
   let enabled = false;
   let frame;
+  let focused = true;
 
   const slot = (gamepad) => gamepad.index % MAX_PADS;
   const connected = (gamepad) => {
@@ -22,10 +23,28 @@ export function attachGamepads({ send, onConnect = () => {}, log = () => {} }) {
     onConnect(gamepad);
   };
 
+  function neutral() {
+    for (const [n, prev] of last) {
+      prev.buttons.forEach((v, i) => {
+        if (v) send(Input.PAD_BUTTON, { button: n, keycode: i, a: 0 });
+        prev.buttons[i] = 0;
+      });
+      prev.axes.forEach((v, i) => {
+        if (v) send(Input.PAD_AXIS, { button: n, keycode: i, a: 0 });
+        prev.axes[i] = 0;
+      });
+    }
+  }
+
   function poll() {
     frame = undefined;
     if (!enabled || !last.size) return;
-    if (document.hasFocus()) {
+    if (!document.hasFocus()) {
+      // The page stops seeing the controller: what's held mustn't stay held on the host.
+      if (focused) neutral();
+      focused = false;
+    } else {
+      focused = true;
       for (const g of navigator.getGamepads?.() ?? []) {
         if (!g) continue;
         const n = slot(g);

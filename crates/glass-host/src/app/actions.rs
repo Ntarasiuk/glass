@@ -13,16 +13,46 @@ pub fn set_setting(key: &str, value: &str) -> Result<String> {
     let mut s = settings::load();
     s.set(key, value)?;
     settings::save(&s)?;
+    #[cfg(windows)]
+    if key == "bind" {
+        return Ok(crate::platform::firewall::bind_change_note().unwrap_or_default());
+    }
     Ok(String::new())
 }
 
 pub fn set_remote(on: bool) -> Result<String> {
     remote::set_enabled(on)?;
+    crate::support::owner_chose_remote();
     Ok(if on {
         "Remote access is on. Links can now work from any network.".into()
     } else {
         "Remote access is off. Links made to work from anywhere stop within seconds.".into()
     })
+}
+
+/// Adds this computer to a glassdesk.dev account: makes the one-time link and opens it, where
+/// signing in (or making an account) is a passkey. Accounts open computers over remote access,
+/// so that goes on too.
+pub fn account_add() -> Result<String> {
+    if !remote::enabled() {
+        remote::set_enabled(true)?;
+        crate::support::owner_chose_remote();
+    }
+    let claim = crate::account::add()?;
+    open(&claim.url);
+    Ok(format!("Opened glassdesk.dev in your browser: sign in with your passkey there to add {}.", claim.name))
+}
+
+pub fn account_remove() -> Result<String> {
+    Ok(match crate::account::remove()? {
+        0 => "This computer wasn't on any account.".into(),
+        _ => "Removed from your account. It no longer shows at glassdesk.dev/computers.".into(),
+    })
+}
+
+/// Where your account lists your computers.
+pub fn computers_url() -> String {
+    format!("{}/computers", remote::base().trim_end_matches('/'))
 }
 
 pub fn privacy(on: bool) -> Result<String> {
@@ -78,14 +108,14 @@ pub fn agents_public(on: bool) -> Result<String> {
 
 /// Installs an app that asked for unattended access.
 pub fn install_agent(id: &str) -> Result<String> {
-    let name = crate::grants::update(|s| {
-        let c = s.clients.iter_mut().find(|c| c.id == id && c.auth_method != "none")?;
-        c.installed = true;
-        c.install_requested = false;
-        Some(c.name.clone())
-    })?
-    .ok_or_else(|| anyhow::anyhow!("that app is gone"))?;
-    Ok(format!("{name} can use this computer unattended. Revoke it any time."))
+    let name = crate::grants::install(id)?.ok_or_else(|| anyhow::anyhow!("that app is gone"))?;
+    Ok(format!("{name} can use this computer unattended. Uninstall it any time."))
+}
+
+/// Takes an app's unattended access back, whether or not it has used it yet.
+pub fn uninstall_agent(id: &str) -> Result<String> {
+    anyhow::ensure!(crate::grants::uninstall(id)?, "it isn't installed any more");
+    Ok("Uninstalled. It can't use this computer unless you install it again.".into())
 }
 
 /// Ends an agent's access (from another device).

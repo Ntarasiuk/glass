@@ -21,6 +21,8 @@ pub struct Snapshot {
     /// Which owner-only secrets are set: OIDC client secret, LDAP password, SCIM token.
     pub secrets: [bool; 3],
     pub remote: bool,
+    /// How many passkeys of the owner's account may open this computer (pinned by adding it).
+    pub openers: usize,
     /// Its address from anywhere, while remote access is on.
     pub anywhere_url: Option<String>,
     /// Privacy screen on right now.
@@ -91,6 +93,8 @@ pub struct Agent {
     pub public: bool,
     /// Apps asking for unattended access: (client id, name).
     pub installs: Vec<(String, String)>,
+    /// Apps installed for unattended access: (client id, name).
+    pub installed: Vec<(String, String)>,
     /// The latest audit log lines, newest first, as text.
     pub recent: Vec<String>,
 }
@@ -141,6 +145,7 @@ pub fn gather() -> Snapshot {
             settings::scim_token().is_some(),
         ],
         remote: remote::enabled(),
+        openers: crate::actions::openers_count(),
         anywhere_url: remote::enabled().then(|| remote::HostKey::load_or_create().ok().map(|k| remote::open_url(&k))).flatten(),
         log: connlog::recent(200).into_iter().rev().collect(),
         token: std::fs::read_to_string(crate::default_token_file()).unwrap_or_default().trim().to_string(),
@@ -224,6 +229,7 @@ pub fn gather() -> Snapshot {
     snap.agent.enabled = store.enabled;
     snap.agent.public = store.public;
     snap.agent.installs = store.clients.iter().filter(|c| c.install_requested && !c.installed).map(|c| (c.id.clone(), c.name.clone())).collect();
+    snap.agent.installed = store.clients.iter().filter(|c| c.installed).map(|c| (c.id.clone(), c.name.clone())).collect();
     snap.agent.recent = crate::grants::audit_lines(6)
         .iter()
         .rev()

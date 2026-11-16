@@ -33,7 +33,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM HUP
 
 info "Downloading Glass for this session (nothing is installed)"
-curl -fsSL "$BASE/releases/$TARBALL" -o "$tmp/glass.tar.gz" || fail "Download failed. Check your connection and try again."
+curl -fsSL -H "X-Glass-Via: quick-support" "$BASE/releases/$TARBALL" -o "$tmp/glass.tar.gz" || fail "Download failed. Check your connection and try again."
 curl -fsSL "$BASE/releases/$TARBALL.sha256" -o "$tmp/glass.sha256" || fail "Couldn't fetch the checksum."
 expected=$(cut -d' ' -f1 < "$tmp/glass.sha256")
 if command -v sha256sum >/dev/null 2>&1; then

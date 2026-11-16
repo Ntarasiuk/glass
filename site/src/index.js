@@ -1,10 +1,12 @@
 // glassdesk.dev: landing page, one-line installer, release downloads (counted in D1 and
-// sent to Google Analytics), the feedback API (emailed to the maintainer), the introducer
+// sent to AgentLens as goals), the feedback API (emailed to the maintainer), the introducer
 // for remote access (WebRTC signaling, one Durable Object per host), and passkey accounts
 // for /computers (src/accounts.js). Static files come from ./public via the ASSETS binding;
 // the web client for remote access is served from /app/.
 
 import { accounts } from './accounts.js';
+import { trackGoal, withAgentLens } from './agentlens/index.ts';
+import { releaseInfo } from './releases.js';
 
 import { hostsOnline } from './introducer.js';
 
@@ -33,118 +35,129 @@ const HOME_LINKS = [
 const HSTS = 'max-age=31536000; includeSubDomains';
 
 export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const ua = request.headers.get('user-agent') ?? '';
-
-    // HTTPS only (`curl -fsSL glassdesk.dev` follows the redirect).
-    // CF-Visitor carries the client's scheme at the edge (local dev has none).
-    if (/"scheme":"http"/.test(request.headers.get('cf-visitor') ?? '')) {
-      url.protocol = 'https:';
-      return Response.redirect(url.toString(), 301);
+  fetch(request, env, ctx) {
+    // Analytics (src/agentlens/) sees pages, downloads and agent-facing files. Real-time and machine
+    // traffic passes straight through: signaling, JSON APIs, WebSocket upgrades, and the /app/ viewer
+    // (latency-critical, and a remote screen session is nobody's pageview).
+    const path = new URL(request.url).pathname;
+    if (path.startsWith('/signal/') || path.startsWith('/api/') || path === '/app' || path.startsWith('/app/') || request.headers.get('upgrade')) {
+      return route(request, env, ctx);
     }
-
-    if (url.pathname === '/api/feedback') {
-      if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
-      if (request.method === 'POST') return cors(await feedback(request, env, ctx));
-      return cors(json({ error: 'method not allowed' }, 405));
-    }
-
-    const account = await accounts(request, env, url);
-    if (account) return account;
-
-    if (url.pathname === '/api/stats') return stats(request, env);
-    // Your own visitor id, so `node stats.mjs --mark-me` can leave this machine out of the numbers.
-    if (url.pathname === '/api/visitor') return json({ visitor: await visitorId(request, env) });
-
-    if (url.pathname === '/api/support') {
-      if (request.method === 'POST') return supportRegister(request, env, url);
-      if (request.method === 'DELETE') return supportCancel(request, env);
-      return json({ error: 'method not allowed' }, 405);
-    }
-    if (url.pathname === '/api/support/claim' && request.method === 'POST') return supportClaim(request, env);
-
-    // /signal/online?ids=<id>,…: which of these computers are online (glassdesk.dev/computers).
-    if (url.pathname === '/signal/online') {
-      const ids = [...new Set((url.searchParams.get('ids') ?? '').split(','))].filter((id) => /^[A-Za-z0-9_-]{22}$/.test(id)).slice(0, 32);
-      return json({ online: await hostsOnline(env, ids) });
-    }
-
-    // /signal/host/<id> (the host) and /signal/connect/<id> (a browser).
-    const signal = url.pathname.match(/^\/signal\/(host|connect)\/([A-Za-z0-9_-]{22})$/);
-    if (signal) {
-      const [, kind, id] = signal;
-      const target = new URL(`https://introducer/?role=${kind === 'host' ? 'host' : 'client'}&id=${id}`);
-      const headers = new Headers(request.headers);
-      headers.set('X-Client-IP', request.headers.get('CF-Connecting-IP') ?? '');
-      return env.INTRODUCER.get(env.INTRODUCER.idFromName(id)).fetch(new Request(target, { headers }));
-    }
-
-    // An agent asking for markdown gets the page's markdown twin, even from curl; `curl … | sh` never asks.
-    const wantsMarkdown = /\btext\/markdown\b/i.test(request.headers.get('accept') ?? '');
-    // Quick support on Windows: `irm glassdesk.dev/help | iex`.
-    if (url.pathname === '/help.ps1' || (url.pathname === '/help' && POWERSHELL.test(ua) && !wantsMarkdown)) {
-      ctx.waitUntil(recordDownload(env, request, 'script', 'help.ps1', 'quick_support'));
-      const res = await env.ASSETS.fetch(new URL('/help.ps1', url));
-      return new Response(res.body, {
-        headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
-      });
-    }
-    // Quick support: `curl glassdesk.dev/help | sh` runs Glass for one session, installing nothing.
-    if (url.pathname === '/help.sh' || (url.pathname === '/help' && CLI_AGENT.test(ua) && !wantsMarkdown)) {
-      ctx.waitUntil(recordDownload(env, request, 'script', 'help.sh', 'quick_support'));
-      const res = await env.ASSETS.fetch(new URL('/help.sh', url));
-      return new Response(res.body, {
-        headers: { 'content-type': 'text/x-shellscript; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
-      });
-    }
-    if (url.pathname === '/install.ps1' || (url.pathname === '/' && POWERSHELL.test(ua) && !wantsMarkdown)) {
-      ctx.waitUntil(recordDownload(env, request, 'script', 'install.ps1', 'install_script'));
-      const res = await env.ASSETS.fetch(new URL('/install.ps1', url));
-      return new Response(res.body, {
-        headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
-      });
-    }
-    const wantsScript = url.pathname === '/install.sh' || (url.pathname === '/' && CLI_AGENT.test(ua) && !wantsMarkdown);
-    if (wantsScript) {
-      ctx.waitUntil(recordDownload(env, request, 'script', 'install.sh', 'install_script'));
-      const res = await env.ASSETS.fetch(new URL('/install.sh', url));
-      return new Response(res.body, {
-        headers: { 'content-type': 'text/x-shellscript; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
-      });
-    }
-
-    // The web client for remote access lives at /app/, with the slash, so its relative URLs
-    // resolve under /app/. drop-trailing-slash would redirect it to /app and break them.
-    if (url.pathname === '/app') {
-      url.pathname = '/app/';
-      return Response.redirect(url.toString(), 301);
-    }
-    if (url.pathname === '/app/') return env.ASSETS.fetch(new Request(new URL('/app', url), request));
-
-    if (url.pathname === '/' && (request.method === 'GET' || request.method === 'HEAD')) {
-      const res = await env.ASSETS.fetch(wantsMarkdown ? new Request(new URL('/index.md', url), request) : request);
-      const out = new Response(res.body, res);
-      if (wantsMarkdown) out.headers.set('content-type', 'text/markdown; charset=utf-8');
-      out.headers.append('vary', 'Accept');
-      out.headers.set('link', HOME_LINKS);
-      out.headers.set('strict-transport-security', HSTS);
-      return out;
-    }
-
-    if (url.pathname.endsWith('.mp4')) return ranged(await env.ASSETS.fetch(request), request);
-
-    if (url.pathname.startsWith('/releases/') && /\.(tar\.gz|zip|msi)$/.test(url.pathname)) {
-      const name = url.pathname.slice('/releases/'.length);
-      ctx.waitUntil(recordDownload(env, request, 'release', name, 'download'));
-      const res = await env.ASSETS.fetch(request);
-      if (res.status !== 404) return res;
-      // Too big to be an asset (over 25 MiB): the same file from the GitHub release.
-      return releaseRedirect(env, url, name);
-    }
-    return env.ASSETS.fetch(request);
+    return withAgentLens(request, env, ctx, (r) => route(r, env, ctx));
   },
 };
+
+async function route(request, env, ctx) {
+  const url = new URL(request.url);
+  const ua = request.headers.get('user-agent') ?? '';
+
+  // HTTPS only (`curl -fsSL glassdesk.dev` follows the redirect).
+  // CF-Visitor carries the client's scheme at the edge (local dev has none).
+  if (/"scheme":"http"/.test(request.headers.get('cf-visitor') ?? '')) {
+    url.protocol = 'https:';
+    return Response.redirect(url.toString(), 301);
+  }
+
+  if (url.pathname === '/api/feedback') {
+    if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
+    if (request.method === 'POST') return cors(await feedback(request, env, ctx));
+    return cors(json({ error: 'method not allowed' }, 405));
+  }
+
+  const account = await accounts(request, env, url);
+  if (account) return account;
+
+  if (url.pathname === '/api/stats') return stats(request, env);
+  // Your own visitor id, so `node stats.mjs --mark-me` can leave this machine out of the numbers.
+  if (url.pathname === '/api/visitor') return json({ visitor: await visitorId(request, env) });
+
+  if (url.pathname === '/api/support') {
+    if (request.method === 'POST') return supportRegister(request, env, url);
+    if (request.method === 'DELETE') return supportCancel(request, env);
+    return json({ error: 'method not allowed' }, 405);
+  }
+  if (url.pathname === '/api/support/claim' && request.method === 'POST') return supportClaim(request, env);
+
+  // /signal/online?ids=<id>,…: which of these computers are online (glassdesk.dev/computers).
+  if (url.pathname === '/signal/online') {
+    const ids = [...new Set((url.searchParams.get('ids') ?? '').split(','))].filter((id) => /^[A-Za-z0-9_-]{22}$/.test(id)).slice(0, 32);
+    return json({ online: await hostsOnline(env, ids) });
+  }
+
+  // /signal/host/<id> (the host) and /signal/connect/<id> (a browser).
+  const signal = url.pathname.match(/^\/signal\/(host|connect)\/([A-Za-z0-9_-]{22})$/);
+  if (signal) {
+    const [, kind, id] = signal;
+    const target = new URL(`https://introducer/?role=${kind === 'host' ? 'host' : 'client'}&id=${id}`);
+    const headers = new Headers(request.headers);
+    headers.set('X-Client-IP', request.headers.get('CF-Connecting-IP') ?? '');
+    return env.INTRODUCER.get(env.INTRODUCER.idFromName(id)).fetch(new Request(target, { headers }));
+  }
+
+  // An agent asking for markdown gets the page's markdown twin, even from curl; `curl … | sh` never asks.
+  const wantsMarkdown = /\btext\/markdown\b/i.test(request.headers.get('accept') ?? '');
+  // Quick support on Windows: `irm glassdesk.dev/help | iex`.
+  if (url.pathname === '/help.ps1' || (url.pathname === '/help' && POWERSHELL.test(ua) && !wantsMarkdown)) {
+    ctx.waitUntil(recordDownload(env, request, 'script', 'help.ps1', 'quick_support', ctx));
+    const res = await env.ASSETS.fetch(new URL('/help.ps1', url));
+    return new Response(res.body, {
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
+    });
+  }
+  // Quick support: `curl glassdesk.dev/help | sh` runs Glass for one session, installing nothing.
+  if (url.pathname === '/help.sh' || (url.pathname === '/help' && CLI_AGENT.test(ua) && !wantsMarkdown)) {
+    ctx.waitUntil(recordDownload(env, request, 'script', 'help.sh', 'quick_support', ctx));
+    const res = await env.ASSETS.fetch(new URL('/help.sh', url));
+    return new Response(res.body, {
+      headers: { 'content-type': 'text/x-shellscript; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
+    });
+  }
+  if (url.pathname === '/install.ps1' || (url.pathname === '/' && POWERSHELL.test(ua) && !wantsMarkdown)) {
+    ctx.waitUntil(recordDownload(env, request, 'script', 'install.ps1', 'install_script', ctx));
+    const res = await env.ASSETS.fetch(new URL('/install.ps1', url));
+    return new Response(res.body, {
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
+    });
+  }
+  const wantsScript = url.pathname === '/install.sh' || (url.pathname === '/' && CLI_AGENT.test(ua) && !wantsMarkdown);
+  if (wantsScript) {
+    ctx.waitUntil(recordDownload(env, request, 'script', 'install.sh', 'install_script', ctx));
+    const res = await env.ASSETS.fetch(new URL('/install.sh', url));
+    return new Response(res.body, {
+      headers: { 'content-type': 'text/x-shellscript; charset=utf-8', 'cache-control': 'no-store', 'strict-transport-security': HSTS },
+    });
+  }
+
+  // The web client for remote access lives at /app/, with the slash, so its relative URLs
+  // resolve under /app/. drop-trailing-slash would redirect it to /app and break them.
+  if (url.pathname === '/app') {
+    url.pathname = '/app/';
+    return Response.redirect(url.toString(), 301);
+  }
+  if (url.pathname === '/app/') return env.ASSETS.fetch(new Request(new URL('/app', url), request));
+
+  if (url.pathname === '/' && (request.method === 'GET' || request.method === 'HEAD')) {
+    const res = await env.ASSETS.fetch(wantsMarkdown ? new Request(new URL('/index.md', url), request) : request);
+    const out = new Response(res.body, res);
+    if (wantsMarkdown) out.headers.set('content-type', 'text/markdown; charset=utf-8');
+    out.headers.append('vary', 'Accept');
+    out.headers.set('link', HOME_LINKS);
+    out.headers.set('strict-transport-security', HSTS);
+    return out;
+  }
+
+  if (url.pathname.endsWith('.mp4')) return ranged(await env.ASSETS.fetch(request), request);
+
+  if (url.pathname.startsWith('/releases/') && /\.(tar\.gz|zip|msi)$/.test(url.pathname)) {
+    const name = url.pathname.slice('/releases/'.length);
+    ctx.waitUntil(recordDownload(env, request, 'release', name, 'download'));
+    const res = await env.ASSETS.fetch(request);
+    if (res.status !== 404) return res;
+    // Too big to be an asset (over 25 MiB): the same file from the GitHub release.
+    return releaseRedirect(env, url, name);
+  }
+  return env.ASSETS.fetch(request);
+}
 
 /** A tarball, zip or MSI kept only on GitHub: `glass-latest-*` means the version in version.json. */
 export async function releaseRedirect(env, url, name) {
@@ -216,7 +229,7 @@ async function feedback(request, env, ctx) {
   )
     .bind(Date.now(), row.message, row.email, row.source, row.version, row.os, row.country, visitor)
     .run();
-  ctx.waitUntil(Promise.all([emailFeedback(env, row), track(env, request, visitor, 'feedback', { source: row.source })]));
+  ctx.waitUntil(Promise.all([emailFeedback(env, row), goal(env, request, ctx, visitor, 'feedback', { source: row.source })]));
   return json({ ok: true });
 }
 
@@ -333,7 +346,7 @@ async function secretHash(env, value) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function recordDownload(env, request, kind, file, event) {
+async function recordDownload(env, request, kind, file, event, ctx) {
   try {
     const visitor = await visitorId(request, env);
     // The installer sends the version it replaces ('none' for a new install); older
@@ -346,38 +359,33 @@ async function recordDownload(env, request, kind, file, event) {
     )
       .bind(Date.now(), kind, file, request.cf?.country ?? null, clip(request.headers.get('user-agent'), 200), visitor, via, previous)
       .run();
-    const os = /darwin/.test(file) ? 'macos' : /linux/.test(file) ? 'linux' : undefined;
-    await track(env, request, visitor, via === 'update' ? 'update' : event, { file, os, via: via ?? 'unknown', previous });
+    if (kind !== 'release') {
+      await goal(env, request, ctx, visitor, event, { file });
+      return;
+    }
+    // A quick-support session fetches the release too; that session is already counted once, as quick_support.
+    if (request.headers.get('x-glass-via') === 'quick-support') return;
+    // One event per thing that happened: a fresh install, an update (from → to), or a download by hand.
+    const { version, os, arch, format } = await releaseInfo(env, new URL(request.url), file);
+    if (via === 'install') await goal(env, request, ctx, visitor, 'install', { version, os, arch });
+    else if (via === 'update') await goal(env, request, ctx, visitor, 'update', { version, from: previous, upgrade: `${previous} → ${version}`, os, arch });
+    else await goal(env, request, ctx, visitor, 'download', { version, os, arch, format });
   } catch (e) {
     console.error('recordDownload failed', e);
   }
 }
 
 /**
- * The same event in Google Analytics (Measurement Protocol), next to the site's page views.
- * Downloads come from curl, which never runs the page's tag. Our own machines are left out.
+ * The same event as an AgentLens goal, next to the site's page views, with who triggered it (person, script,
+ * AI agent…). Downloads come from curl, which never runs a page script. Our own machines are left out.
  */
-async function track(env, request, visitor, name, params) {
-  if (!env.GA_MEASUREMENT_ID || !env.GA_API_SECRET) return;
+async function goal(env, request, ctx, visitor, name, params) {
   try {
     if (await env.DB.prepare('SELECT 1 FROM internal_visitors WHERE visitor = ?').bind(visitor).first()) return;
     const clean = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== null));
-    const country = request.cf?.country;
-    const res = await fetch(
-      `https://www.google-analytics.com/mp/collect?measurement_id=${env.GA_MEASUREMENT_ID}&api_secret=${env.GA_API_SECRET}`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          client_id: visitor,
-          ...(country ? { user_location: { country_id: country } } : {}),
-          // A session per visitor per half hour, so the events show up in GA's reports.
-          events: [{ name, params: { ...clean, session_id: String(Math.floor(Date.now() / 1800_000)), engagement_time_msec: 1 } }],
-        }),
-      },
-    );
-    if (!res.ok) console.error('track failed', res.status);
+    trackGoal(request, env, ctx, name, clean);
   } catch (e) {
-    console.error('track failed', e);
+    console.error('goal failed', e);
   }
 }
 

@@ -490,20 +490,57 @@ struct IceServer {
     credential: String,
 }
 
-/// Where remote access stands, for `glass status`: 0 off, 1 connecting to the introducer,
-/// 2 ready (the introducer has accepted this computer, so a link or account can reach it).
-static STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Where remote access stands, for `glass status`.
+#[derive(Clone, Copy, PartialEq)]
+#[repr(u8)]
+enum State {
+    Off,
+    /// Connecting to the introducer, or it has stopped answering.
+    Connecting,
+    /// The introducer has accepted this computer, so a link or account can reach it.
+    Ready,
+}
 
-fn set_state(state: u8) {
-    STATE.store(state, std::sync::atomic::Ordering::Relaxed);
+static STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(State::Off as u8);
+
+fn set_state(state: State) {
+    STATE.store(state as u8, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// "off", "connecting" or "ready".
 pub fn state() -> &'static str {
-    match STATE.load(std::sync::atomic::Ordering::Relaxed) {
-        0 => "off",
-        1 => "connecting",
-        _ => "ready",
+    let state = STATE.load(std::sync::atomic::Ordering::Relaxed);
+    if state == State::Off as u8 {
+        "off"
+    } else if state == State::Connecting as u8 {
+        "connecting"
+    } else {
+        "ready"
+    }
+}
+
+/// How long to wait before connecting to the introducer again: longer each time it fails,
+/// from the start again once it has accepted this computer. (A host that has been up for
+/// weeks shouldn't still be paying for failures from long ago.)
+struct Backoff(Duration);
+
+impl Backoff {
+    const FIRST: Duration = Duration::from_secs(1);
+    const MOST: Duration = Duration::from_secs(60);
+
+    fn new() -> Self {
+        Self(Self::FIRST)
+    }
+
+    fn reset(&mut self) {
+        self.0 = Self::FIRST;
+    }
+
+    /// It failed: how long to wait now.
+    fn failed(&mut self) -> Duration {
+        let wait = self.0;
+        self.0 = (self.0 * 2).min(Self::MOST);
+        wait
     }
 }
 
@@ -511,28 +548,28 @@ pub fn state() -> &'static str {
 /// `dial` is the address of this host's WebTransport socket (loopback when it is bound there).
 pub fn watch(wt_port: u16, dial: IpAddr) {
     tokio::spawn(async move {
-        let mut delay = Duration::from_secs(1);
+        let mut backoff = Backoff::new();
         loop {
             if !enabled() {
-                set_state(0);
+                set_state(State::Off);
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
             }
-            set_state(1);
-            match signal(wt_port, dial).await {
-                Ok(()) => delay = Duration::from_secs(1),
+            set_state(State::Connecting);
+            match signal(wt_port, dial, &mut backoff).await {
+                Ok(()) => backoff.reset(),
                 Err(e) => {
-                    set_state(1);
-                    warn!("remote access: {e:#}; retrying in {}s", delay.as_secs());
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(Duration::from_secs(60));
+                    set_state(State::Connecting);
+                    let wait = backoff.failed();
+                    warn!("remote access: {e:#}; retrying in {}s", wait.as_secs());
+                    tokio::time::sleep(wait).await;
                 }
             }
         }
     });
 }
 
-async fn signal(wt_port: u16, dial: IpAddr) -> Result<()> {
+async fn signal(wt_port: u16, dial: IpAddr, backoff: &mut Backoff) -> Result<()> {
     let key = Arc::new(HostKey::load_or_create()?);
     let url = format!(
         "{}/signal/host/{}",
@@ -547,6 +584,9 @@ async fn signal(wt_port: u16, dial: IpAddr) -> Result<()> {
     let mut ping = tokio::time::interval(Duration::from_secs(20));
     let mut last_pong = std::time::Instant::now();
     let mut check = tokio::time::interval(Duration::from_secs(3));
+    // The introducer goes first: challenge, our answer, then this. Until then it isn't
+    // introducing anyone to this computer.
+    let mut ready = false;
     loop {
         tokio::select! {
             msg = rx.next() => {
@@ -554,6 +594,9 @@ async fn signal(wt_port: u16, dial: IpAddr) -> Result<()> {
                 let Message::Text(text) = msg? else { continue };
                 if text.as_str() == "pong" {
                     last_pong = std::time::Instant::now();
+                    if ready {
+                        set_state(State::Ready);
+                    }
                     continue;
                 }
                 match serde_json::from_str::<FromIntroducer>(&text) {
@@ -563,8 +606,18 @@ async fn signal(wt_port: u16, dial: IpAddr) -> Result<()> {
                         tx.send(Message::text(serde_json::to_string(&auth)?)).await?;
                     }
                     Ok(FromIntroducer::Ready) => {
-                        set_state(2);
+                        ready = true;
+                        backoff.reset();
+                        set_state(State::Ready);
                         info!("remote access ready (host {})", key.id());
+                    }
+                    Ok(FromIntroducer::Offer { session, .. }) if !ready => {
+                        debug!("introducer: an offer before it accepted this computer");
+                        let _ = out_tx.send(ToIntroducer::Error { session, msg: "the host isn't ready".into() });
+                    }
+                    Ok(FromIntroducer::Command { id, .. } | FromIntroducer::Enroll { id, .. }) if !ready => {
+                        debug!("introducer: a request before it accepted this computer");
+                        let _ = out_tx.send(ToIntroducer::Result { id, ok: false, message: "the host isn't ready".into() });
                     }
                     Ok(FromIntroducer::Offer { session, sdp, ip, ice_servers }) => {
                         let (key, out_tx) = (key.clone(), out_tx.clone());
@@ -623,6 +676,10 @@ async fn signal(wt_port: u16, dial: IpAddr) -> Result<()> {
                 // nowhere (after a network change) would otherwise swallow every offer.
                 if last_pong.elapsed() > Duration::from_secs(60) {
                     anyhow::bail!("glassdesk.dev stopped answering");
+                }
+                // A missed answer: not to be reported as reachable meanwhile.
+                if last_pong.elapsed() > Duration::from_secs(30) {
+                    set_state(State::Connecting);
                 }
                 tx.send(Message::text("ping")).await?;
             }
@@ -698,6 +755,15 @@ impl PeerConnectionEventHandler for Handler {
     }
 }
 
+/// Where peer connections listen: any port, except that a test host can be pinned to one
+/// (`GLASS_TEST_RTC_PORT`, IPv4) so bench/ can shape exactly that traffic.
+fn udp_addrs() -> Vec<String> {
+    match std::env::var("GLASS_TEST_RTC_PORT").ok().filter(|_| crate::testmode::enabled()) {
+        Some(port) => vec![format!("0.0.0.0:{port}")],
+        None => vec!["0.0.0.0:0".to_string(), "[::]:0".to_string()],
+    }
+}
+
 /// Answers a browser's offer; returns the answer SDP and its signature. The bridge runs
 /// until the peer goes away.
 async fn answer(
@@ -756,7 +822,7 @@ async fn answer(
         .with_interceptor_registry(registry)
         .with_handler(handler)
         .with_runtime(runtime)
-        .with_udp_addrs(vec!["0.0.0.0:0".to_string(), "[::]:0".to_string()])
+        .with_udp_addrs(udp_addrs())
         .build()
         .await?;
     let pc: Arc<dyn PeerConnection> = Arc::new(pc);
@@ -803,6 +869,12 @@ async fn answer(
     Ok((answer_sdp, sig))
 }
 
+/// The browser's end of a peer connection is gone. (`Disconnected` included: a viewer that
+/// lost its path reconnects with a new peer connection.)
+fn peer_gone(state: RTCPeerConnectionState) -> bool {
+    matches!(state, RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed | RTCPeerConnectionState::Disconnected)
+}
+
 async fn bridge(
     pc: Arc<dyn PeerConnection>,
     mut channels: tokio::sync::mpsc::UnboundedReceiver<Arc<dyn DataChannel>>,
@@ -815,12 +887,12 @@ async fn bridge(
     // Wait for the browser to connect before opening the loopback session.
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            match *state.borrow_and_update() {
-                RTCPeerConnectionState::Connected => return Ok(()),
-                RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
-                    anyhow::bail!("connection failed")
-                }
-                _ => {}
+            let now = *state.borrow_and_update();
+            if now == RTCPeerConnectionState::Connected {
+                return Ok(());
+            }
+            if peer_gone(now) {
+                anyhow::bail!("connection failed");
             }
             state.changed().await?;
         }
@@ -839,6 +911,7 @@ async fn bridge(
     let endpoint = wtransport::Endpoint::client(config)?;
     let (bridge_id, viewer, _registration) = register_bridge();
     let rtp_video = video.is_some();
+    let watching = viewer.watching.clone();
     let url = format!(
         "https://{}:{wt_port}/rtc?peer={peer}&b={bridge_id}{}&k={}",
         crate::listen::host(dial),
@@ -862,6 +935,12 @@ async fn bridge(
     }
 
     let mut datagram_channel: Option<Arc<dyn DataChannel>> = None;
+    // Frame acknowledgements from the browser, on their way to the host: the bridge reads
+    // them too, so its own flow control knows what's on screen. Once they come, the host
+    // sets this viewer's bitrate from them (end to end, through this bridge), and the link
+    // meter steps aside.
+    let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<(u8, u32)>();
+    let mut acking = false;
     let mut bridge_drops = 0u64;
     // Video over the data channel: measure the link and cap the bitrate to it (RTP video
     // has its own congestion control).
@@ -874,6 +953,13 @@ async fn bridge(
     let mut last_keyframe_ask = std::time::Instant::now();
     let mut last_congestion_report = std::time::Instant::now();
     let mut last_drop_report = std::time::Instant::now();
+    // Flow control (crate::flow): while frames sent haven't left the data channel's buffer
+    // (it counts them until the browser acknowledges them), capture is held, so frames
+    // aren't made only to be dropped here. The gate stays as a safety net.
+    let mut link = crate::flow::Link::default();
+    let mut flow = crate::flow::Viewer::new();
+    let mut flow_poll = tokio::time::interval(crate::flow::POLL);
+    flow_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             channel = channels.recv() => {
@@ -882,11 +968,21 @@ async fn bridge(
                 match label.as_str() {
                     "d" => {
                         datagram_channel = Some(channel.clone());
+                        // What came before it was dropped here, a first keyframe perhaps, and
+                        // the browser sees no gap when nothing has arrived at all. (Before
+                        // sign-in nothing has been sent, and the host ignores this.)
+                        let _ = conn.send_datagram([glass_proto::KIND_KEYFRAME_REQUEST]);
                         let conn = conn.clone();
+                        let ack_tx = ack_tx.clone();
                         tokio::spawn(async move {
                             while let Some(event) = channel.poll().await {
                                 match event {
-                                    DataChannelEvent::OnMessage(m) => { let _ = conn.send_datagram(&m.data[..]); }
+                                    DataChannelEvent::OnMessage(m) => {
+                                        if let Some(ack) = glass_proto::read_frame_ack(&m.data[..]) {
+                                            let _ = ack_tx.send(ack);
+                                        }
+                                        let _ = conn.send_datagram(&m.data[..]);
+                                    }
                                     DataChannelEvent::OnClose => break,
                                     _ => {}
                                 }
@@ -912,10 +1008,16 @@ async fn bridge(
                     let payload = datagram.payload();
                     inflight.sample(outstanding);
                     let queued = inflight.queued(outstanding);
+                    let now = std::time::Instant::now();
+                    link.drained(outstanding, now);
                     match gate.admit(&payload, queued, video_backlog(crate::server::applied_bitrate())) {
                         Admit::Send => {
                             if dc.try_send(BytesMut::from(&payload[..])).await.is_ok() {
                                 meter.sent(payload.len());
+                                match glass_proto::VideoHeader::read(&payload) {
+                                    Some(h) => link.sent(h.stream, h.frame_id, payload.len(), now),
+                                    None => link.other(payload.len()),
+                                }
                             }
                         }
                         Admit::Drop => {
@@ -923,7 +1025,12 @@ async fn bridge(
                             meter_drops += 1;
                         }
                     }
-                    // Tell the bitrate controller: the browser can't see these drops.
+                    flow.update(&mut link, now);
+                    // Tell the bitrate controller: the browser can't see these drops. (With
+                    // acknowledgements, the host sees them as frames that never arrive.)
+                    if acking {
+                        gate.dropped_frames = 0;
+                    }
                     if gate.dropped_frames > 0 && last_congestion_report.elapsed() >= Duration::from_secs(1) {
                         crate::server::bridge_congestion(std::mem::take(&mut gate.dropped_frames));
                         last_congestion_report = std::time::Instant::now();
@@ -964,7 +1071,39 @@ async fn bridge(
                     pipe_stream_to_channel(recv, channel).await;
                 });
             }
-            _ = meter_tick.tick(), if !rtp_video => {
+            Some((stream, id)) = ack_rx.recv() => {
+                if !acking {
+                    acking = true;
+                    crate::server::set_remote_cap(bridge_id, None);
+                    debug!("remote peer ({peer}): frames acknowledged; the host paces video by them");
+                }
+                let now = std::time::Instant::now();
+                link.acked(stream, id, now);
+                flow.update(&mut link, now);
+            }
+            _ = flow_poll.tick(), if link.busy() => {
+                if let Some(dc) = &datagram_channel {
+                    let now = std::time::Instant::now();
+                    link.drained(dc.outstanding_bytes().await.unwrap_or(0), now);
+                    // Paused: what's in flight says nothing about the link.
+                    if !*watching.borrow() {
+                        link.forget();
+                    }
+                    flow.update(&mut link, now);
+                }
+            }
+            _ = meter_tick.tick(), if !rtp_video && !acking => {
+                // Paused: nothing's learned about the link, and the others shouldn't wait on
+                // what was. It's measured afresh when video comes back.
+                if !*watching.borrow() {
+                    if meter.cap.take().is_some() {
+                        crate::server::set_remote_cap(bridge_id, None);
+                    }
+                    meter.calm = 0;
+                    meter_drops = 0;
+                    last_tick = std::time::Instant::now();
+                    continue;
+                }
                 if let Some(dc) = &datagram_channel {
                     let outstanding = dc.outstanding_bytes().await.unwrap_or(0);
                     let budget = video_backlog(crate::server::applied_bitrate());
@@ -983,7 +1122,7 @@ async fn bridge(
             }
             changed = state.changed() => {
                 changed?;
-                if matches!(*state.borrow(), RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed | RTCPeerConnectionState::Disconnected) {
+                if peer_gone(*state.borrow()) {
                     info!("remote peer disconnected ({peer})");
                     conn.close(0u32.into(), b"peer gone");
                     return Ok(());
@@ -1005,10 +1144,9 @@ enum Admit {
 /// can't be decoded either until the next keyframe, so those go too.
 #[derive(Default)]
 struct FrameGate {
-    /// Per stream: the frame being passed through and whether it's sent or dropped.
+    /// Per stream: the frame being passed through and whether it's sent or dropped. Dropped
+    /// means waiting for a keyframe: nothing after it can be decoded.
     current: [Option<(u32, bool)>; glass_proto::MAX_STREAMS],
-    /// Per stream: a frame was dropped, so wait for a keyframe.
-    broken: [bool; glass_proto::MAX_STREAMS],
     /// Frames dropped since the bitrate controller was last told.
     dropped_frames: u32,
 }
@@ -1019,11 +1157,11 @@ const FRAGMENT_BYTES: usize = 1250;
 impl FrameGate {
     /// Streams whose picture is broken until a keyframe arrives.
     fn waiting_for_keyframe(&self) -> impl Iterator<Item = u8> + '_ {
-        self.broken
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| **b)
-            .map(|(i, _)| i as u8)
+        (0..self.current.len()).filter(|&s| self.broken(s)).map(|s| s as u8)
+    }
+
+    fn broken(&self, stream: usize) -> bool {
+        matches!(self.current[stream], Some((_, false)))
     }
 
     /// `budget`: how much video may be queued now (see [`video_backlog`]).
@@ -1032,13 +1170,18 @@ impl FrameGate {
             .then(|| glass_proto::VideoHeader::read(datagram))
             .flatten()
         else {
-            // Audio and pings: small; drop only if things are badly backed up.
+            // Audio (Opus where the browser decodes it: ~100 kbps, not 1.5 Mbps of PCM) and
+            // pings: small; drop only if things are badly backed up.
             return if outstanding < DATAGRAM_BACKLOG * 2 {
                 Admit::Send
             } else {
                 Admit::Drop
             };
         };
+        // A lost fragment sent again: it isn't a new frame, and it's what ends a stall.
+        if h.flags & glass_proto::FLAG_RETRANSMIT != 0 {
+            return if outstanding < DATAGRAM_BACKLOG * 2 { Admit::Send } else { Admit::Drop };
+        }
         let s = (h.stream as usize).min(glass_proto::MAX_STREAMS - 1);
         if let Some((id, send)) = self.current[s]
             && id == h.frame_id
@@ -1054,13 +1197,8 @@ impl FrameGate {
         } else {
             // A frame bigger than the budget (a game's scene change) still goes when the
             // queue is nearly empty, or it would be dropped every time.
-            !self.broken[s]
+            !self.broken(s)
                 && (outstanding + h.frag_count as usize * FRAGMENT_BYTES <= budget || outstanding < budget / 4)
-        };
-        self.broken[s] = if keyframe {
-            !send
-        } else {
-            self.broken[s] || !send
         };
         self.current[s] = Some((h.frame_id, send));
         if !send {
@@ -1116,6 +1254,25 @@ async fn pipe_stream_to_channel(mut recv: wtransport::RecvStream, channel: Arc<d
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backoff_grows_and_starts_over_once_accepted() {
+        let mut b = Backoff::new();
+        let waits: Vec<u64> = (0..8).map(|_| b.failed().as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60]);
+        // Accepted, for however long: the next failure isn't charged for the old ones.
+        b.reset();
+        assert_eq!(b.failed().as_secs(), 1);
+    }
+
+    #[test]
+    fn state_reads_as_it_always_did() {
+        for (state, name) in [(State::Off, "off"), (State::Connecting, "connecting"), (State::Ready, "ready")] {
+            set_state(state);
+            assert_eq!(self::state(), name);
+        }
+        set_state(State::Off);
+    }
 
     #[test]
     fn summarizes_candidates() {
@@ -1245,6 +1402,19 @@ mod tests {
         assert_eq!(g.admit(&video(5, 0, 400, true), 0, DATAGRAM_BACKLOG), Admit::Send);
         assert_eq!(g.admit(&video(6, 0, 3, false), 0, DATAGRAM_BACKLOG), Admit::Send);
         assert_eq!(g.waiting_for_keyframe().count(), 0);
+    }
+
+    #[test]
+    fn audio_keeps_flowing_while_video_backs_off() {
+        let mut g = FrameGate::default();
+        let opus = glass_proto::opus_packet(0, 0, 2, &[0xFC; 120]);
+        let pcm = glass_proto::audio_packet(0, 0, 2, &[0; 480]);
+        // The queue is past what video may use: its frames go, audio of either kind doesn't.
+        assert_eq!(g.admit(&video(1, 0, 3, false), DATAGRAM_BACKLOG, DATAGRAM_BACKLOG), Admit::Drop);
+        assert_eq!(g.admit(&opus, DATAGRAM_BACKLOG, DATAGRAM_BACKLOG), Admit::Send);
+        assert_eq!(g.admit(&pcm, DATAGRAM_BACKLOG, DATAGRAM_BACKLOG), Admit::Send);
+        // Only a badly backed-up link drops it.
+        assert_eq!(g.admit(&opus, DATAGRAM_BACKLOG * 2, DATAGRAM_BACKLOG), Admit::Drop);
     }
 
     #[test]

@@ -15,6 +15,8 @@
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::core::{HSTRING, PWSTR};
@@ -24,11 +26,13 @@ pub const SERVICE_ARG: &str = "--glass-service";
 const SERVICE_NAME: &str = "GlassSecureDesktop";
 const DISPLAY_NAME: &str = "Glass Secure Desktop";
 
-/// `glass service <install|uninstall|status>`.
-pub fn cli(action: &str) -> Result<()> {
+/// `glass service <install|uninstall|status>`. `remove_host_rule` is the MSI's full uninstall.
+/// `firewall_scope` is the word classified before elevation; the elevated process does not
+/// read settings.
+pub fn cli(action: &str, remove_host_rule: bool, firewall_scope: Option<&str>) -> Result<()> {
     match action {
-        "install" => install(),
-        "uninstall" => uninstall(),
+        "install" => install(firewall_scope),
+        "uninstall" => uninstall(remove_host_rule),
         "status" => {
             match status()? {
                 Some(true) => println!("The Glass secure-desktop service is installed and running."),
@@ -79,17 +83,30 @@ unsafe fn close_service_handle(h: *mut core::ffi::c_void) -> bool {
     unsafe { windows::Win32::System::Services::CloseServiceHandle(windows::Win32::System::Services::SC_HANDLE(h)).is_ok() }
 }
 
-fn install() -> Result<()> {
+fn install(firewall_scope: Option<&str>) -> Result<()> {
     if !is_elevated() {
-        // One UAC prompt, like the firewall step (see windows::firewall).
-        return elevate("install");
+        // Classify here, then pass the word. The elevated process must not read settings:
+        // a credential prompt runs as the approving administrator, whose profile is empty.
+        return match super::firewall::saved_remote() {
+            Ok(remote) => elevate(&["install", "--firewall-scope", super::firewall::remote_arg(remote)]),
+            Err(()) => {
+                if super::firewall::scope_for_service(None, super::firewall::machine_scope().as_deref()).is_none() {
+                    println!("Couldn't read the saved listen address, so no firewall rule was added.");
+                }
+                elevate(&["install"])
+            }
+        };
     }
     let exe = protected_copy()?;
     let bin = format!("\"{}\" {SERVICE_ARG}", exe.display());
-    // The sign-in host runs this copy: it needs its own firewall rule (private networks,
-    // like glass setup's), as SYSTEM can't answer Windows' prompt.
-    if super::firewall::inbound(&exe) != Some(super::firewall::Inbound::Allowed) && !super::firewall::add_rule_quietly(&exe) {
-        println!("Couldn't let the sign-in screen's Glass through Windows Firewall; viewers may not reach it.");
+    // The sign-in host runs this copy. The scope is the word we were given, or the one
+    // already stored for the installer. Neither path reads the elevated account's settings.
+    match super::firewall::scope_for_service(firewall_scope, super::firewall::machine_scope().as_deref()) {
+        Some(remote) if !super::firewall::apply_known(&exe, remote) => {
+            println!("Couldn't let the sign-in screen's Glass through Windows Firewall; viewers may not reach it.");
+        }
+        Some(_) => {}
+        None => println!("No firewall scope was given, so the sign-in screen's rule was left unchanged."),
     }
     // The sign-in screen after a restart (signin.rs): this user's token and access rules.
     match copy_signin_settings() {
@@ -256,9 +273,22 @@ unsafe fn restart_on_failure(svc: windows::Win32::System::Services::SC_HANDLE) {
     let _ = unsafe { ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, Some((&raw const config).cast())) };
 }
 
-fn uninstall() -> Result<()> {
+fn uninstall(remove_host_rule: bool) -> Result<()> {
     if !is_elevated() {
-        return elevate("uninstall");
+        return elevate(if remove_host_rule { &["uninstall", "--remove-host-rule"] } else { &["uninstall"] });
+    }
+    // Only a full MSI uninstall asks for this. That action runs this file, so the
+    // program is current_exe, including a custom install directory. A manual
+    // `glass service uninstall` leaves the desktop host's rule alone.
+    if remove_host_rule {
+        if let Ok(exe) = std::env::current_exe()
+            && !super::firewall::remove_rule_quietly(&exe)
+        {
+            println!("Couldn't remove the Glass firewall rule for {}.", exe.display());
+        }
+        if let Err(e) = super::firewall::clear_machine_scope() {
+            println!("{e}");
+        }
     }
     use windows::Win32::System::Services::{
         ControlService, DeleteService, OpenSCManagerW, OpenServiceW, SC_MANAGER_ALL_ACCESS, SERVICE_ALL_ACCESS,
@@ -284,7 +314,7 @@ fn uninstall() -> Result<()> {
     }
     let _ = set_sas_policy(false);
     let _ = std::fs::remove_dir_all(signin_dir());
-    // The copy's own rule (an MSI install's rule belongs to the MSI).
+    // The per-user service copy's rule. An MSI install's rule is removed above.
     if super::agent::machine_dir().is_none()
         && let Some(pf) = std::env::var_os("ProgramFiles")
     {
@@ -324,10 +354,11 @@ fn set_sas_policy(on: bool) -> Result<()> {
 }
 
 /// Re-runs `glass service <action>` as administrator (one UAC prompt), like the firewall step.
-fn elevate(action: &str) -> Result<()> {
+fn elevate(extra: &[&str]) -> Result<()> {
     let exe = std::env::current_exe()?;
+    let list = std::iter::once("service").chain(extra.iter().copied()).map(super::ps_string).collect::<Vec<_>>().join(",");
     let script = format!(
-        "$ErrorActionPreference='Stop'; $p = Start-Process -FilePath {} -ArgumentList 'service','{action}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode",
+        "$ErrorActionPreference='Stop'; $p = Start-Process -FilePath {} -ArgumentList {list} -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode",
         super::ps_string(&exe.display().to_string())
     );
     let ok = super::powershell(&script).status().is_ok_and(|s| s.success());
@@ -474,9 +505,11 @@ fn keep_helper_alive(stop: HANDLE, wake: HANDLE, sas: HANDLE) {
     use windows::Win32::System::Threading::WaitForMultipleObjects;
     let mut child: Option<HANDLE> = None;
     let mut child_session = 0xFFFF_FFFFu32;
+    let mut child_respawn = super::convert::Respawn::default();
     // The sign-in host (signin.rs), while nobody is signed in at the console.
     let mut signin: Option<HANDLE> = None;
     let mut signin_session = 0xFFFF_FFFFu32;
+    let mut signin_respawn = super::convert::Respawn::default();
     loop {
         // SAFETY: plain query.
         let session = unsafe { WTSGetActiveConsoleSessionId() };
@@ -487,18 +520,20 @@ fn keep_helper_alive(stop: HANDLE, wake: HANDLE, sas: HANDLE) {
             // SAFETY: closing the exited child's handle.
             unsafe { let _ = CloseHandle(h); }
             child = None;
+            child_respawn.exited(Instant::now());
         }
         // A real interactive session (not the "no one connected" 0xFFFFFFFF, nor session 0).
         let usable = session != 0xFFFF_FFFF && session != 0;
-        if usable && (child.is_none() || session != child_session) {
-            if let Some(h) = child.take() {
-                // Session changed: the old helper is in the wrong session; drop it.
-                terminate(h);
-            }
+        if usable && child.is_some() && session != child_session {
+            // Session changed: the old helper is in the wrong session; drop it.
+            terminate(child.take().unwrap());
+        }
+        if usable && child.is_none() && child_respawn.may_start(Instant::now()) {
             match spawn_in_session(session, super::secure::HELPER_ARG, &[], Some(sas)) {
                 Ok(h) => {
                     child = Some(h);
                     child_session = session;
+                    child_respawn.started(Instant::now());
                 }
                 Err(()) => {}
             }
@@ -512,6 +547,7 @@ fn keep_helper_alive(stop: HANDLE, wake: HANDLE, sas: HANDLE) {
             // SAFETY: closing the exited child's handle.
             unsafe { let _ = CloseHandle(h); }
             signin = None;
+            signin_respawn.exited(Instant::now());
         }
         let wanted = usable && signin_dir().join("token").exists() && !signed_in(session);
         if wanted && (signin.is_none() || session != signin_session) {
@@ -519,9 +555,12 @@ fn keep_helper_alive(stop: HANDLE, wake: HANDLE, sas: HANDLE) {
                 terminate(h);
             }
             let env = [("GLASS_CONFIG_DIR", signin_dir().display().to_string()), ("GLASS_NO_MENUBAR", "1".into())];
-            if let Ok(h) = spawn_in_session(session, crate::signin::ARG, &env, None) {
+            if signin_respawn.may_start(Instant::now())
+                && let Ok(h) = spawn_in_session(session, crate::signin::ARG, &env, None)
+            {
                 signin = Some(h);
                 signin_session = session;
+                signin_respawn.started(Instant::now());
             }
         } else if !wanted && let Some(h) = signin.take() {
             terminate(h);
@@ -607,11 +646,14 @@ fn copy_all(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Ends a child, and waits a moment for it to be gone: what follows may need what it holds
+/// (the helper's pipe has only one instance).
 fn terminate(child: HANDLE) {
-    use windows::Win32::System::Threading::TerminateProcess;
+    use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
     // SAFETY: the child is ours; terminate and close it.
     unsafe {
         let _ = TerminateProcess(child, 0);
+        let _ = WaitForSingleObject(child, 2000);
         let _ = CloseHandle(child);
     }
 }

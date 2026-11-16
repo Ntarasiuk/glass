@@ -9,19 +9,27 @@ mod admin;
 mod acl;
 mod approval;
 mod browse;
+mod clips;
 mod codec;
 mod connlog;
+mod cursor;
 mod elements;
 mod control;
+mod damage;
 mod files;
+mod flow;
 mod forward;
 mod grants;
+// Only the Linux GPU encoders (va_encode) use it.
+#[cfg(target_os = "linux")]
+mod h264_vui;
 mod gamepad;
 mod ipc;
 mod keys;
 mod ldap;
 mod lid;
 mod listen;
+mod firewall_bind;
 mod lossless;
 #[cfg(not(target_os = "macos"))]
 mod mailbox;
@@ -29,10 +37,13 @@ mod mcp;
 mod oauth;
 mod media;
 mod mic;
+mod nearby;
 mod notify;
 mod now_playing;
+mod opus_audio;
 mod pcm;
 mod oidc;
+mod origin;
 mod passkey;
 mod policy;
 mod posture;
@@ -51,6 +62,7 @@ mod rate;
 mod refresh;
 mod remote;
 mod resolution;
+mod retransmit;
 mod rtp;
 mod server;
 mod setup;
@@ -62,6 +74,9 @@ mod testmode;
 mod thumbs;
 mod update;
 mod viewers;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod viewer;
+mod zipdir;
 #[cfg(any(windows, test))]
 mod win_capture;
 
@@ -219,9 +234,9 @@ enum Command {
     /// list the ones you approved, revoke them, install one for unattended use, or read
     /// what they did.
     Agents {
-        #[arg(value_parser = ["list", "revoke", "install", "log", "verify", "on", "off", "public"], default_value = "list")]
+        #[arg(value_parser = ["list", "revoke", "install", "uninstall", "log", "verify", "on", "off", "public"], default_value = "list")]
         action: String,
-        /// A grant's id (revoke; `all` for every one), a client's id (install), or on/off (public).
+        /// A grant's id (revoke; `all` for every one), a client's id (install, uninstall), or on/off (public).
         id: Option<String>,
         #[arg(long)]
         json: bool,
@@ -278,9 +293,11 @@ enum Command {
         action: String,
     },
     /// Your computers at glassdesk.dev: add this one to the account you're signed in to
-    /// there (a one-time link), or remove it from every account.
+    /// there (a one-time link), or remove it from every account. `sign-in` signs this
+    /// computer's Glass in to the account (through your browser, where your passkey is), `list`
+    /// shows the account's computers, `sign-out` forgets it.
     Account {
-        #[arg(value_parser = ["add", "remove"])]
+        #[arg(value_parser = ["add", "remove", "sign-in", "list", "sign-out"])]
         action: String,
         #[arg(long)]
         json: bool,
@@ -306,6 +323,68 @@ enum Command {
         #[arg(long, default_value_t = 6)]
         seconds: u64,
     },
+    /// Connect to a computer the way the app's viewer does, without a window, and report
+    /// what arrived (frames decoded, delay). For testing the native viewer.
+    #[command(hide = true)]
+    ViewerProbe {
+        /// A tailnet name, or a URL like http://127.0.0.1:8080.
+        target: String,
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+        /// The host's access token (`glass token` there).
+        #[arg(long)]
+        token: Option<String>,
+        /// Also send a pointer move and ⌘Tab (to a test host: they're real input).
+        #[arg(long)]
+        input: bool,
+        /// Save the last picture of the first display as a PNG.
+        #[arg(long)]
+        save: Option<PathBuf>,
+        /// Also turn sharp text on for a few seconds (shared by everyone viewing).
+        #[arg(long)]
+        sharp: bool,
+        /// Click once at x,y (0..1 of the first display) when connected.
+        #[arg(long, value_parser = parse_point)]
+        click: Option<(f32, f32)>,
+        /// Send this control message (JSON) once connected; repeatable.
+        #[arg(long = "control")]
+        controls: Vec<String>,
+        /// Type this, key by key (`{wait:N}` pauses; \n is Return, \t is Tab).
+        #[arg(long)]
+        keys: Option<String>,
+    },
+    /// Drives every native-viewer feature against a `glass --test` host and checks it.
+    #[cfg(any(target_os = "macos", windows))]
+    #[command(hide = true)]
+    ViewerSelftest {
+        /// The test host, e.g. http://localhost:8080.
+        target: String,
+        #[arg(long)]
+        token: String,
+    },
+    /// The codecs the native viewer offers on this computer (each checked by decoding).
+    #[command(hide = true)]
+    ViewerCodecs,
+    /// Prints what the native viewer reads from game controllers here, for a while.
+    #[cfg(any(target_os = "macos", windows))]
+    #[command(hide = true)]
+    ViewerGamepad {
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+        /// Write to this file instead of the terminal.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Shows the passkey confirmation (Touch ID, Windows Hello) and says what came of it.
+    #[command(hide = true)]
+    ViewerConfirm {
+        /// Write the result to this file too.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Prints this computer's remote-access address (`…/app/#r=key`), for viewer-probe.
+    #[command(hide = true)]
+    RemoteAddress,
     /// Access rules for directory sign-in (SSO, LDAP): who gets in, and what they may do.
     Acl {
         #[command(subcommand)]
@@ -370,9 +449,17 @@ enum Command {
     Service {
         #[arg(value_parser = ["install", "uninstall", "status"], default_value = "status")]
         action: String,
+        /// MSI full uninstall only: also remove the installed program's firewall rule.
+        #[arg(long, hide = true)]
+        remove_host_rule: bool,
+        /// Classified before elevation. The elevated install does not read settings.
+        #[arg(long, hide = true, value_parser = ["tailscale", "loopback", "any"])]
+        firewall_scope: Option<String>,
     },
     /// Wake a machine with Wake-on-LAN, by a MAC address or a tailnet name seen before.
     Wake { target: String },
+    /// List the Glass computers on this network (glass config nearby off hides this one).
+    Nearby,
     /// Show the access token for devices outside your tailnet.
     Token {
         /// Replace it with a new one; devices using the old token must sign in again.
@@ -395,6 +482,7 @@ pub(crate) fn make_link(
     let link = access::create_link(&access::file_for(&default_token_file()), grant, scope)?;
     let url = if anywhere {
         remote::set_enabled(true)?;
+        support::owner_chose_remote();
         remote::link_url(&remote::HostKey::load_or_create()?, &link.code)
     } else {
         format!("{}/#l={}", base.trim_end_matches('/'), link.code)
@@ -576,6 +664,12 @@ fn config_cli(key: Option<&str>, value: Option<&str>) -> Result<()> {
             s.set(k, v)?;
             settings::save(&s)?;
             println!("{k} = {}", s.get(k)?);
+            #[cfg(windows)]
+            if k == "bind"
+                && let Some(note) = platform::firewall::bind_change_note()
+            {
+                println!("{note}");
+            }
             // A generated token is shown once, to paste into the identity provider.
             if k == "scim-token" && v == "new"
                 && let Some(t) = settings::scim_token()
@@ -634,10 +728,12 @@ fn remote_cli(action: &str) -> Result<()> {
     match action {
         "on" => {
             remote::set_enabled(true)?;
+            support::owner_chose_remote();
             println!("Remote access is on. Make a link with: glass link --anywhere");
         }
         "off" => {
             remote::set_enabled(false)?;
+            support::owner_chose_remote();
             println!(
                 "Remote access is off. Links made with --anywhere stop working within seconds; tailnet access is unaffected."
             );
@@ -655,6 +751,44 @@ fn remote_cli(action: &str) -> Result<()> {
 }
 
 fn account_cli(action: &str, json: bool) -> Result<()> {
+    match action {
+        "sign-in" => {
+            let login = account::sign_in()?;
+            if json {
+                println!("{}", serde_json::json!({ "url": login.url, "expires": login.expires }));
+            } else {
+                println!("Open this where you're signed in to glassdesk.dev/computers (or sign in there with your passkey) and say yes:\n\n{}\n{}\n\nWaiting…", setup::qr(&login.url), login.url);
+            }
+            while !login.poll()? {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            if !json {
+                println!("Signed in. See your computers with: glass account list");
+            }
+            return Ok(());
+        }
+        "list" => {
+            let Some(list) = account::computers()? else { anyhow::bail!("Not signed in. Sign in with: glass account sign-in") };
+            if json {
+                let list: Vec<_> = list.iter().map(|c| serde_json::json!({ "id": c.id, "key": c.key, "name": c.name, "online": c.online })).collect();
+                println!("{}", serde_json::json!({ "computers": list }));
+            } else if list.is_empty() {
+                println!("No computers on your account yet. Add this one with: glass account add");
+            } else {
+                let base = remote::base();
+                for c in list {
+                    println!("{}  {}  {}/app/#r={}", c.name, if c.online { "online" } else { "offline" }, base.trim_end_matches('/'), c.key);
+                }
+            }
+            return Ok(());
+        }
+        "sign-out" => {
+            account::sign_out();
+            println!("Signed out.");
+            return Ok(());
+        }
+        _ => {}
+    }
     if action == "remove" {
         let n = account::remove()?;
         if json {
@@ -695,6 +829,11 @@ fn fleet_cli(action: &str, arg: Option<&str>, json: bool) -> Result<()> {
         }
         "off" => {
             fleet::set_enabled(false)?;
+            // Nothing on the website says it takes commands any more: it doesn't.
+            let forgotten = actions::forget_managers()?;
+            if forgotten > 0 {
+                println!("Stopped taking actions. {forgotten} passkey{} forgotten.", if forgotten == 1 { "" } else { "s" });
+            }
             let deleted = fleet::send(true).is_ok();
             println!("{}", if deleted { "Stopped. What was sent has been deleted." } else { "Stopped. (Couldn't reach glassdesk.dev to delete what was sent; it goes when you run glass account remove.)" });
         }
@@ -730,6 +869,12 @@ fn fleet_manage(arg: Option<&str>, json: bool) -> Result<()> {
         Some("off") => {
             let n = actions::forget_managers()?;
             println!("Stopped taking actions. {n} passkey{} forgotten.", if n == 1 { "" } else { "s" });
+            // So the account stops offering them now, not at the next report.
+            if fleet::enabled()
+                && let Err(e) = fleet::send(false)
+            {
+                println!("Your account may offer actions here until the next report: {e:#}");
+            }
         }
         Some("status") => {
             let recent = actions::recent(5);
@@ -804,6 +949,7 @@ fn main() -> Result<()> {
         let argv: Vec<String> = std::env::args().collect();
         match argv.get(1).map(String::as_str) {
             Some(platform::service::SERVICE_ARG) => return platform::service::run_service(),
+            Some(platform::firewall::APPLY_ARG) => std::process::exit(if platform::firewall::apply_from_arg(&argv[2..]) { 0 } else { 1 }),
             Some(platform::secure::HELPER_ARG) => return platform::secure::run_helper(),
             Some(platform::micdriver::ARG) => return platform::micdriver::cli(&argv[2..]),
             _ => {}
@@ -1076,13 +1222,28 @@ async fn async_main(args: Args) -> Result<()> {
             println!("Privacy mode {state} (until everyone disconnects).");
             Ok(())
         }
+        Some(Command::Nearby) => {
+            nearby::listen();
+            // Answers come within a second or so of asking.
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let found = nearby::found();
+            if found.is_empty() {
+                println!("No other Glass computers on this network.");
+            }
+            for f in found {
+                println!("{}  {}  {}  ({})", f.name, f.os, f.url, f.at);
+            }
+            Ok(())
+        }
         Some(Command::Wake { target }) => {
             let macs = wol::wake_target(target)?;
             println!("Sent a wake-up to {target} ({macs}).");
             Ok(())
         }
         #[cfg(windows)]
-        Some(Command::Service { action }) => platform::service::cli(action),
+        Some(Command::Service { action, remove_host_rule, firewall_scope }) => {
+            platform::service::cli(action, *remove_host_rule, firewall_scope.as_deref())
+        }
         Some(Command::Remote { action }) => remote_cli(action),
         Some(Command::Account { action, json }) => account_cli(action, *json),
         Some(Command::Fleet { action, arg, json }) => fleet_cli(action, arg.as_deref(), *json),
@@ -1110,6 +1271,59 @@ async fn async_main(args: Args) -> Result<()> {
             Ok(())
         }
         Some(Command::Restart) => restart_service(),
+        #[cfg(any(target_os = "macos", windows))]
+        Some(Command::ViewerSelftest { target, token }) => viewer::selftest::run(target, token.clone()).await,
+        Some(Command::ViewerCodecs) => {
+            println!("{}", viewer::codecs().join(" "));
+            #[cfg(windows)]
+            println!("{}", viewer::winmf_report());
+            Ok(())
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        Some(Command::ViewerGamepad { seconds, out }) => {
+            let lines = std::cell::RefCell::new(Vec::<String>::new());
+            let say = |l: String| {
+                println!("{l}");
+                lines.borrow_mut().push(l);
+            };
+            let mut pads = viewer::gamepad::Pads::default();
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(*seconds);
+            let n = std::cell::Cell::new(0u32);
+            let mut described = String::new();
+            while std::time::Instant::now() < end {
+                let d = viewer::gamepad::describe();
+                if d != described {
+                    say(format!("controllers: [{d}]"));
+                    described = d;
+                }
+                pads.poll(&|e| {
+                    n.set(n.get() + 1);
+                    say(format!("{e:?}"));
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+            }
+            say(format!("{} events", n.get()));
+            if let Some(out) = out {
+                std::fs::write(out, lines.borrow().join("\n"))?;
+            }
+            Ok(())
+        }
+        Some(Command::ViewerConfirm { out }) => {
+            let t = std::time::Instant::now();
+            let r = viewer::passkey::confirm("use a passkey (a test of the Glass viewer)".into()).await;
+            let line = format!("{} after {:.1}s", match r { Ok(true) => "verified".to_string(), Ok(false) => "no verification on this computer".to_string(), Err(e) => format!("declined: {e:#}") }, t.elapsed().as_secs_f64());
+            println!("{line}");
+            if let Some(out) = out {
+                std::fs::write(out, line)?;
+            }
+            Ok(())
+        }
+        Some(Command::RemoteAddress) => {
+            let key = remote::HostKey::load_or_create()?;
+            println!("{}/app/#r={}", remote::base().trim_end_matches('/'), key.public());
+            Ok(())
+        }
+        Some(Command::ViewerProbe { target, seconds, token, input, save, sharp, click, keys, controls }) => viewer::probe(target, token.clone(), *seconds, *input, save.clone(), *sharp, *click, keys.clone().map(|k| k.replace("\\n", "\n").replace("\\t", "\t")), controls.clone()).await,
         #[cfg(any(target_os = "macos", windows))]
         Some(Command::App { .. }) => unreachable!("handled before the runtime starts"),
         Some(Command::Support { .. }) => unreachable!("handled before the runtime starts"),
@@ -1243,8 +1457,11 @@ async fn run_host(args: Args) -> Result<()> {
     }
 
     let (frames, _) = broadcast::channel(8);
-    // ~80 ms of 5 ms packets; a session that falls further behind just skips ahead.
-    let (audio, _) = broadcast::channel(16);
+    // ~80 ms of 5 ms PCM packets and the 10 ms Opus packets made from them; a session that
+    // falls further behind just skips ahead.
+    let (audio, _) = broadcast::channel(24);
+    // One Opus encoder for every viewer that takes it, whichever source fills the channel.
+    opus_audio::start(audio.clone());
     let (events, _) = broadcast::channel(32);
 
     // Windows: link to the SYSTEM secure-desktop helper if the service is installed, so
@@ -1267,6 +1484,17 @@ async fn run_host(args: Args) -> Result<()> {
             .await
             .map(|(cert, key)| server::TlsFiles { cert, key }),
     };
+    // Started before Tailscale (at boot, say): pick up HTTPS once it's there, when nobody is
+    // connected. Only under something that starts Glass again, or it would just quit.
+    let restarted = signin::active() || std::env::var_os("GLASS_SUPERVISED").is_some();
+    if tls.is_none() && restarted && !args.test && !support::is_host() {
+        tokio::spawn(async {
+            if tailscale::wait_for_cert(&config_dir().join("certs")).await {
+                viewers::until_none().await;
+                power::restart_for_certificate();
+            }
+        });
+    }
     let host = tls
         .as_ref()
         .and_then(|t| t.cert.file_stem())
@@ -1472,6 +1700,11 @@ pub fn config_dir() -> PathBuf {
                 .map(|d| PathBuf::from(d).join("Glass"))
         })
         .unwrap_or_else(|| home().join(".config/glass"))
+}
+
+fn parse_point(s: &str) -> Result<(f32, f32), String> {
+    let (x, y) = s.split_once(',').ok_or("x,y")?;
+    Ok((x.trim().parse().map_err(|_| "x")?, y.trim().parse().map_err(|_| "y")?))
 }
 
 pub fn default_token_file() -> PathBuf {

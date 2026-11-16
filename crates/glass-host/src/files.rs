@@ -94,11 +94,18 @@ pub async fn receive(stream: &mut RecvStream, owner: bool) -> Result<(String, Pa
 /// Where an uploaded `name` goes under `base`: its folders (safe ones only: no `..`, no
 /// hidden names, at most 16 deep) and its file name.
 fn place(base: &Path, name: &str) -> (PathBuf, String) {
-    let mut parts: Vec<&str> = name
+    place_on(base, name, cfg!(windows))
+}
+
+/// On Windows a ':' makes a name a drive ("D:", which `push` would put in place of `base`)
+/// or a hidden stream ("a.txt:x"), so there it becomes '_'.
+fn place_on(base: &Path, name: &str, windows: bool) -> (PathBuf, String) {
+    let mut parts: Vec<String> = name
         .split(['/', '\\'])
         .filter(|p| !p.is_empty() && *p != "." && *p != ".." && !p.starts_with('.'))
+        .map(|p| if windows { p.replace(':', "_") } else { p.to_string() })
         .collect();
-    let file = parts.pop().unwrap_or("file").to_string();
+    let file = parts.pop().unwrap_or_else(|| "file".into());
     let mut dir = base.to_path_buf();
     for p in parts.into_iter().take(16) {
         dir.push(p);
@@ -207,6 +214,14 @@ mod tests {
     }
 
     #[test]
+    fn no_drive_or_stream_names_on_windows() {
+        let base = Path::new("/d");
+        assert_eq!(place_on(base, "D:/x/evil.exe", true), (PathBuf::from("/d/D_/x"), "evil.exe".into()));
+        assert_eq!(place_on(base, "C:\\Users\\me\\a.txt:s", true), (PathBuf::from("/d/C_/Users/me"), "a.txt_s".into()));
+        assert_eq!(place_on(base, "12:30.txt", false), (PathBuf::from("/d"), "12:30.txt".into()));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn decodes_file_uris() {
         assert_eq!(
@@ -229,13 +244,7 @@ pub async fn send(conn: &Connection, path: &Path) -> Result<()> {
         .context("no file name")?
         .to_string_lossy()
         .into_owned();
-    let header = serde_json::to_vec(&FileHeader { name, size, dir: None })?;
-
-    let mut stream = conn.open_uni().await?.await?;
-    let mut prefix = vec![STREAM_FILE];
-    prefix.extend_from_slice(&(header.len() as u32).to_le_bytes());
-    prefix.extend_from_slice(&header);
-    stream.write_all(&prefix).await?;
+    let mut stream = open_file_stream(conn, FileHeader { name, size, dir: None, streamed: false }).await?;
 
     let mut buf = vec![0u8; CHUNK];
     loop {
@@ -247,5 +256,41 @@ pub async fn send(conn: &Connection, path: &Path) -> Result<()> {
     }
     stream.finish().await?;
     info!("sent file {} ({size} bytes)", path.display());
+    Ok(())
+}
+
+/// Opens a uni stream and writes the `STREAM_FILE` tag and `header`.
+async fn open_file_stream(conn: &Connection, header: FileHeader) -> Result<wtransport::SendStream> {
+    let header = serde_json::to_vec(&header)?;
+    let mut stream = conn.open_uni().await?.await?;
+    let mut prefix = vec![STREAM_FILE];
+    prefix.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    prefix.extend_from_slice(&header);
+    stream.write_all(&prefix).await?;
+    Ok(stream)
+}
+
+/// Sends folder `dir` (resolved inside the file browser's root) as a zip made on the fly.
+/// A failure part way resets the stream, so the viewer doesn't keep half a zip.
+pub async fn send_folder(conn: &Connection, dir: &Path) -> Result<()> {
+    let name = crate::zipdir::name(dir);
+    let mut stream = open_file_stream(conn, FileHeader { name, size: 0, dir: None, streamed: true }).await?;
+    let mut chunks = crate::zipdir::stream(crate::browse::root(), dir.to_path_buf());
+    let mut sent = 0u64;
+    let result: Result<()> = async {
+        while let Some(chunk) = chunks.recv().await {
+            let chunk = chunk?;
+            stream.write_all(&chunk).await?;
+            sent += chunk.len() as u64;
+        }
+        stream.finish().await?;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = stream.reset(1u32.into());
+    }
+    result?;
+    info!("sent folder {} as a zip ({sent} bytes)", dir.display());
     Ok(())
 }

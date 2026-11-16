@@ -1,5 +1,6 @@
 //! Home: is Glass ready, where to connect (with a QR code), anything that needs fixing,
-//! and the switches people reach for most.
+//! your other computers (add this one to your account with a passkey, set up another,
+//! connect to one), and the switches people reach for most.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
@@ -10,7 +11,7 @@ use gpui_kit::*;
 
 use super::data::Tailnet;
 use super::ui::{self, I};
-use super::{GlassApp, Page, Via, act, actions};
+use super::{GlassApp, Page, Store, Via, act, actions};
 use crate::permissions;
 
 impl GlassApp {
@@ -19,6 +20,11 @@ impl GlassApp {
         let snap = store.snap.clone();
         let tailnet = store.tailnet.clone();
         let loaded = store.loaded;
+        let others = store.machines.iter().filter(|m| !m.is_self).count();
+        let nearby = store.nearby_only();
+        let account = store.account.is_some().then(|| store.account_others());
+        let on_account = store.on_account();
+        let signing_in = store.signing_in.is_some();
         let theme = cx.theme().clone();
         let (screen, input) = snap.permissions();
         // The address shown, copied and put in the QR code: on your tailnet, or from anywhere
@@ -283,18 +289,105 @@ impl GlassApp {
                 }),
                 cx,
             ),
-            ui::icon_row(
-                I::Link,
+        ];
+
+        // Your computers: this one on your account, a new one set up, another one opened.
+        let remote_locked = snap.policy.locked("remote") && !snap.remote;
+        // (Details are kept to what fits on a row's one line.)
+        let mut computers = vec![match &account {
+            // Signed in: the account's other computers are on Machines, to open from here.
+            Some(list) => {
+                let online = list.iter().filter(|c| c.online).count();
+                let others = match (list.len(), online) {
+                    (0, _) => "No other computers on it yet.".to_string(),
+                    (1, 1) => "1 other computer on it, online.".to_string(),
+                    (1, _) => "1 other computer on it, offline.".to_string(),
+                    (n, m) => format!("{n} other computers on it, {m} online."),
+                };
+                ui::icon_row(
+                    I::KeyRound,
+                    theme.primary,
+                    "Signed in to your account",
+                    if on_account == Some(true) { format!("This computer is on it. {others}") } else { others },
+                    h_flex()
+                        .gap_2()
+                        .child(Button::new("my-computers").small().ghost().label("My computers").icon(I::ExternalLink).on_click(|_, _, _| actions::open(&actions::computers_url())))
+                        .child(Button::new("account-machines").small().primary().label("Open one").on_click(cx.listener(|this, _, _, cx| this.go(Page::Machines, cx)))),
+                    cx,
+                )
+            }
+            None => ui::icon_row(
+                I::KeyRound,
                 theme.primary,
-                "Let someone in",
-                "Make a one-time link with limits: how long, view only, files, clipboard.",
-                Button::new("make-link")
+                "Sign in to your account",
+                if signing_in { "Say yes in your browser, where your passkey is. Waiting…" } else { "Your passkey at glassdesk.dev lists your computers here, to open from anywhere." },
+                Button::new("account-in")
                     .small()
-                    .label("Make a link")
-                    .on_click(cx.listener(|this, _, _, cx| this.go(Page::Links, cx))),
+                    .primary()
+                    .label(if signing_in { "Open the page again" } else { "Sign in with a passkey" })
+                    .on_click(|_, window, cx| Store::account_sign_in(window, cx)),
                 cx,
             ),
-        ];
+        }];
+        // Not while it's known to be on the account already, with your passkey pinned here.
+        let pins = !s.account_open_off && snap.policy.allows("links");
+        if on_account != Some(true) {
+            computers.push(ui::icon_row(
+                I::Plus,
+                theme.primary,
+                "Add this computer to your account",
+                ui::managed(if snap.remote { "Your passkey then opens it from your other devices, anywhere." } else { "Your passkey then opens it from anywhere (turns on Reach from anywhere)." }, remote_locked),
+                Button::new("account-add").small().label("Add this computer").disabled(remote_locked).on_click(|_, window, cx| act(window, cx, actions::account_add)),
+                cx,
+            ));
+        } else if snap.openers == 0 && pins {
+            computers.push(ui::icon_row(
+                I::KeyRound,
+                theme.primary,
+                "Let your passkey open this computer",
+                "Then the Glass app on your other computers needs no access token for it.",
+                Button::new("account-pin").small().label("Set up").disabled(remote_locked).on_click(|_, window, cx| act(window, cx, actions::account_add)),
+                cx,
+            ));
+        }
+        computers.push(ui::icon_row(
+            I::Download,
+            theme.primary,
+            "Set up another computer",
+            if cfg!(windows) { "Run this in its PowerShell; for a Mac or Linux see glassdesk.dev." } else { "Run this in its Terminal; for Windows see glassdesk.dev." },
+            h_flex()
+                .gap_1()
+                .child(ui::mono(INSTALL).px_2().py_1().rounded(px(6.)).bg(theme.background).border_1().border_color(theme.border))
+                .child(Button::new("copy-install").small().ghost().icon(I::Copy).tooltip("Copy the command").on_click(|_, window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(INSTALL.into()));
+                    super::toast(window, cx, Ok("Copied. Paste it into the other computer's terminal.".into()));
+                })),
+            cx,
+        ));
+        // The ones heard on this network, to open right here.
+        let more_nearby = nearby.len().saturating_sub(NEARBY_SHOWN);
+        computers.extend(self.nearby_rows(&nearby[..nearby.len().min(NEARBY_SHOWN)], cx));
+        computers.push(ui::icon_row(
+            I::Monitor,
+            theme.primary,
+            "Connect to another computer",
+            match (others, more_nearby) {
+                (0, 0) => "Your computers on Tailscale and on this network, or a link someone sent you.".to_string(),
+                (n, 0) => format!("{n} on your tailnet, or a link someone sent you."),
+                (0, m) => format!("{m} more on this network, or a link someone sent you."),
+                (n, m) => format!("{n} on your tailnet, {m} more on this network, or a link someone sent you."),
+            },
+            Button::new("home-machines").small().label("Machines").on_click(cx.listener(|this, _, _, cx| this.go(Page::Machines, cx))),
+            cx,
+        ));
+        computers.push(ui::icon_row(
+            I::Link,
+            theme.primary,
+            "Let someone else in",
+            "Make a one-time link with limits: how long, view only, files, clipboard.",
+            Button::new("make-link").small().label("Make a link").on_click(cx.listener(|this, _, _, cx| this.go(Page::Links, cx))),
+            cx,
+        ));
         // Until it's installed: your devices' microphones on this computer need a driver.
         let mut quick = quick;
         if snap.mic.is_none() {
@@ -321,10 +414,16 @@ impl GlassApp {
         ui::page("Home", machine_line(), cx)
             .child(hero)
             .when(!fixes.is_empty(), |d| d.child(ui::section("Needs you", fixes, cx)))
+            .child(ui::section("Your computers", computers, cx))
             .child(ui::section("Quick settings", quick, cx))
             .when(!recent.is_empty(), |d| d.child(ui::section("Recent", recent, cx)))
     }
 }
+
+/// What sets Glass up on another computer (the same one-liner as the website's).
+const INSTALL: &str = if cfg!(windows) { "irm glassdesk.dev/install.ps1 | iex" } else { "curl -fsSL glassdesk.dev | sh" };
+/// How many computers heard on this network Home lists itself; the rest are on Machines.
+const NEARBY_SHOWN: usize = 3;
 
 /// "Studio Mac · macOS 15.4", read once.
 fn machine_line() -> &'static str {
@@ -361,7 +460,7 @@ fn address_switch(via: Via, remote_on: bool, me: Entity<GlassApp>) -> impl IntoE
         .dropdown_menu(move |menu, _, _| {
             let tailnet = me.clone();
             let anywhere = me.clone();
-            menu.min_w(px(230.))
+            menu.min_w(px(230. * super::text_size::scale()))
                 .item(PopupMenuItem::new("Your Tailscale network").icon(ui::tailscale()).checked(via == Via::Tailnet).on_click(
                     move |_, _, cx| {
                         tailnet.update(cx, |this, cx| {

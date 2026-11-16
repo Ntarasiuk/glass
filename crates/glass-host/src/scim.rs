@@ -60,6 +60,11 @@ pub struct Directory {
     pub users: Vec<User>,
     #[serde(default)]
     pub groups: Vec<Group>,
+    /// Addresses of users who were deleted, or no longer have them: gone, not "nobody
+    /// provisioned", so the access rules don't let them straight back in. Provisioning the
+    /// address again clears it.
+    #[serde(default)]
+    pub removed: Vec<String>,
 }
 
 /// What the directory says about an account.
@@ -67,7 +72,7 @@ pub struct Directory {
 pub enum Account {
     /// Not provisioned: the access rules alone decide.
     Unknown,
-    /// Deactivated: no access.
+    /// Deactivated, or deleted: no access.
     Inactive,
     /// Provisioned and active, in these groups (display names).
     Active(Vec<String>),
@@ -116,6 +121,7 @@ impl User {
 impl Directory {
     pub fn account(&self, email: &str) -> Account {
         match self.users.iter().find(|u| u.is(email)) {
+            None if self.removed.contains(&email.to_ascii_lowercase()) => Account::Inactive,
             None => Account::Unknown,
             Some(u) if !u.active => Account::Inactive,
             Some(u) => Account::Active(
@@ -127,6 +133,30 @@ impl Directory {
             ),
         }
     }
+
+    /// These addresses no longer belong to anyone they did (unless another user has them).
+    fn note_removed(&mut self, addresses: &[String]) {
+        for a in addresses {
+            if !self.removed.contains(a) && !self.users.iter().any(|u| u.is(a)) {
+                self.removed.push(a.clone());
+            }
+        }
+    }
+
+    /// These addresses are provisioned (again).
+    fn note_provisioned(&mut self, addresses: &[String]) {
+        self.removed.retain(|a| !addresses.contains(a));
+    }
+}
+
+/// Which addresses lose their passes when a user changes from `before` to `after`: the ones
+/// they no longer have, and with deactivating, all of them.
+fn addresses_to_cut(before: &[String], after: &[String], deactivated: bool) -> Vec<String> {
+    let mut out: Vec<String> = before.iter().filter(|a| deactivated || !after.contains(a)).cloned().collect();
+    if deactivated {
+        out.extend(after.iter().filter(|a| !before.contains(a)).cloned());
+    }
+    out
 }
 
 /// The directory's view of `email`.
@@ -134,15 +164,15 @@ pub fn account(email: &str) -> Account {
     load().account(email)
 }
 
-/// Revokes every pass of a user who just lost access.
-fn cut_off(user: &User) {
+/// Revokes every pass minted for these addresses of a user who just lost them.
+fn cut_off(user: &User, addresses: &[String]) {
     let Some(shared) = crate::server::shared() else { return };
     let file = crate::access::file_for(&shared.token_file);
     let mut n = 0;
-    for a in user.accounts() {
-        n += crate::access::revoke_account(&file, &a).unwrap_or(0);
+    for a in addresses {
+        n += crate::access::revoke_account(&file, a).unwrap_or(0);
     }
-    tracing::info!("scim: {} deprovisioned ({n} guest pass(es) revoked)", user.user_name);
+    tracing::info!("scim: {} lost access ({n} guest pass(es) revoked)", user.user_name);
 }
 
 // ---- Pure parts: filters and PATCH (unit tested) ----
@@ -484,12 +514,13 @@ async fn create_user(headers: HeaderMap, body: axum::body::Bytes) -> Response {
         return error(StatusCode::CONFLICT, "a user with that userName exists");
     }
     d.users.push(u.clone());
+    d.note_provisioned(&u.accounts());
     if let Err(e) = save(&d) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}"));
     }
     tracing::info!("scim: provisioned {}", u.user_name);
     if !u.active {
-        cut_off(&u);
+        cut_off(&u, &u.accounts());
     }
     scim(StatusCode::CREATED, user_json(&u))
 }
@@ -504,7 +535,8 @@ async fn get_user(headers: HeaderMap, Path(id): Path<String>) -> Response {
     }
 }
 
-/// Changes one user under the lock; cuts them off if this deactivated them.
+/// Changes one user under the lock; cuts off what this took from them: every pass if it
+/// deactivated them (as they were named, and are now), else those of addresses they lost.
 fn change_user(id: &str, f: impl FnOnce(&mut User) -> Result<(), String>) -> Response {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut d = load();
@@ -512,15 +544,21 @@ fn change_user(id: &str, f: impl FnOnce(&mut User) -> Result<(), String>) -> Res
         return error(StatusCode::NOT_FOUND, "no such user");
     };
     let was_active = u.active;
+    let before = u.accounts();
     if let Err(e) = f(u) {
         return error(StatusCode::BAD_REQUEST, &e);
     }
     let u = u.clone();
+    let after = u.accounts();
+    let lost = addresses_to_cut(&before, &after, false);
+    d.note_removed(&lost);
+    d.note_provisioned(&after);
     if let Err(e) = save(&d) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}"));
     }
-    if was_active && !u.active {
-        cut_off(&u);
+    let cut = addresses_to_cut(&before, &after, was_active && !u.active);
+    if !cut.is_empty() {
+        cut_off(&u, &cut);
     }
     scim(StatusCode::OK, user_json(&u))
 }
@@ -572,10 +610,11 @@ async fn delete_user(headers: HeaderMap, Path(id): Path<String>) -> Response {
     for g in &mut d.groups {
         g.members.retain(|m| *m != id);
     }
+    d.note_removed(&u.accounts());
     if let Err(e) = save(&d) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}"));
     }
-    cut_off(&u);
+    cut_off(&u, &u.accounts());
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -773,9 +812,56 @@ mod tests {
                 User { id: "2".into(), user_name: "bob".into(), active: false, emails: vec!["bob@example.com".into()], ..User::default() },
             ],
             groups: vec![Group { id: "g".into(), display_name: "eng".into(), members: vec!["1".into()], ..Group::default() }],
+            ..Default::default()
         };
         assert_eq!(d.account("ana@EXAMPLE.com"), Account::Active(vec!["eng".into()]));
         assert_eq!(d.account("bob@example.com"), Account::Inactive);
         assert_eq!(d.account("carol@example.com"), Account::Unknown);
+    }
+
+    fn user(name: &str, active: bool) -> User {
+        User { id: name.into(), user_name: name.into(), active, ..User::default() }
+    }
+
+    #[test]
+    fn a_deleted_user_is_not_someone_nobody_provisioned() {
+        let mut d = Directory { users: vec![user("ana@example.com", true)], ..Default::default() };
+        let gone = d.users.remove(0);
+        d.note_removed(&gone.accounts());
+        assert_eq!(d.account("ANA@example.com"), Account::Inactive);
+        assert_eq!(d.account("bob@example.com"), Account::Unknown);
+        // Provisioned again: theirs again.
+        d.users.push(gone.clone());
+        d.note_provisioned(&gone.accounts());
+        assert_eq!(d.account("ana@example.com"), Account::Active(vec![]));
+        assert!(d.removed.is_empty());
+    }
+
+    #[test]
+    fn an_address_someone_else_still_has_is_not_removed() {
+        let mut other = user("bob@example.com", true);
+        other.emails = vec!["shared@example.com".into()];
+        let mut d = Directory { users: vec![other], ..Default::default() };
+        d.note_removed(&["shared@example.com".to_string(), "ana@example.com".to_string()]);
+        assert_eq!(d.removed, vec!["ana@example.com".to_string()]);
+    }
+
+    #[test]
+    fn an_older_directory_still_loads() {
+        let d: Directory = serde_json::from_str(r#"{"users":[{"id":"1","user_name":"a@b.c"}],"groups":[]}"#).unwrap();
+        assert!(d.removed.is_empty());
+        assert_eq!(d.account("a@b.c"), Account::Active(vec![]));
+    }
+
+    #[test]
+    fn renaming_or_deactivating_cuts_off_every_name_a_pass_may_carry() {
+        let (old, new) = (vec!["old@x.y".to_string()], vec!["new@x.y".to_string()]);
+        // Renamed: the old address's passes go, the new one has none to lose.
+        assert_eq!(addresses_to_cut(&old, &new, false), old);
+        // Renamed and deactivated in one PATCH: both.
+        assert_eq!(addresses_to_cut(&old, &new, true), vec!["old@x.y".to_string(), "new@x.y".to_string()]);
+        // Nothing changed.
+        assert!(addresses_to_cut(&old, &old, false).is_empty());
+        assert_eq!(addresses_to_cut(&old, &old, true), old);
     }
 }

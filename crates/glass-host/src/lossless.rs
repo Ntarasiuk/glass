@@ -186,32 +186,48 @@ pub fn stream_bytes(header: &Header, png: &[u8]) -> Vec<u8> {
 /// One stream's state for one viewer.
 #[derive(Default)]
 struct Track {
+    /// Which display this stream number shows: another one means starting over.
+    display: Option<u32>,
     generation: Option<u64>,
     /// The newest picture seen and when it last changed.
     latest: Option<Arc<RawFrame>>,
     changed: Option<Instant>,
-    /// The picture this viewer was last sent (what its copy matches).
+    /// The picture this viewer was last sent (what its copy matches). Set once it has gone.
     sent: Option<Arc<RawFrame>>,
+    /// When one last went, or was tried.
     sent_at: Option<Instant>,
+    /// This picture came out too big to send: not worth trying again until it changes.
+    too_big: bool,
 }
 
-/// What to send for one stream now, if anything; advances `t`.
+impl Track {
+    /// What's shown in this stream is `display`, from now on.
+    fn showing(&mut self, display: u32) {
+        if self.display != Some(display) {
+            *self = Track { display: Some(display), ..Track::default() };
+        }
+    }
+}
+
+/// What to send for one stream now, if anything; advances `t`. `t.sent` is for the caller to
+/// set, once it has gone.
 fn step(t: &mut Track, generation: u64, read: impl FnOnce() -> Option<Arc<RawFrame>>, now: Instant) -> Option<(Arc<RawFrame>, Rect)> {
     if t.generation != Some(generation) {
-        t.generation = Some(generation);
+        // (This generation counts as read only once it has been, or it would never be again.)
         let cur = read()?;
+        t.generation = Some(generation);
         // A new capture of the same picture (or only the cursor blinking off-screen) isn't a change.
         if !t.latest.as_ref().is_some_and(|l| same(l, &cur)) {
             t.changed = Some(now);
+            t.too_big = false;
         }
         t.latest = Some(cur);
     }
     let latest = t.latest.clone()?;
-    if now.duration_since(t.changed?) < STILL || t.sent_at.is_some_and(|s| now.duration_since(s) < MIN_GAP) {
+    if t.too_big || now.duration_since(t.changed?) < STILL || t.sent_at.is_some_and(|s| now.duration_since(s) < MIN_GAP) {
         return None;
     }
     let rect = dirty_rect(t.sent.as_deref(), &latest)?;
-    t.sent = Some(latest.clone());
     t.sent_at = Some(now);
     Some((latest, rect))
 }
@@ -238,9 +254,10 @@ pub async fn run(
         if reset.swap(false, std::sync::atomic::Ordering::Relaxed) {
             tracks.iter_mut().for_each(|t| t.sent = None);
         }
-        let streams = shared.video.streams().len();
-        tracks.resize_with(streams, Track::default);
+        let streams = shared.video.streams();
+        tracks.resize_with(streams.len(), Track::default);
         for (i, t) in tracks.iter_mut().enumerate() {
+            t.showing(streams[i].id);
             let Some(generation) = shared.video.frame_generation(i as u8) else { continue };
             let video = shared.video.clone();
             let now = Instant::now();
@@ -252,7 +269,9 @@ pub async fn run(
             .await;
             let Ok(Ok((frame, png))) = encoded else { continue };
             if png.len() > MAX_BYTES {
-                t.sent = None; // try again whole next time, once it's smaller
+                // Whole next time, once it has changed: the same picture won't be any smaller.
+                t.sent = None;
+                t.too_big = true;
                 continue;
             }
             let header = Header {
@@ -265,9 +284,12 @@ pub async fn run(
                 fh: frame.height,
                 capture_us: frame.capture_us,
             };
-            if let Err(e) = send(&conn, &stream_bytes(&header, &png)).await {
-                tracing::debug!("lossless refresh: {e:#}");
-                t.sent = None;
+            match send(&conn, &stream_bytes(&header, &png)).await {
+                Ok(()) => t.sent = Some(frame),
+                Err(e) => {
+                    tracing::debug!("lossless refresh: {e:#}");
+                    t.sent = None;
+                }
             }
         }
     }
@@ -375,13 +397,83 @@ mod tests {
         assert!(step(&mut t, 1, || Some(a.clone()), t0).is_none(), "just changed");
         // Same picture captured again: still counts as still.
         assert!(step(&mut t, 2, || Some(a.clone()), t0 + Duration::from_millis(200)).is_none());
-        let (_, rect) = step(&mut t, 2, || None, t0 + STILL).unwrap();
+        let (sent, rect) = step(&mut t, 2, || None, t0 + STILL).unwrap();
         assert_eq!(rect, [0, 0, 16, 16]);
+        t.sent = Some(sent);
         assert!(step(&mut t, 2, || None, t0 + Duration::from_secs(5)).is_none(), "already sent");
         let t1 = t0 + Duration::from_secs(6);
         assert!(step(&mut t, 3, || Some(b.clone()), t1).is_none());
         let (_, rect) = step(&mut t, 3, || None, t1 + STILL).unwrap();
         assert_eq!(rect, [7, 0, 1, 16]);
+    }
+
+    #[test]
+    fn what_never_went_isnt_taken_for_what_the_viewer_has() {
+        let a = Arc::new(frame(16, 16, |_, _| [0, 0, 0]));
+        let b = Arc::new(frame(16, 16, |x, _| if x == 7 { [9, 9, 9] } else { [0, 0, 0] }));
+        let t0 = Instant::now();
+        let mut t = Track::default();
+        step(&mut t, 1, || Some(a.clone()), t0);
+        // The picture was chosen, but encoding it failed: nothing went.
+        let (_, rect) = step(&mut t, 1, || None, t0 + STILL).unwrap();
+        assert_eq!(rect, [0, 0, 16, 16]);
+        assert!(t.sent.is_none());
+        // So the next is compared with what the viewer really has: nothing.
+        let t1 = t0 + Duration::from_secs(1);
+        step(&mut t, 2, || Some(b.clone()), t1);
+        let (_, rect) = step(&mut t, 2, || None, t1 + STILL).unwrap();
+        assert_eq!(rect, [0, 0, 16, 16], "whole, not just what changed since the failed one");
+    }
+
+    #[test]
+    fn a_picture_that_cant_be_read_is_read_again() {
+        let a = Arc::new(frame(16, 16, |_, _| [0, 0, 0]));
+        let t0 = Instant::now();
+        let mut t = Track::default();
+        assert!(step(&mut t, 1, || None, t0).is_none());
+        // Same generation, and now it can be: not skipped until the next one.
+        assert!(step(&mut t, 1, || Some(a.clone()), t0).is_none());
+        assert!(step(&mut t, 1, || None, t0 + STILL).is_some());
+    }
+
+    #[test]
+    fn a_picture_too_big_to_send_isnt_encoded_over_and_over() {
+        let a = Arc::new(frame(16, 16, |_, _| [0, 0, 0]));
+        let b = Arc::new(frame(16, 16, |_, _| [9, 9, 9]));
+        let t0 = Instant::now();
+        let mut t = Track::default();
+        step(&mut t, 1, || Some(a.clone()), t0);
+        assert!(step(&mut t, 1, || None, t0 + STILL).is_some());
+        t.too_big = true;
+        assert!(step(&mut t, 1, || None, t0 + Duration::from_secs(60)).is_none());
+        // Captured again but the same: still too big.
+        assert!(step(&mut t, 2, || Some(a.clone()), t0 + Duration::from_secs(61)).is_none());
+        assert!(step(&mut t, 2, || None, t0 + Duration::from_secs(62)).is_none());
+        // Changed: worth a try once it's still.
+        let t1 = t0 + Duration::from_secs(63);
+        step(&mut t, 3, || Some(b.clone()), t1);
+        assert!(step(&mut t, 3, || None, t1 + STILL).is_some());
+    }
+
+    #[test]
+    fn another_display_in_the_stream_starts_over() {
+        let a = Arc::new(frame(16, 16, |_, _| [0, 0, 0]));
+        let b = Arc::new(frame(16, 16, |x, _| if x == 7 { [9, 9, 9] } else { [0, 0, 0] }));
+        let t0 = Instant::now();
+        let mut t = Track::default();
+        t.showing(1);
+        step(&mut t, 1, || Some(a.clone()), t0);
+        let (sent, _) = step(&mut t, 1, || None, t0 + STILL).unwrap();
+        t.sent = Some(sent);
+        t.showing(1);
+        assert!(t.sent.is_some(), "the same display carries on");
+        // Same size, nearly the same picture: what the viewer has isn't of this one.
+        t.showing(2);
+        assert!(t.sent.is_none());
+        let t1 = t0 + Duration::from_secs(5);
+        step(&mut t, 2, || Some(b.clone()), t1);
+        let (_, rect) = step(&mut t, 2, || None, t1 + STILL).unwrap();
+        assert_eq!(rect, [0, 0, 16, 16]);
     }
 
     #[test]

@@ -5,9 +5,11 @@ import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { releaseInfo } from '../../site/src/releases.js';
 
 const SITE = resolve(import.meta.dirname, '../../site');
-const PORT = 8790;
+// (Another port when something is already on this one: it would answer in this Worker's place.)
+const PORT = Number(process.env.SITE_TEST_PORT ?? 8790);
 const BASE = `http://localhost:${PORT}`;
 const KEY = 'test-stats-key';
 let wrangler;
@@ -19,7 +21,7 @@ before(async () => {
   run(['d1', 'migrations', 'apply', 'getglass', '--local']);
   wrangler = spawn(
     'npx',
-    ['wrangler', 'dev', '--port', String(PORT), '--persist-to', persist, '--var', `STATS_KEY:${KEY}`, '--var', 'VISITOR_SALT:test'],
+    ['wrangler', 'dev', '--port', String(PORT), '--persist-to', persist, '--var', `STATS_KEY:${KEY}`, '--var', 'VISITOR_SALT:test', '--var', 'AL_SECRET:test-agentlens'],
     { cwd: SITE, stdio: 'ignore', detached: true },
   );
   for (let i = 0; i < 120; i++) {
@@ -62,6 +64,28 @@ test('the remote-access client is served at /app/, where its relative URLs resol
   const bare = await get('/app');
   assert.equal(bare.status, 301);
   assert.equal(new URL(bare.headers.get('location')).pathname, '/app/');
+});
+
+const BROWSER = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36';
+const browse = (path) => fetch(`${BASE}${path}`, { headers: { 'user-agent': BROWSER, 'accept-language': 'en', 'sec-fetch-mode': 'navigate' } });
+
+test('analytics: pages carry the AgentLens beacon; scripts, the viewer and signaling are untouched', async () => {
+  for (const path of ['/', '/docs', '/features']) {
+    const html = await (await browse(path)).text();
+    assert.match(html, /<script data-t="[^"]+">\(\(\)=>/, `${path} has the beacon`);
+    assert.doesNotMatch(html, /googletagmanager/, `${path} has no Google tag`);
+  }
+  assert.match(await (await get('/', 'curl/8.7.1')).text(), /^#!\/bin\/sh/);
+  assert.doesNotMatch(await (await browse('/app/')).text(), /data-t=/);
+  const online = await fetch(`${BASE}/signal/online?ids=`);
+  assert.deepEqual(await online.json(), { online: {} });
+});
+
+test('analytics: the beacon endpoint takes signed page tokens only', async () => {
+  const token = /data-t="([^"]+)"/.exec(await (await browse('/docs')).text())[1];
+  const post = (t) => fetch(`${BASE}/_al/e`, { method: 'POST', headers: { 'user-agent': BROWSER }, body: JSON.stringify({ t, k: 'pv', p: '/docs', r: '', u: '', s: [] }) });
+  assert.equal((await post(token)).status, 204);
+  assert.equal((await post('x.1.y')).status, 403);
 });
 
 test('videos answer byte ranges (Safari and link-card players need them)', async () => {
@@ -180,9 +204,16 @@ test('a tarball too big for the site redirects to the GitHub release', async () 
   assert.equal((await get('/releases/nope.tar.gz')).status, 404);
   const windows = await get('/releases/glass-9.9.9-windows-arm64.zip');
   assert.equal(windows.headers.get('location'), 'https://github.com/Ntarasiuk/glass/releases/download/v9.9.9/glass-9.9.9-windows-arm64.zip');
+  // A pinned MSI the site doesn't have redirects; the latest is served as an asset when the
+  // build fetched it (CI does) and it fits Cloudflare's 25 MiB limit.
+  const pinnedMsi = await get('/releases/glass-9.9.9-windows-x86_64.msi');
+  assert.equal(pinnedMsi.headers.get('location'), 'https://github.com/Ntarasiuk/glass/releases/download/v9.9.9/glass-9.9.9-windows-x86_64.msi');
   const msi = await get('/releases/glass-latest-windows-x86_64.msi');
-  assert.equal(msi.status, 302);
-  assert.equal(msi.headers.get('location'), `https://github.com/Ntarasiuk/glass/releases/download/v${version}/glass-${version}-windows-x86_64.msi`);
+  if (msi.status === 302) {
+    assert.equal(msi.headers.get('location'), `https://github.com/Ntarasiuk/glass/releases/download/v${version}/glass-${version}-windows-x86_64.msi`);
+  } else {
+    assert.equal(msi.status, 200);
+  }
 });
 
 test('PowerShell gets Windows quick support at /help', async () => {
@@ -245,4 +276,34 @@ test('quick support: guessing codes is slow', async () => {
   let status;
   for (let i = 0; i < 25; i++) status = (await support('POST', '/api/support/claim', { code: '000000000' })).status;
   assert.equal(status, 429);
+});
+
+test('host connections that never sign in are only kept so long', { timeout: 30_000 }, async () => {
+  const id = 'A'.repeat(22);
+  const open = () =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${PORT}/signal/host/${id}`);
+      ws.addEventListener('message', () => resolve(ws), { once: true });
+      ws.addEventListener('error', reject, { once: true });
+    });
+  const oldest = await open();
+  const closed = new Promise((resolve) => oldest.addEventListener('close', (e) => resolve(e.code)));
+  const others = [];
+  for (let i = 0; i < 4; i++) others.push(await open());
+  assert.equal(await closed, 4008);
+  assert.equal(others.at(-1).readyState, WebSocket.OPEN);
+  for (const ws of others) ws.close();
+});
+
+test('release events know what was served: latest resolves to version.json', async () => {
+  const env = { ASSETS: { fetch: async () => new Response('{"version":"0.15.0"}') } };
+  const at = new URL('https://glassdesk.dev/releases/x');
+  assert.deepEqual(await releaseInfo(env, at, 'glass-latest-darwin-universal.tar.gz'), { version: '0.15.0', os: 'macos', arch: 'universal', format: 'tar.gz' });
+  assert.deepEqual(await releaseInfo(env, at, 'glass-0.13.1-windows-arm64.msi'), { version: '0.13.1', os: 'windows', arch: 'arm64', format: 'msi' });
+  assert.equal((await releaseInfo(env, at, 'notes.txt')).version, 'unknown');
+});
+
+test('quick support marks its release fetch, so a session is not also counted as a download', async () => {
+  assert.match(await (await get('/help.sh')).text(), /X-Glass-Via: quick-support/);
+  assert.match(await (await get('/help.ps1')).text(), /'X-Glass-Via' = 'quick-support'/);
 });

@@ -16,6 +16,12 @@ pub struct Settings {
     /// Let anyone on this computer's tailnet in without the token (as a guest), not just
     /// the owner's own devices and the people the access rules name.
     pub tailnet_members: bool,
+    /// Don't announce this computer on the local network, or let devices there ask to
+    /// connect (`nearby`, on unless this is set).
+    pub nearby_off: bool,
+    /// Don't let a passkey of the owner's glassdesk.dev account open this computer
+    /// (`account-open`, on unless this is set).
+    pub account_open_off: bool,
     /// Record every session to a video file in `recordings_dir`.
     pub record: bool,
     /// Where recordings go (default ~/Movies/Glass or ~/Videos/Glass).
@@ -40,6 +46,11 @@ pub struct Settings {
     pub accent: Option<String>,
     /// A self-hosted introducer for remote access (site/selfhost), instead of glassdesk.dev.
     pub relay: Option<String>,
+    /// More host names the web server answers for (`.example.com` covers its subdomains),
+    /// besides IP addresses, localhost and this computer's own names (see origin.rs).
+    pub allowed_hosts: Vec<String>,
+    /// More sites (`https://app.example.com`) whose pages may call this computer.
+    pub allowed_origins: Vec<String>,
     /// Single sign-on (OpenID Connect): the provider, e.g. https://accounts.google.com.
     pub oidc_issuer: Option<String>,
     pub oidc_client_id: Option<String>,
@@ -191,6 +202,8 @@ pub const KEYS: &[(&str, &str)] = &[
     ("ask-guests", "on/off: ask before a guest (magic link) connects"),
     ("ask-everyone", "on/off: ask before anyone connects"),
     ("tailnet-members", "on/off: anyone on this tailnet connects without the token, as a guest"),
+    ("nearby", "on/off: computers on the same network find this one, and can ask to connect"),
+    ("account-open", "on/off: your glassdesk.dev account's passkey can open this computer (once it's pinned here by glass account add)"),
     ("record", "on/off: record every session"),
     ("recordings-dir", "folder for recordings"),
     ("privacy", "on/off: blank this screen and block local input while viewed"),
@@ -212,6 +225,8 @@ pub const KEYS: &[(&str, &str)] = &[
     ("name", "name shown in the viewer"),
     ("accent", "viewer accent colour, e.g. #ff8800"),
     ("relay", "self-hosted remote-access server, e.g. https://glass.example.com"),
+    ("allowed-hosts", "more names this computer is opened at, e.g. glass.example.com or .example.com (behind your own proxy)"),
+    ("allowed-origins", "sites whose pages may call this computer, e.g. https://app.example.com"),
     ("oidc-issuer", "single sign-on provider, e.g. https://accounts.google.com"),
     ("oidc-client-id", "the OAuth client id registered with that provider"),
     ("oidc-client-secret", "its client secret (stored separately, owner-only)"),
@@ -281,6 +296,8 @@ impl Settings {
             "ask-guests" => show_bool(self.ask_guests),
             "ask-everyone" => show_bool(self.ask_everyone),
             "tailnet-members" => show_bool(self.tailnet_members),
+            "nearby" => show_bool(!self.nearby_off),
+            "account-open" => show_bool(!self.account_open_off),
             "record" => show_bool(self.record),
             "recordings-dir" => recordings_dir(self).display().to_string(),
             "privacy" => show_bool(self.privacy),
@@ -304,6 +321,8 @@ impl Settings {
             "name" => self.name.clone().unwrap_or_default(),
             "accent" => self.accent.clone().unwrap_or_default(),
             "relay" => self.relay.clone().unwrap_or_default(),
+            "allowed-hosts" => self.allowed_hosts.join(","),
+            "allowed-origins" => self.allowed_origins.join(","),
             "oidc-issuer" => self.oidc_issuer.clone().unwrap_or_default(),
             "oidc-client-id" => self.oidc_client_id.clone().unwrap_or_default(),
             "oidc-client-secret" => if oidc_secret().is_some() { "(set)" } else { "" }.into(),
@@ -338,6 +357,8 @@ impl Settings {
             "ask-guests" => self.ask_guests = on_off(value)?,
             "ask-everyone" => self.ask_everyone = on_off(value)?,
             "tailnet-members" => self.tailnet_members = on_off(value)?,
+            "nearby" => self.nearby_off = !on_off(value)?,
+            "account-open" => self.account_open_off = !on_off(value)?,
             "record" => self.record = on_off(value)?,
             "recordings-dir" => {
                 self.recordings_dir = (!value.is_empty()).then(|| PathBuf::from(value))
@@ -411,6 +432,29 @@ impl Settings {
                 self.oidc_client_id = (!value.is_empty()).then(|| value.to_string());
             }
             "oidc-client-secret" => save_oidc_secret(value)?,
+            "allowed-hosts" => {
+                let hosts = list(value);
+                for h in &hosts {
+                    anyhow::ensure!(
+                        h == "*" || (!h.contains("://") && !h.contains(['/', '@'])),
+                        "{h} isn't a host name; use e.g. glass.example.com or .example.com"
+                    );
+                }
+                self.allowed_hosts = hosts;
+            }
+            "allowed-origins" => {
+                let origins: Vec<String> = list(value).into_iter().map(|o| o.trim_end_matches('/').to_string()).collect();
+                for o in &origins {
+                    anyhow::ensure!(
+                        o == "*"
+                            || o.split_once("://").is_some_and(|(scheme, rest)| {
+                                matches!(scheme, "http" | "https") && !rest.is_empty() && !rest.contains(['/', '@'])
+                            }),
+                        "{o} isn't an origin; use e.g. https://app.example.com"
+                    );
+                }
+                self.allowed_origins = origins;
+            }
             "oidc-allow" => {
                 self.oidc_allow = value
                     .split([',', ' '])

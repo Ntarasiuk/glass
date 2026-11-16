@@ -27,7 +27,7 @@ function store(key, value) {
   try { localStorage.setItem(key, value); } catch {}
 }
 
-export function createTerminal({ control, log = () => {} }) {
+export function createTerminal({ control, log = () => {}, toast = () => {} }) {
   const panel = $('terminal');
   const mount = $('terminal-screen');
   const button = $('btn-terminal');
@@ -37,6 +37,9 @@ export function createTerminal({ control, log = () => {} }) {
   let loading;
   let running = false;
   let available = false;
+  // Which shell is ours: an old one's output or exit can still be on its way when a new one opens.
+  let shell = 0;
+  let connected = true; // what's sent reaches the host
 
   async function load() {
     if (term) return;
@@ -65,20 +68,39 @@ export function createTerminal({ control, log = () => {} }) {
       });
       term.onResize(({ cols, rows }) => running && control({ t: 'term', op: 'resize', cols, rows }));
       new ResizeObserver(() => !panel.classList.contains('hidden') && fit.fit()).observe(mount);
-    })();
+    })().catch((e) => {
+      // Try again next time it's opened.
+      loading = undefined;
+      throw e;
+    });
     await loading;
   }
 
   function start() {
+    // Nothing would hear it: a shell opens on a key press once the session is back.
+    if (!connected) {
+      term.write('\r\n\x1b[2m[not connected]\x1b[0m\r\n');
+      return;
+    }
     running = true;
-    control({ t: 'term', op: 'open', cols: term.cols, rows: term.rows });
+    shell++;
+    control({ t: 'term', op: 'open', cols: term.cols, rows: term.rows, shell });
     log('info', 'terminal opened', { cols: term.cols, rows: term.rows });
   }
 
   async function open() {
     panel.classList.remove('hidden');
     button.setAttribute('aria-pressed', 'true');
-    await load();
+    try {
+      await load();
+    } catch (e) {
+      close();
+      log('error', `terminal didn't load: ${e.message ?? e}`);
+      toast({ text: "The terminal didn't load. Try again.", kind: 'error' });
+      return;
+    }
+    // Closed while it loaded.
+    if (panel.classList.contains('hidden')) return;
     fit.fit();
     if (!running) start();
     term.focus();
@@ -147,10 +169,12 @@ export function createTerminal({ control, log = () => {} }) {
       panel.classList.remove('resizing');
       store(HEIGHT_KEY, String(Math.round(panel.getBoundingClientRect().height)));
       grip.removeEventListener('pointermove', move);
+      grip.removeEventListener('pointerup', end);
+      grip.removeEventListener('pointercancel', end);
     };
     grip.addEventListener('pointermove', move);
-    grip.addEventListener('pointerup', end, { once: true });
-    grip.addEventListener('pointercancel', end, { once: true });
+    grip.addEventListener('pointerup', end);
+    grip.addEventListener('pointercancel', end);
   });
   // Keyboard resizing for the separator.
   grip.tabIndex = 0;
@@ -184,9 +208,16 @@ export function createTerminal({ control, log = () => {} }) {
     reset() {
       if (running) term?.write('\r\n\x1b[2m[disconnected]\x1b[0m\r\n');
       running = false;
+      connected = true;
+    },
+    /** The session is gone: `reset` says when there's a new one. */
+    setConnected(on) {
+      connected = on;
     },
     onMessage(msg) {
       if (!term) return;
+      // (A host from before shells had numbers doesn't say.)
+      if (msg.shell !== undefined && msg.shell !== shell) return;
       if (msg.op === 'output') term.write(fromBase64(msg.data));
       else if (msg.op === 'exit') {
         running = false;

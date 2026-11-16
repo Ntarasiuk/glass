@@ -6,7 +6,7 @@ set -eu
 cd "$(dirname "$0")/../.."
 docker build --platform linux/amd64 -t glass-linux-build scripts/linux >/dev/null
 mode=${1:-build}
-cmd="cargo build --release -p glass-host"
+cmd="cargo build --release -p glass-host -p glass-gst"
 [ "$mode" = test ] && cmd="cargo test -p glass-host -p glass-proto"
 docker run --rm --platform linux/amd64 \
   -v "$PWD":/src -v glass-cargo-registry:/root/.cargo/registry \

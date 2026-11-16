@@ -48,7 +48,7 @@ An agent running anywhere (Vercel, claude.ai, ChatGPT, a server) asks to use you
 
 | Scope | Allows |
 |---|---|
-| `computer:view` | Screenshots, `snapshot`, `wait_for_change`, `list_displays` |
+| `computer:view` | Screenshots, `snapshot`, `wait_for_change`, `record`, `list_displays` |
 | `computer:use` | Pointer and keyboard. Includes `computer:view`. |
 
 - No scope, or `*`, means both. A call outside the grant gets 403 `insufficient_scope` naming what's missing (MCP step-up).
@@ -82,7 +82,7 @@ An agent running anywhere (Vercel, claude.ai, ChatGPT, a server) asks to use you
 
 **Apps (`client_credentials`, Vercel Connect's `app` subject):**
 
-- An app can't get tokens until it's installed on the computer with `glass agents install <client>` or the Mac app's Install button. That works for dynamic registrations and metadata-document clients alike.
+- An app can't get tokens until it's installed on the computer with `glass agents install <client>` or the Mac app's Install button. That works for dynamic registrations and metadata-document clients alike. `glass agents uninstall <client>` or the Mac app's Uninstall button takes it back, as do revoking its grant and the grant running out.
 - Asking sends one notification, and at most one every 10 minutes.
 - Revoking an app's grant uninstalls it.
 

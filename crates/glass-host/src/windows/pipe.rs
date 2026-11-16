@@ -47,6 +47,13 @@ impl Pipe {
         Ok(Self(handle))
     }
 
+    /// Ends any read or write waiting on this handle: they return an error.
+    pub fn cancel(&self) {
+        use windows::Win32::System::IO::CancelIoEx;
+        // SAFETY: our handle; no particular operation is named.
+        let _ = unsafe { CancelIoEx(self.0, None) };
+    }
+
     /// Server end: waits for a client to connect. True when one is there.
     pub fn connect(&self) -> bool {
         use windows::Win32::System::Pipes::ConnectNamedPipe;
