@@ -161,6 +161,58 @@ pub trait VideoSource: Send + Sync {
     fn supports_hevc(&self) -> bool {
         false
     }
+    /// Nobody needs pictures ([`hold_capture`]): stop capturing, keeping the layout to come
+    /// back to. `streams` and `set_layout` still describe it. May block.
+    fn suspend(&self) {}
+    /// Someone needs pictures again: capture the layout last asked for. May block.
+    fn resume(&self) {}
+}
+
+/// Viewers and recordings that need the screen captured right now.
+static DEMAND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How long capture outlives the last hold: a page reloading, or a viewer reconnecting, gets
+/// its picture at once.
+const LINGER: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Keeps the screen captured until dropped. Without one nothing captures: on macOS, DRM
+/// video (Netflix, Prime Video) goes black while any app captures the screen, so a host
+/// nobody is viewing mustn't.
+pub struct CaptureHold(Arc<dyn VideoSource>);
+
+pub fn hold_capture(video: Arc<dyn VideoSource>) -> CaptureHold {
+    if DEMAND.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+        settle(video.clone());
+    }
+    CaptureHold(video)
+}
+
+impl Drop for CaptureHold {
+    fn drop(&mut self) {
+        if DEMAND.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) != 1 {
+            return;
+        }
+        let video = self.0.clone();
+        let later = video.clone();
+        let spawned = std::thread::Builder::new().name("glass-capture-linger".into()).spawn(move || {
+            std::thread::sleep(LINGER);
+            settle(later);
+        });
+        if spawned.is_err() {
+            settle(video);
+        }
+    }
+}
+
+/// Captures, or stops, as holds want when it runs (after earlier encoder changes).
+fn settle(video: Arc<dyn VideoSource>) {
+    reconfigure(move || {
+        if DEMAND.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            video.resume();
+        } else {
+            video.suspend();
+        }
+    });
 }
 
 /// Where client input goes (the platform injector, or a recorder in tests).

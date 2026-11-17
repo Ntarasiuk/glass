@@ -134,6 +134,18 @@ pub struct Video {
     watches: Mutex<std::collections::HashMap<u32, capture::Watch>>,
     /// When `heal` last looked for streams not running what's wanted.
     reconciled: Mutex<Option<std::time::Instant>>,
+    /// Someone needs pictures (`crate::media::hold_capture`): capture runs. Changed with
+    /// `streams` held.
+    capturing: AtomicBool,
+    /// The layout last asked for, and while nothing captures (`streams` empty) what it shows.
+    /// Locked after `streams`.
+    parked: Mutex<Parked>,
+}
+
+struct Parked {
+    layout: Layout,
+    /// What `streams` reports while no capture runs.
+    shows: Vec<DisplayInfo>,
 }
 
 /// How often a stream that couldn't take a new setting is tried again.
@@ -161,6 +173,9 @@ impl Video {
             cursor: AtomicBool::new(true),
             watches: Mutex::new(Default::default()),
             reconciled: Mutex::new(None),
+            // Off until a viewer or a recording needs it.
+            capturing: AtomicBool::new(false),
+            parked: Mutex::new(Parked { layout: Layout::Single(None), shows: Vec::new() }),
         }
     }
 
@@ -183,14 +198,14 @@ impl Video {
         self.rebalance();
     }
 
-    /// The displays being streamed; index = stream number.
+    /// The displays being streamed (or that would be, while nothing captures); index = stream
+    /// number.
     pub fn streams(&self) -> Vec<DisplayInfo> {
-        self.streams
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|s| s.display.clone())
-            .collect()
+        let streams = self.streams.lock().unwrap();
+        if streams.is_empty() {
+            return self.parked.lock().unwrap().shows.clone();
+        }
+        streams.iter().map(|s| s.display.clone()).collect()
     }
 
     /// Requests a keyframe on one stream, or all of them.
@@ -203,63 +218,111 @@ impl Video {
         }
     }
 
-    /// Restarts capture with `layout`. Blocks on ScreenCaptureKit. When it can't start, what
-    /// was streaming goes on.
+    /// Restarts capture with `layout` (only notes it while nothing needs capturing). Blocks
+    /// on ScreenCaptureKit. When it can't start, what was streaming goes on.
     pub fn set_layout(&self, layout: Layout) -> Result<Vec<DisplayInfo>> {
         let mut streams = self.streams.lock().unwrap();
-        let started = if let Layout::Window(id) = layout {
-            let windows = capture::list_windows()?;
-            let window = windows
-                .iter()
-                .find(|w| w.info.id == id)
-                .context("that window is gone")?;
-            vec![self.start(0, &Target::Window(window), Some(self.audio.clone()))?]
-        } else {
-            let displays = capture::list_displays()?;
-            let chosen: Vec<&Display> = match layout {
-                Layout::Single(Some(id)) => {
-                    vec![
-                        displays
-                            .iter()
-                            .find(|d| d.info.id == id)
-                            .context("unknown display")?,
-                    ]
-                }
-                Layout::Single(None) => vec![&displays[0]],
-                Layout::Window(_) => unreachable!("handled above"),
-                Layout::All => {
-                    // Match System Settings › Displays › Arrange: left to right, then top to bottom.
-                    let mut all: Vec<&Display> = displays.iter().take(MAX_STREAMS).collect();
-                    all.sort_by(|a, b| {
-                        a.info
-                            .x
-                            .total_cmp(&b.info.x)
-                            .then(a.info.y.total_cmp(&b.info.y))
-                    });
-                    all
-                }
-            };
-            // Only the first stream carries audio, so it isn't heard once per display.
-            chosen
-                .into_iter()
-                .enumerate()
-                .map(|(index, display)| {
-                    let audio = (index == 0).then(|| self.audio.clone());
-                    self.start(index as u8, &Target::Display(display), audio)
-                })
-                .collect::<Result<Vec<_>>>()?
+        self.apply(&mut streams, layout)
+    }
+
+    fn apply(&self, streams: &mut Vec<Stream>, layout: Layout) -> Result<Vec<DisplayInfo>> {
+        let windows = match layout {
+            Layout::Window(_) => capture::list_windows()?,
+            _ => Vec::new(),
         };
+        let displays = match layout {
+            Layout::Window(_) => Vec::new(),
+            _ => capture::list_displays()?,
+        };
+        let targets: Vec<Target> = match layout {
+            Layout::Window(id) => {
+                vec![Target::Window(windows.iter().find(|w| w.info.id == id).context("that window is gone")?)]
+            }
+            Layout::Single(Some(id)) => {
+                vec![Target::Display(displays.iter().find(|d| d.info.id == id).context("unknown display")?)]
+            }
+            Layout::Single(None) => vec![Target::Display(displays.first().context("no displays")?)],
+            Layout::All => {
+                // Match System Settings › Displays › Arrange: left to right, then top to bottom.
+                let mut all: Vec<&Display> = displays.iter().take(MAX_STREAMS).collect();
+                all.sort_by(|a, b| a.info.x.total_cmp(&b.info.x).then(a.info.y.total_cmp(&b.info.y)));
+                all.into_iter().map(Target::Display).collect()
+            }
+        };
+        if !self.capturing.load(Ordering::SeqCst) {
+            let shows: Vec<DisplayInfo> = targets.iter().map(Target::info).collect();
+            *self.parked.lock().unwrap() = Parked { layout, shows: shows.clone() };
+            return Ok(shows);
+        }
+        // Only the first stream carries audio, so it isn't heard once per display.
+        let started = targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| {
+                let audio = (index == 0).then(|| self.audio.clone());
+                self.start(index as u8, target, audio)
+            })
+            .collect::<Result<Vec<_>>>()?;
         // The old ones stop reaching viewers first, so a stream number never has two encoders
         // feeding it.
         for s in streams.iter() {
             s.capture.retire();
         }
-        let old = std::mem::replace(&mut *streams, started);
+        let old = std::mem::replace(streams, started);
         for s in streams.iter() {
             s.go_live();
         }
         drop(old);
-        Ok(streams.iter().map(|s| s.display.clone()).collect())
+        let shows: Vec<DisplayInfo> = streams.iter().map(|s| s.display.clone()).collect();
+        *self.parked.lock().unwrap() = Parked { layout, shows: shows.clone() };
+        Ok(shows)
+    }
+
+    /// Stops every capture; `resume` starts the same layout again.
+    fn suspend(&self) {
+        let mut streams = self.streams.lock().unwrap();
+        self.capturing.store(false, Ordering::SeqCst);
+        if streams.is_empty() {
+            return;
+        }
+        for s in streams.iter() {
+            s.capture.retire();
+        }
+        // (`parked` already shows what these did.)
+        let old = std::mem::take(&mut *streams);
+        drop(streams);
+        drop(old);
+        info!("capture stopped: nobody is viewing or recording");
+    }
+
+    /// Captures the layout last asked for, or the main display if that's gone. `heal` tries
+    /// again when neither starts.
+    fn resume(&self) {
+        self.start_parked(false);
+    }
+
+    /// `resume`; `retrying` (from `heal`) says so quietly.
+    fn start_parked(&self, retrying: bool) {
+        let mut streams = self.streams.lock().unwrap();
+        self.capturing.store(true, Ordering::SeqCst);
+        if !streams.is_empty() {
+            return;
+        }
+        let layout = self.parked.lock().unwrap().layout;
+        let started = self.apply(&mut streams, layout).or_else(|e| match layout {
+            Layout::Single(None) => Err(e),
+            _ => {
+                if !retrying {
+                    tracing::warn!("capture: {layout:?} is gone ({e:#}); the main display instead");
+                }
+                self.apply(&mut streams, Layout::Single(None))
+            }
+        });
+        match started {
+            Ok(shows) => info!("capture started: displays {:?}", shows.iter().map(|d| d.id).collect::<Vec<_>>()),
+            Err(e) if retrying => tracing::debug!("capture: still can't start: {e:#}"),
+            Err(e) => tracing::warn!("capture: couldn't start ({e:#}); trying again"),
+        }
     }
 
     /// What streams should be running now.
@@ -455,6 +518,12 @@ impl VideoSource for Video {
     fn set_layout(&self, layout: Layout) -> Result<Vec<DisplayInfo>> {
         Video::set_layout(self, layout)
     }
+    fn suspend(&self) {
+        Video::suspend(self)
+    }
+    fn resume(&self) {
+        Video::resume(self)
+    }
     fn displays(&self) -> Result<Vec<DisplayInfo>> {
         Video::displays(self)
     }
@@ -577,6 +646,10 @@ impl VideoSource for Video {
     fn heal(&self) {
         // Watches no agent has wanted for a while end.
         self.watches.lock().unwrap().retain(|id, _| crate::damage::wanted(*id));
+        // Wanted, but it couldn't start (a display asleep, say).
+        if self.capturing.load(Ordering::SeqCst) && self.streams.lock().unwrap().is_empty() {
+            self.start_parked(true);
+        }
         {
             let mut streams = self.streams.lock().unwrap();
             let mut displays = None;
