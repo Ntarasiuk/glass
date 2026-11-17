@@ -304,7 +304,12 @@ impl Video {
     /// `resume`; `retrying` (from `heal`) says so quietly.
     fn start_parked(&self, retrying: bool) {
         let mut streams = self.streams.lock().unwrap();
-        self.capturing.store(true, Ordering::SeqCst);
+        if !retrying {
+            self.capturing.store(true, Ordering::SeqCst);
+        } else if !self.capturing.load(Ordering::SeqCst) {
+            // Suspended since `heal` looked: nobody wants it any more.
+            return;
+        }
         if !streams.is_empty() {
             return;
         }
