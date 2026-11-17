@@ -888,7 +888,7 @@ impl RemoteView {
         let swap = self.swap.load(Ordering::Relaxed);
         let relative = self.relative.load(Ordering::Relaxed);
         let update = self.update.clone();
-        let web = format!("https://{}/", self.session.target.dns);
+        let target = self.session.target.clone();
         let ctl = self.session_control();
         let act = move |f: fn(&mut RemoteView, &mut Window, &mut Context<RemoteView>)| {
             let this = this.clone();
@@ -949,8 +949,14 @@ impl RemoteView {
                 menu = menu.item(PopupMenuItem::new(if recording { "Stop recording" } else { "Record this session" }).icon(I::Video).on_click(c(json!({ "t": "record", "on": !recording }))));
             }
             menu = menu.separator().item(PopupMenuItem::new("Open in the browser").icon(I::ExternalLink).on_click({
-                let web = web.clone();
-                move |_, _, _| super::actions::open(&web)
+                let target = target.clone();
+                move |_, window, cx| match &target.remote {
+                    Some((origin, key)) => super::actions::open(&format!("{origin}/app/#r={key}")),
+                    None => {
+                        let target = target.clone();
+                        super::act(window, cx, move || super::actions::open_machine(&target.dns, target.at))
+                    }
+                }
             }));
             if owner {
                 if let Some(v) = &update {

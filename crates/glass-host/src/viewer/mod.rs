@@ -57,7 +57,7 @@ use glass_proto::{CursorPos, InputEvent, MAX_STREAMS};
 use serde_json::Value;
 use tokio::sync::{Notify, mpsc};
 
-pub use net::{Target, codecs, reach};
+pub use net::{Target, codecs, reach, web_address};
 #[cfg(windows)]
 pub fn winmf_report() -> String {
     winmf::report()

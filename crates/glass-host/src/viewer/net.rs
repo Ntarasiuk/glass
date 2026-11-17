@@ -288,6 +288,20 @@ async fn host_config(dns: &str, at: Option<std::net::IpAddr>) -> Result<HostConf
 /// How long a remembered computer gets to answer when the list is only checking on it.
 const REACH_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// Where a computer's Glass opens in a browser: the first of its web addresses that
+/// answers as Glass. Blocking, briefly.
+pub fn web_address(dns: &str, at: Option<std::net::IpAddr>) -> String {
+    let (bases, host) = web_base(dns);
+    browser_address(&bases, at.map(|ip| (host, ip)).or_else(pinned_address), REACH_TIMEOUT)
+}
+
+/// When none answers in time, the last one: Glass always serves its web port, and the
+/// standard one only when it could have it (another app there answers instead).
+fn browser_address(bases: &[String], pin: Option<(String, std::net::IpAddr)>, timeout: Duration) -> String {
+    let base = fetch_config(bases, pin, timeout, false).map_or_else(|_| bases.last().cloned().unwrap_or_default(), |(_, base)| base);
+    format!("{base}/")
+}
+
 /// Whether the computer remembered as `saved` answers at `at` right now, and is still that
 /// computer. Blocking.
 fn is_at(saved: &super::saved::Computer, at: std::net::IpAddr, timeout: Duration) -> bool {
@@ -1387,6 +1401,34 @@ mod tests {
         // An older host says nothing about itself: it connects as before, and isn't remembered.
         let old = read_config(&json!({ "wtPort": 8443, "certHash": hash.to_vec() }), "http://x:8080".into()).unwrap();
         assert!(old.who.is_none() && !still(&saved(&mine, "http://x:8080"), &old));
+    }
+
+    /// Something on this computer answering every request with `body`; its address.
+    fn serves(status: &'static str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let _ = s.read(&mut [0; 2048]);
+                let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn a_browser_opens_where_glass_answers() {
+        let limit = Duration::from_secs(5);
+        let glass = serves("200 OK", r#"{"wtPort":4433}"#);
+        let (missing, other) = (serves("404 Not Found", "{}"), serves("200 OK", r#"{"hello":1}"#));
+        let nothing = format!("http://{}", std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap());
+        assert_eq!(browser_address(&[glass.clone(), nothing.clone()], None, limit), format!("{glass}/"));
+        // Another app has the standard port (`tailscale serve`): Glass is on its web port.
+        assert_eq!(browser_address(&[missing.clone(), glass.clone()], None, limit), format!("{glass}/"));
+        assert_eq!(browser_address(&[other, glass.clone()], None, limit), format!("{glass}/"));
+        // Glass isn't answering: still its web port, not the other app.
+        assert_eq!(browser_address(&[missing, nothing.clone()], None, limit), format!("{nothing}/"));
     }
 
     #[test]

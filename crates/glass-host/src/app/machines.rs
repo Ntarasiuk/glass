@@ -37,8 +37,10 @@ impl GlassApp {
                     if m.online { "online" } else { "offline" },
                     if m.is_self { " · this computer" } else { "" }
                 );
-                let open_dns = m.dns.clone();
                 let dns = m.dns.clone();
+                // This computer's own address is known; another's is asked for.
+                let own = m.is_self.then(|| store.snap.url()).flatten();
+                let open_dns = m.dns.clone();
                 let control = h_flex()
                     .gap_2()
                     .when(!m.online && m.wakeable, |d| {
@@ -69,7 +71,13 @@ impl GlassApp {
                                 .ghost()
                                 .label("Browser")
                                 .icon(I::ExternalLink)
-                                .on_click(move |_, _, _| actions::open_machine(&open_dns)),
+                                .on_click(move |_, window, cx| match &own {
+                                    Some(url) => actions::open(url),
+                                    None => {
+                                        let dns = open_dns.clone();
+                                        act(window, cx, move || actions::open_machine(&dns, None))
+                                    }
+                                }),
                         )
                     });
                 ui::icon_row(icon, if m.online { theme.success } else { theme.muted_foreground }, m.name.clone(), detail, control, cx)
