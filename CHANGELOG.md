@@ -32,6 +32,7 @@ What changed in each release of Glass. `glass update` (or the Glass app) install
 ### Fixes
 
 - **Links from anywhere open in the browser again.** A browser's connection offer had outgrown what glassdesk.dev would pass on, so it was dropped and the page said the computer didn't answer. glassdesk.dev now takes much larger offers (and says so if one is still too big), and the browser sends about 40% less, listing its network routes once instead of once per screen.
+- **Netflix and Prime Video play on a Mac running Glass.** The Mac's screen was captured all the time, viewed or not, and DRM video goes black while anything captures the screen. Now it's captured only while someone is viewing or recording, and for 10 seconds after (so a reload reconnects at once); a new viewer's first picture takes about half a second longer.
 
 ## 0.15.3
 

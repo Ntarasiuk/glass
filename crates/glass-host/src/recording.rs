@@ -32,6 +32,8 @@ pub struct Recording {
     pub path: PathBuf,
     state: Arc<Mutex<Option<Recorder>>>,
     made: Arc<Mutex<Made>>,
+    /// The screen is captured while it records, viewed or not (an agent's clip).
+    _capture: crate::media::CaptureHold,
 }
 
 /// What a recording wrote.
@@ -86,6 +88,7 @@ pub fn start_in(dir: &Path, who: &str, stopped: impl FnOnce(PathBuf, String) + S
     recorder._cursor = Some(crate::cursor::bake());
     let state = Arc::new(Mutex::new(Some(recorder)));
     let mut frames = shared.frames.subscribe();
+    let capture = crate::media::hold_capture(shared.video.clone());
     shared.video.request_keyframe(Some(0));
     let thread_state = state.clone();
     let (thread_made, first) = (made.clone(), path.clone());
@@ -121,7 +124,7 @@ pub fn start_in(dir: &Path, who: &str, stopped: impl FnOnce(PathBuf, String) + S
             }
         })?;
     tracing::info!("recording to {}", path.display());
-    Ok(Recording { path, state, made })
+    Ok(Recording { path, state, made, _capture: capture })
 }
 
 struct Recorder {
