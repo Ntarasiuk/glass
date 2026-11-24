@@ -143,8 +143,9 @@ pub async fn run(
     });
     let nearby_listen = listen.clone();
     let version_dir = web_dir.clone();
+    let config_tls_name = nearby_tls_name.clone().flatten();
     let client_config = move || {
-        let (wt_host, self_signed) = (wt_host.clone(), self_signed.clone());
+        let (wt_host, self_signed, tls_name) = (wt_host.clone(), self_signed.clone(), config_tls_name.clone());
         let version = web_version(&version_dir);
         async move {
             // A host that slept past the renewal date replaces it before a viewer pins it.
@@ -158,6 +159,8 @@ pub async fn run(
             Json(serde_json::json!({
                 "wtPort": wt_port,
                 "wtHost": wt_host,
+                // Who this is, for an app that remembers it (and finds it again over a VPN).
+                "self": crate::nearby::proof(cert_hash.as_deref(), tls_name.as_deref()),
                 "certHash": cert_hash,
                 "version": version,
                 // For Wake-on-LAN from another host on this LAN.
@@ -649,12 +652,12 @@ async fn session(incoming: IncomingSession, shared: Arc<Shared>) -> Result<()> {
                         }
                         Some(&KIND_MIC) if mic_on.load(Ordering::Relaxed) => crate::mic::packet(&dgram),
                         Some(&glass_proto::KIND_FRAME_ACK) if authed.load(Ordering::Relaxed) => {
-                            if let Some((stream, id)) = glass_proto::read_frame_ack(&dgram) {
+                            if let Some((stream, id, waited_us)) = glass_proto::read_frame_ack_waited(&dgram) {
                                 if !acking.swap(true, Ordering::Relaxed) {
                                     info!("{peer}: frames acknowledged: pacing video by them");
                                 }
                                 let now = std::time::Instant::now();
-                                link.acked(stream, id, now);
+                                link.acked_waited(stream, id, std::time::Duration::from_micros(waited_us), now);
                                 flow.update(&mut link, now);
                             }
                         }
@@ -956,13 +959,16 @@ async fn control(
         ctx.conn.close(1u32.into(), b"links off");
         return Ok(());
     }
+    let mut renewed = None;
     if auth.is_none()
         && let Some(p) = &pass
         && let Some(valid) = crate::access::check_pass(&access_file, p)
     {
+        // A device the person here let in keeps its pass by using it.
+        renewed = crate::access::renew(&access_file, p);
         auth = Some(Auth::Guest {
             pass: p.clone(),
-            expires: valid.expires,
+            expires: renewed.unwrap_or(valid.expires),
             new: false,
             scope: valid.scope,
             passkey: valid.passkey,
@@ -986,9 +992,10 @@ async fn control(
             Err(e) => warn!("{peer}: magic link check failed: {e:#}"),
         }
     }
-    // A device on the same network with nothing to show, asking: the person here decides, and
-    // a yes gives it a pass, like opening a link would. (Not at the sign-in screen, where
-    // nobody is; not over WebRTC, where the address is public; not when guests are off.)
+    // A device on the same network, or on a VPN into it, with nothing to show, asking: the
+    // person here decides, and a yes gives it a pass, like opening a link would. (Not at the
+    // sign-in screen, where nobody is; not over WebRTC, where the address is public; not when
+    // guests are off.)
     let mut asked_nearby = false;
     // A device with nothing to show but a secret, on a computer that pinned its owner's
     // passkey (`glass account add`): the viewer sends the owner to glassdesk.dev/computers,
@@ -1006,7 +1013,7 @@ async fn control(
     {
         control::write_json(&mut send, &ServerMsg::AccountPasskey { host: key.id() }).await?;
         let granted = if crate::actions::wait_grant(secret).await {
-            crate::access::grant_pass(&access_file, crate::access::MAX_GRANT, crate::access::Scope::default(), &device)
+            crate::access::grant_standing_pass(&access_file, crate::access::MAX_GRANT, crate::access::Scope::default(), &device)
                 .map_err(|e| warn!("{peer}: couldn't make a pass: {e:#}"))
                 .ok()
         } else {
@@ -1036,14 +1043,14 @@ async fn control(
         && policy.allows("links")
     {
         match crate::nearby::may_ask(peer) {
-            Ok(asking) => {
+            Ok((asking, from)) => {
                 let msg = "Waiting for the person at this computer to let you in…".into();
                 control::write_json(&mut send, &ServerMsg::Waiting { msg }).await?;
-                let answer = crate::approval::ask(format!("{device} · on this network ({peer})")).await;
+                let answer = crate::approval::ask(format!("{device} · {} ({peer})", from.describe())).await;
                 drop(asking);
                 let granted = match answer {
                     crate::approval::Answer::Allowed => {
-                        crate::access::grant_pass(&access_file, crate::nearby::GRANT, crate::access::Scope::default(), &device)
+                        crate::access::grant_standing_pass(&access_file, crate::nearby::GRANT, crate::access::Scope::default(), &device)
                             .map_err(|e| warn!("{peer}: couldn't make a pass: {e:#}"))
                             .ok()
                     }
@@ -1054,7 +1061,7 @@ async fn control(
                         crate::nearby::denied(peer);
                     }
                     record_auth_failure(shared, peer);
-                    refused(&device, "not allowed (asked from this network)");
+                    refused(&device, if from == crate::nearby::From::Link { "not allowed (asked from this network)" } else { "not allowed (asked from another private network)" });
                     let msg = match answer {
                         crate::approval::Answer::Unanswered => "Nobody at this computer answered. Try again when someone's there.",
                         _ => "The person at this computer didn't let you in.",
@@ -1065,7 +1072,7 @@ async fn control(
                     ctx.conn.close(1u32.into(), b"not allowed");
                     return Ok(());
                 };
-                info!("{peer}: let in from this network by the person here");
+                info!("{peer}: let in by the person here ({})", from.describe());
                 asked_nearby = true;
                 auth = Some(Auth::Guest { pass: g.pass, expires: g.expires, new: true, scope: g.scope, passkey: None });
             }
@@ -1098,12 +1105,8 @@ async fn control(
         ctx.conn.close(1u32.into(), b"unauthorized");
         return Ok(());
     };
-    if let Auth::Guest {
-        pass,
-        expires,
-        new: true,
-        ..
-    } = &auth
+    if let Auth::Guest { pass, expires, new, .. } = &auth
+        && (*new || renewed.is_some())
     {
         // Sent first, so the device keeps its pass even if a later step needs a retry.
         control::write_json(
@@ -1111,6 +1114,7 @@ async fn control(
             &ServerMsg::Pass {
                 pass: pass.clone(),
                 expires: *expires,
+                renewed: !*new,
             },
         )
         .await?;

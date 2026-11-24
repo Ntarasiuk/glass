@@ -235,6 +235,11 @@ pub struct Store {
     pub machines: Vec<Machine>,
     /// Glass computers heard on this network (`nearby`).
     pub nearby: Vec<crate::nearby::Found>,
+    /// The computers this app has opened before (`viewer::saved`).
+    pub saved: Vec<crate::viewer::saved::Computer>,
+    /// Where the ones not heard on this network answer right now, by id: over a VPN into
+    /// their network, the address they had there.
+    pub reach: std::collections::HashMap<String, std::net::IpAddr>,
     /// The computers on the glassdesk.dev account this app is signed in to (`None`: signed out).
     pub account: Option<Vec<crate::account::Computer>>,
     /// Waiting for the browser to say yes to a sign-in (which try, so a new one replaces it).
@@ -302,6 +307,16 @@ impl Store {
             }
         })
         .detach();
+        // The computers opened before, and which of them answer from here.
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(heard) = this.read_with(cx, |s, _| s.heard()) else { break };
+                let found = cx.background_executor().spawn(async move { data::saved(&heard) }).await;
+                let Ok(()) = this.update(cx, |s, cx| s.set_saved(found, cx)) else { break };
+                cx.background_executor().timer(SLOW_TICK).await;
+            }
+        })
+        .detach();
         // The account's computers, while signed in.
         cx.spawn(async move |this, cx| {
             loop {
@@ -327,6 +342,8 @@ impl Store {
             tailnet: Tailnet::Checking,
             machines: Vec::new(),
             nearby: Vec::new(),
+            saved: Vec::new(),
+            reach: Default::default(),
             account: crate::account::signed_in().then(Vec::new),
             signing_in: None,
             own_key: crate::account::own_key(),
@@ -377,6 +394,41 @@ impl Store {
             .collect()
     }
 
+    fn heard(&self) -> Vec<String> {
+        self.nearby.iter().map(|f| f.id.clone()).collect()
+    }
+
+    fn set_saved(&mut self, (saved, reach): (Vec<crate::viewer::saved::Computer>, std::collections::HashMap<String, std::net::IpAddr>), cx: &mut Context<Self>) {
+        if self.saved != saved || self.reach != reach {
+            self.saved = saved;
+            self.reach = reach;
+            cx.notify();
+        }
+    }
+
+    /// Looks again at the computers opened before, right away.
+    pub fn refresh_saved(cx: &mut App) {
+        let store = cx.global::<StoreHandle>().0.clone();
+        let heard = store.read(cx).heard();
+        cx.spawn(async move |cx| {
+            let found = cx.background_executor().spawn(async move { data::saved(&heard) }).await;
+            let _ = store.update(cx, |s, cx| s.set_saved(found, cx));
+        })
+        .detach();
+    }
+
+    /// The computers opened before that aren't listed anywhere else right now (heard on
+    /// this network, or on the tailnet), each with the address it answers at from here.
+    pub fn saved_elsewhere(&self) -> Vec<(crate::viewer::saved::Computer, Option<std::net::IpAddr>)> {
+        let heard = self.heard();
+        let on_tailnet = |url: &str| self.machines.iter().any(|m| m.online && (url == format!("https://{}", m.dns) || url.starts_with(&format!("https://{}:", m.dns))));
+        self.saved
+            .iter()
+            .filter(|c| !heard.contains(&c.id) && !on_tailnet(&c.url))
+            .map(|c| (c.clone(), self.reach.get(&c.id).copied()))
+            .collect()
+    }
+
     /// What the website answered: its list, signed out (`None`), or nothing new (unreachable).
     fn set_account(&mut self, list: anyhow::Result<Option<Vec<crate::account::Computer>>>, cx: &mut Context<Self>) {
         if let Ok(list) = list
@@ -387,10 +439,10 @@ impl Store {
         }
     }
 
-    /// The account's other computers: not this one, and not one heard on this network
-    /// (that's listed there, and reached directly).
+    /// The account's other computers: not this one, and not one heard on this network or
+    /// answering at an address it had before (that's listed there, and reached directly).
     pub fn account_others(&self) -> Vec<crate::account::Computer> {
-        let nearby: Vec<String> = self.nearby.iter().map(|f| f.id.clone()).collect();
+        let nearby: Vec<String> = self.nearby.iter().map(|f| f.id.clone()).chain(self.reach.keys().cloned()).collect();
         self.account
             .iter()
             .flatten()
@@ -586,10 +638,12 @@ impl Page {
     }
 }
 
-/// Where an address on Home leads: this computer on your Tailscale network, or from anywhere.
+/// Where an address on Home leads: this computer on your Tailscale network, on its own
+/// network (or a VPN into it), or from anywhere.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Via {
     Tailnet,
+    Network,
     Anywhere,
 }
 
@@ -660,7 +714,7 @@ impl GlassApp {
             #[cfg(any(target_os = "macos", windows))]
             showing: None,
             #[cfg(any(target_os = "macos", windows))]
-            open_link: input("https://computer.tailnet.ts.net/#l=…", window, cx),
+            open_link: input("A link, or an address like 192.168.1.20", window, cx),
             setup: None,
             setup_dismissed: false,
             chat,

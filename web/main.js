@@ -1074,6 +1074,7 @@ function onControl(msg) {
       break;
     case 'pass':
       storage((s) => s.setItem(passKey, JSON.stringify({ pass: msg.pass, expires: msg.expires })));
+      if (msg.renewed) break; // the pass it had, with more time
       passToast = ui.toast({ text: `You're in. This device has access until ${formatExpiry(msg.expires)}.`, icon: 'link', timeout: 6000 });
       log('info', 'signed in with a magic link', { expires: msg.expires });
       break;
@@ -1229,7 +1230,7 @@ function onConnectionStatus(text) {
     const reason = text.replace(/^connection failed: /, '').replace(/, retrying…$/, '');
     showStatus('error', `Can't reach ${name}`, `${reason} Retrying…`);
   } else if (text.startsWith('connection failed'))
-    showStatus('error', `Can't reach ${name}`, 'Retrying. Make sure Glass is running there and both devices are on Tailscale.');
+    showStatus('error', `Can't reach ${name}`, 'Retrying. Make sure Glass is running there and this device is on its network, a VPN into it, or the same Tailscale.');
   else if (text.startsWith('waiting for access token')) hideStatus();
   else if (text === 'not let in') showStatus('error', 'Not let in', deniedMsg ?? `The person at ${name} didn't let you in.`);
 }

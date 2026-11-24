@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::soft_encode::{Frame, to_i420};
+use crate::soft_encode::Frame;
 
 /// How a display's scan-out is turned relative to the desktop (DXGI_MODE_ROTATION).
 /// Desktop Duplication hands over the picture as scanned out, so a portrait display's
@@ -279,16 +279,10 @@ pub fn hardware_fits(size: (usize, usize), scale: f64) -> bool {
 /// Converts `frame` to NV12 at `out` size (`div` box-filters it down): `out_buf` gets the
 /// Y plane then interleaved U/V, `w * h * 3 / 2` bytes. The same BT.601 limited-range
 /// conversion as OpenH264's input; `u` and `v` are scratch.
-pub fn to_nv12(frame: &Frame, div: usize, (w, h): (usize, usize), out_buf: &mut [u8], u: &mut Vec<u8>, v: &mut Vec<u8>) {
-    let chroma = (w / 2) * (h / 2);
-    u.resize(chroma, 0);
-    v.resize(chroma, 0);
-    let (y, uv) = out_buf[..w * h + chroma * 2].split_at_mut(w * h);
-    to_i420(frame, div, (w, h), y, u, v);
-    for ((pair, &cu), &cv) in uv.chunks_exact_mut(2).zip(u.iter()).zip(v.iter()) {
-        pair[0] = cu;
-        pair[1] = cv;
-    }
+/// The frame in NV12 (`out_buf`: the luma plane, then interleaved chroma).
+pub fn to_nv12(frame: &Frame, div: usize, (w, h): (usize, usize), out_buf: &mut [u8]) {
+    let (y, uv) = out_buf[..w * h + (w / 2) * (h / 2) * 2].split_at_mut(w * h);
+    crate::soft_encode::to_nv12(frame, div, (w, h), y, uv);
 }
 
 const NAL_IDR: u8 = 5;
@@ -432,6 +426,7 @@ pub fn app_name(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::soft_encode::to_i420;
     use crate::soft_encode::PixelFormat;
 
     /// A `w`×`h` picture whose pixels hold their own coordinates, rows padded.
@@ -617,8 +612,7 @@ mod tests {
         let (mut y, mut u, mut v) = (vec![0; 8], vec![0; 2], vec![0; 2]);
         to_i420(&frame, 1, (4, 2), &mut y, &mut u, &mut v);
         let mut nv12 = vec![0; 12];
-        let (mut su, mut sv) = (Vec::new(), Vec::new());
-        to_nv12(&frame, 1, (4, 2), &mut nv12, &mut su, &mut sv);
+        to_nv12(&frame, 1, (4, 2), &mut nv12);
         assert_eq!(&nv12[..8], &y[..]);
         assert_eq!(&nv12[8..], &[u[0], v[0], u[1], v[1]]);
         assert!(v[0] > 200 && u[1] > 200, "red has high V, blue high U");

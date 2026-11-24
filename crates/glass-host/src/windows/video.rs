@@ -21,7 +21,7 @@ use tracing::{info, warn};
 use windows::Win32::Foundation::{HMODULE, LPARAM, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
     D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device,
     ID3D11DeviceContext, ID3D11Texture2D,
 };
@@ -428,20 +428,40 @@ impl Duplicator {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             // SAFETY: desc is a plain out-parameter.
             unsafe { texture.GetDesc(&mut desc) };
+            let mut whole = !self.has_image;
             if self.staging.is_none() || (desc.Width as usize, desc.Height as usize) != (self.width, self.height) {
                 self.staging = Some(self.make_staging(desc.Width, desc.Height)?);
                 (self.width, self.height) = (desc.Width as usize, desc.Height as usize);
+                whole = true;
             }
-            // SAFETY: both textures are the same size and format.
-            unsafe { self.context.CopyResource(self.staging.as_ref().unwrap(), &texture) };
+            // SAFETY: the frame is still acquired.
+            let scanned = unsafe { self.scanned_rects(info) };
+            let staging = self.staging.as_ref().unwrap();
+            // Only what changed comes back from the GPU: the staging texture keeps the rest
+            // from earlier frames, each of which brought its own changes. A typing desktop
+            // changes a few lines, not 8 MB of a 1080p screen every frame.
+            match scanned.as_deref() {
+                Some(rects) if !whole && !rects.is_empty() && covered(rects, (self.width, self.height)) < 0.6 => {
+                    for b in rects.iter().filter_map(|&r| texture_box(r, (self.width, self.height))) {
+                        // SAFETY: the box lies within both textures, which are the same size
+                        // and format.
+                        unsafe { self.context.CopySubresourceRegion(staging, 0, b.left, b.top, 0, &texture, 0, Some(&b)) };
+                    }
+                }
+                // SAFETY: both textures are the same size and format.
+                _ => unsafe { self.context.CopyResource(staging, &texture) },
+            }
             // A new duplication's first image is how the display looks, not a change (it
             // comes all dirty).
             let first = !self.has_image;
             self.has_image = true;
             changed = true;
             let upright = self.rotation.upright((self.width, self.height));
-            // SAFETY: the frame is still acquired.
-            match unsafe { self.changed_rects(info) } {
+            let rects = scanned.map(|rects| {
+                let size = (self.width, self.height);
+                rects.into_iter().flat_map(|r| self.rotation.upright_rect(size, [r.left, r.top, r.right, r.bottom])).collect::<Vec<_>>()
+            });
+            match rects {
                 _ if first => crate::damage::note(self.display, upright, &[]),
                 Some(rects) => crate::damage::note(self.display, upright, &rects),
                 None => crate::damage::note_all(self.display, upright),
@@ -450,16 +470,16 @@ impl Duplicator {
         Ok(changed)
     }
 
-    /// Where the acquired frame changed (moved areas' destinations, and dirty areas),
-    /// upright; `None` when Duplication doesn't say. Must be called before ReleaseFrame.
-    unsafe fn changed_rects(&self, info: &DXGI_OUTDUPL_FRAME_INFO) -> Option<Vec<(u32, u32, u32, u32)>> {
+    /// Where the acquired frame changed (moved areas' destinations, and dirty areas), as
+    /// the display scans out (not turned upright); `None` when Duplication doesn't say. Must
+    /// be called before ReleaseFrame.
+    unsafe fn scanned_rects(&self, info: &DXGI_OUTDUPL_FRAME_INFO) -> Option<Vec<RECT>> {
         let size = info.TotalMetadataBufferSize as usize;
         if size == 0 {
             return None;
         }
-        let scanned = (self.width, self.height);
         let mut out = Vec::new();
-        let mut push = |r: RECT| out.extend(self.rotation.upright_rect(scanned, [r.left, r.top, r.right, r.bottom]));
+        let mut push = |r: RECT| out.push(r);
         let mut moves = vec![DXGI_OUTDUPL_MOVE_RECT::default(); size / std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>() + 1];
         let mut need = 0u32;
         let bytes = std::mem::size_of_val(moves.as_slice()) as u32;
@@ -915,6 +935,8 @@ fn encode_loop(
     // The latest picture hasn't been encoded yet (it came sooner than the frame rate allows).
     let mut unsent = false;
     let mut next_due = Instant::now();
+    // Frames since the encoder's last keyframe, and since when the screen has been still.
+    let (mut since_key, mut still_since) = (0u32, Instant::now());
     // The window being streamed, or 0 for the whole display.
     let mut target = 0;
     // No encoder could be made, or it failed: not again until then.
@@ -969,6 +991,15 @@ fn encode_loop(
         if slot < 0 {
             continue;
         }
+        if has_fresh {
+            still_since = Instant::now();
+        } else if !unsent
+            && encoder.as_ref().is_some_and(|e| e.is_hardware())
+            && crate::media::early_keyframe(since_key, still_since.elapsed(), crate::flow::idle(slot as u8))
+        {
+            // The keyframe the GPU encoder would make soon anyway, now while nothing moves.
+            monitor.keyframe.store(true, Ordering::Relaxed);
+        }
         // The helper is showing the secure desktop: a picture from here, its last from before
         // the lock, would land in the middle of its stream. Back from that, viewers' decoders
         // hold the helper's pictures, not this encoder's: start on a keyframe.
@@ -1021,7 +1052,7 @@ fn encode_loop(
         // A viewer's link is still busy (crate::flow): keep the picture and look again
         // shortly; the next frame carries every change since.
         if !wants_key && crate::flow::held(slot as u8) {
-            next_due = Instant::now() + crate::flow::POLL;
+            next_due = Instant::now() + crate::flow::HELD_POLL;
             continue;
         }
         // Taken, not just cleared: one asked for since the look above is answered by this frame.
@@ -1040,6 +1071,7 @@ fn encode_loop(
                 Ok(e) => {
                     let id = monitor.info.lock().unwrap().id;
                     info!("screen {id}: {}, {}x{} at up to {} fps", e.describe(), size.0, size.1, e.fps());
+                    crate::flow::set_frame_rate(slot as u8, e.fps());
                     encoder = Some(e);
                 }
                 Err(e) => {
@@ -1078,6 +1110,7 @@ fn encode_loop(
                     monitor.keyframe.store(true, Ordering::Relaxed);
                     continue;
                 }
+                since_key = if keyframe { 0 } else { since_key + 1 };
                 let _ = frames.send(Arc::new(EncodedFrame {
                     stream: slot as u8,
                     data,
@@ -1289,8 +1322,42 @@ impl VideoSource for Video {
     }
 }
 
+
+/// A rect clipped to a `(width, height)` texture, as a copy box; `None` when nothing's left.
+fn texture_box(r: RECT, (w, h): (usize, usize)) -> Option<D3D11_BOX> {
+    let clip = |v: i32, max: usize| v.clamp(0, max as i32) as u32;
+    let (left, top, right, bottom) = (clip(r.left, w), clip(r.top, h), clip(r.right, w), clip(r.bottom, h));
+    (left < right && top < bottom).then_some(D3D11_BOX { left, top, front: 0, right, bottom, back: 1 })
+}
+
+/// How much of a `(width, height)` screen the rects cover, at most (overlaps count twice):
+/// past about half, one copy of the whole is cheaper than many.
+fn covered(rects: &[RECT], (w, h): (usize, usize)) -> f64 {
+    let area: u64 = rects
+        .iter()
+        .filter_map(|&r| texture_box(r, (w, h)))
+        .map(|b| (b.right - b.left) as u64 * (b.bottom - b.top) as u64)
+        .sum();
+    area as f64 / (w * h).max(1) as f64
+}
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_what_changed_is_copied_back() {
+        let r = |left, top, right, bottom| RECT { left, top, right, bottom };
+        let size = (1920, 1080);
+        let b = super::texture_box(r(10, 20, 110, 70), size).unwrap();
+        assert_eq!((b.left, b.top, b.right, b.bottom, b.front, b.back), (10, 20, 110, 70, 0, 1));
+        // Clipped to the screen; nothing left is no copy.
+        let b = super::texture_box(r(-5, 1000, 2000, 1200), size).unwrap();
+        assert_eq!((b.left, b.top, b.right, b.bottom), (0, 1000, 1920, 1080));
+        assert!(super::texture_box(r(1920, 0, 2000, 10), size).is_none());
+        assert!(super::texture_box(r(50, 50, 50, 60), size).is_none());
+        // A line of text is a sliver of the screen; a scrolled window is most of it.
+        assert!(super::covered(&[r(0, 0, 800, 20)], size) < 0.01);
+        assert!(super::covered(&[r(0, 0, 1920, 900)], size) > 0.6);
+    }
+
     use super::*;
 
     fn picture(w: usize, h: usize, fill: u8) -> Vec<u8> {

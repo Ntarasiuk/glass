@@ -182,8 +182,6 @@ pub struct MfEncoder {
     div: usize,
     out: (usize, usize),
     fps: u32,
-    u: Vec<u8>,
-    v: Vec<u8>,
     sets: ParamSets,
     started: Instant,
     last_time: i64,
@@ -227,8 +225,6 @@ impl MfEncoder {
                 div,
                 out: (w, h),
                 fps,
-                u: Vec::new(),
-                v: Vec::new(),
                 sets: ParamSets::default(),
                 started: Instant::now(),
                 last_time: -1,
@@ -383,7 +379,7 @@ impl MfEncoder {
             let buffer = MFCreateMemoryBuffer(len as u32)?;
             let mut ptr = std::ptr::null_mut();
             buffer.Lock(&mut ptr, None, None)?;
-            to_nv12(frame, self.div, (w, h), std::slice::from_raw_parts_mut(ptr, len), &mut self.u, &mut self.v);
+            to_nv12(frame, self.div, (w, h), std::slice::from_raw_parts_mut(ptr, len));
             buffer.Unlock()?;
             buffer.SetCurrentLength(len as u32)?;
             let sample = MFCreateSample()?;

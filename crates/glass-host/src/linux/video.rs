@@ -401,14 +401,30 @@ fn encode_loop(
     scale: f64,
 ) {
     let mut encoder: Option<VideoEncoder> = None;
+    // The rate the encoder was made for (what the viewers' screens show, at most `fps`),
+    // and the rate it runs at (OpenH264 at most SOFTWARE_MAX_FPS).
+    let mut encoder_fps = (0, 0);
     let mut applied_bitrate = bitrate;
     let mut last: Option<(Frame, u64)> = None;
-    // The latest picture hasn't been encoded yet (held while a viewer's link is full).
+    // The latest picture hasn't been encoded yet (held while a viewer's link is full, or
+    // too soon after the last for the frame rate).
     let mut unsent = false;
     // No encoder could be made: not again until then.
     let mut retry_at = std::time::Instant::now();
+    // Not before then: the compositor may repaint faster than the frame rate (a 144 Hz
+    // monitor), and every frame encoded costs CPU and bits a viewer's screen can't show.
+    let mut next_due = std::time::Instant::now();
+    // Frames since the encoder's last keyframe, and since when the screen has been still.
+    let (mut since_key, mut still_since) = (0u32, std::time::Instant::now());
     loop {
-        let wait = if unsent { crate::flow::POLL } else { IDLE_POLL };
+        let wait = if unsent {
+            // Too soon: until it's due (a newer frame may come first). Due but held: shortly.
+            Some(next_due.saturating_duration_since(std::time::Instant::now()))
+                .filter(|d| !d.is_zero())
+                .unwrap_or(crate::flow::HELD_POLL)
+        } else {
+            IDLE_POLL
+        };
         let fresh = match rx.recv_timeout(wait) {
             Ok(f) => Some(f),
             Err(RecvTimeoutError::Timeout) => None,
@@ -440,6 +456,15 @@ fn encode_loop(
         if slot < 0 {
             continue;
         }
+        if has_fresh {
+            still_since = std::time::Instant::now();
+        } else if !unsent
+            && encoder.as_ref().is_some_and(VideoEncoder::is_hardware)
+            && crate::media::early_keyframe(since_key, still_since.elapsed(), crate::flow::idle(slot as u8))
+        {
+            // The keyframe the GPU encoder would make soon anyway, now while nothing moves.
+            monitor.keyframe.store(true, Ordering::Relaxed);
+        }
         unsent |= has_fresh;
         // Nothing new: only re-encode the last frame to answer a keyframe request.
         if (!unsent && !monitor.keyframe.load(Ordering::Relaxed)) || std::time::Instant::now() < retry_at {
@@ -453,16 +478,24 @@ fn encode_loop(
 
         let size = (frame.width, frame.height);
         let mut force = wants_key;
-        if encoder.as_ref().is_none_or(|e| !e.accepts(frame)) {
+        let wanted_fps = fps.min(VIEWER_FPS.load(Ordering::Relaxed)).max(1);
+        if encoder.as_ref().is_none_or(|e| !e.accepts(frame)) || encoder_fps.0 != wanted_fps {
+            encoder = None;
             match VideoEncoder::new(
                 frame.width,
                 frame.height,
                 frame.format,
-                fps,
+                wanted_fps,
                 monitor.bitrate.load(Ordering::Relaxed),
                 scale,
             ) {
-                Ok(e) => encoder = Some(e),
+                Ok(e) => {
+                    let runs_at = if e.is_hardware() { wanted_fps } else { wanted_fps.min(SOFTWARE_MAX_FPS) };
+                    info!("encoder at up to {runs_at} fps");
+                    encoder_fps = (wanted_fps, runs_at);
+                    crate::flow::set_frame_rate(slot as u8, runs_at);
+                    encoder = Some(e);
+                }
                 Err(e) => {
                     warn!("encoder: {e:#}");
                     retry_at = std::time::Instant::now() + Duration::from_secs(1);
@@ -505,10 +538,19 @@ fn encode_loop(
         if !wants_key && crate::flow::held(slot as u8) {
             continue;
         }
+        // Too soon after the last: it goes when due, unless a newer picture replaces it.
+        let now = std::time::Instant::now();
+        if !wants_key && !force && now < next_due {
+            continue;
+        }
+        // A little early is on time: a 120 Hz screen's frames shouldn't wait a whole frame
+        // for a 120 fps encoder because of jitter.
+        next_due = now + Duration::from_secs_f64(0.9 / encoder_fps.1.max(1) as f64);
         let capture_us = if unsent { *captured_us } else { now_us() };
         unsent = false;
         match encoder.as_mut().unwrap().encode(frame, force) {
             Ok(Some((data, keyframe))) => {
+                since_key = if keyframe { 0 } else { since_key + 1 };
                 let _ = frames.send(Arc::new(EncodedFrame {
                     stream: slot as u8,
                     data,
@@ -536,6 +578,11 @@ fn encode_loop(
 
 /// Set once the GPU encoder has failed: the host stays on OpenH264 after that.
 static HARDWARE_FAILED: AtomicBool = AtomicBool::new(false);
+/// OpenH264 at more than this takes more CPU than a desktop should spend on it; the GPU
+/// encoders go up to the configured rate (`--fps`, 120 by default).
+const SOFTWARE_MAX_FPS: u32 = 60;
+/// What the viewers' screens show (crate::refresh): frames beyond it only cost bits.
+static VIEWER_FPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(crate::refresh::DEFAULT);
 
 /// What `GLASS_ENCODER` asks for: `vaapi`, `nvenc`, or `gpu` (NVENC, else VA-API).
 /// Anything else (or nothing) is OpenH264.
@@ -620,7 +667,7 @@ impl VideoEncoder {
                 HARDWARE_FAILED.store(true, Ordering::Relaxed);
             }
         }
-        Ok(Self::Soft(Encoder::new(width, height, fps, bitrate, scale)?))
+        Ok(Self::Soft(Encoder::new(width, height, fps.min(SOFTWARE_MAX_FPS), bitrate, scale)?))
     }
 
     fn is_hardware(&self) -> bool {
@@ -1003,6 +1050,10 @@ impl VideoSource for Video {
                 m.bitrate.store(bps, Ordering::Relaxed);
             }
         }
+    }
+    /// The encode loops pick it up on their next frame (a new rate is a new encoder).
+    fn set_max_fps(&self, fps: u32) {
+        VIEWER_FPS.store(fps.max(1), Ordering::Relaxed);
     }
     fn heal(&self) {
         self.rejoin();

@@ -3,7 +3,8 @@
  * Classifies every request it sees (human, agentic browser, AI fetcher/crawler, script, bot), verifies claimed
  * bot identity (Web Bot Auth signatures, operator IP ranges), inlines a cookieless beacon into HTML pages, and
  * writes rows to the `agentlens_events` Analytics Engine dataset. Recording runs in waitUntil and never changes
- * a response except for the injected <script>. Off unless both the AGENTLENS binding and AL_SECRET exist.
+ * a response except for the injected <script> and, when AL_DASHBOARD is set and a test is running, the copy
+ * changes of an edge test (text or a plain attribute, set from the AgentLens dashboard). Off unless both the AGENTLENS binding and AL_SECRET exist.
  * Update by re-copying from the upstream repo; keep edits upstream.
  */
 import { observe } from './observe.ts';
@@ -12,9 +13,11 @@ import { trackServerEvent } from './server-event.ts';
 export interface AgentLensBindings {
   AGENTLENS?: AnalyticsEngineDataset;
   AL_SECRET?: string;
+  /** AgentLens dashboard origin: turns on edge tests (copy variants set from the dashboard, applied here). */
+  AL_DASHBOARD?: string;
 }
 
-const lens = (env: AgentLensBindings) => (env.AGENTLENS && env.AL_SECRET ? { EVENTS: env.AGENTLENS, AL_SECRET: env.AL_SECRET } : null);
+const lens = (env: AgentLensBindings) => (env.AGENTLENS && env.AL_SECRET ? { EVENTS: env.AGENTLENS, AL_SECRET: env.AL_SECRET, AL_DASHBOARD: env.AL_DASHBOARD } : null);
 
 export function withAgentLens(req: Request, env: AgentLensBindings, ctx: ExecutionContext, next: (req: Request) => Promise<Response>): Promise<Response> {
   const l = lens(env);

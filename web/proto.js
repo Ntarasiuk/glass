@@ -51,12 +51,21 @@ export function readAudioHeader(view) {
 
 export const STREAM_SHIFT = 4;
 
-/** A frame decoded and drawn: the host paces video by these (flow and bitrate). */
-export function frameAck(stream, frameId) {
+/** Unit of a frame ack's wait, in µs (a u16 of them spans 6.5 s). */
+export const FRAME_ACK_WAIT_US = 100;
+
+/**
+ * A frame decoded and drawn: the host paces video by these (flow and bitrate). `waitMs`:
+ * how long it spent here, from the decoder to the screen, so a slow decoder isn't taken for
+ * a queue on the network (0: not measured).
+ */
+export function frameAck(stream, frameId, waitMs = 0) {
   const buf = new ArrayBuffer(8);
   const view = new DataView(buf);
   view.setUint8(0, KIND_FRAME_ACK);
   view.setUint8(1, stream);
+  const wait = Math.round((waitMs * 1000) / FRAME_ACK_WAIT_US);
+  view.setUint16(2, Math.min(0xffff, Math.max(0, Number.isFinite(wait) ? wait : 0)), true);
   view.setUint32(4, frameId, true);
   return new Uint8Array(buf);
 }

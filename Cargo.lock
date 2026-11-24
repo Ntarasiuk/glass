@@ -2618,7 +2618,7 @@ dependencies = [
 
 [[package]]
 name = "glass-gst"
-version = "0.15.3"
+version = "0.16.0"
 dependencies = [
  "gstreamer",
  "gstreamer-app",
@@ -2627,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "glass-host"
-version = "0.15.3"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -2695,7 +2695,7 @@ dependencies = [
 
 [[package]]
 name = "glass-proto"
-version = "0.15.3"
+version = "0.16.0"
 
 [[package]]
 name = "glib"

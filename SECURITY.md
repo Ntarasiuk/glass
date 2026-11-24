@@ -19,7 +19,9 @@ its keyboard, mouse, clipboard and files. So:
 
 - **Who gets in:** the owner's own devices (Tailscale says the device is signed in as the
   computer's owner), anyone with the access token, and people with a one-time link,
-  single sign-on, LDAP or an access rule, each with the limits it was given. Agents get
+  single sign-on, LDAP or an access rule, each with the limits it was given. A device on
+  the same network, or on a VPN into it (a private address), may ask the person at the
+  computer, nothing more. Agents get
   only what the owner approved, and every step is logged.
 - **The network:** Glass listens on every address (`0.0.0.0`) unless `glass config bind`
   says otherwise. With a Tailscale HTTPS certificate everything is encrypted; without one,

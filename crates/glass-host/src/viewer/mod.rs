@@ -42,6 +42,7 @@ pub mod sys {
 }
 pub mod passkey;
 pub mod prefs;
+pub mod saved;
 mod rtc;
 #[cfg(any(target_os = "macos", windows))]
 pub mod selftest;
@@ -56,7 +57,7 @@ use glass_proto::{CursorPos, InputEvent, MAX_STREAMS};
 use serde_json::Value;
 use tokio::sync::{Notify, mpsc};
 
-pub use net::{Target, codecs};
+pub use net::{Target, codecs, reach, web_address};
 #[cfg(windows)]
 pub fn winmf_report() -> String {
     winmf::report()
@@ -404,8 +405,13 @@ impl Session {
 /// arrived: the native pipeline end to end (QUIC, reassembly, hardware decode, input).
 pub async fn probe(target: &str, token: Option<String>, secs: u64, send_input: bool, save: Option<std::path::PathBuf>, sharp: bool, click: Option<(f32, f32)>, typed: Option<String>, controls: Vec<String>) -> anyhow::Result<()> {
     let session = Session::start(&tokio::runtime::Handle::current(), {
-        let mut t = Target::from_url(target).unwrap_or(Target { name: target.into(), dns: target.into(), is_self: false, token: None, link: None, remote: None, at: None });
+        let mut t = Target::from_url(target).unwrap_or(Target { name: target.into(), dns: target.into(), is_self: false, token: None, link: None, remote: None, typed: None, at: None });
         t.token = token.or(t.token);
+        // `GLASS_VIEWER_SETTLE`: as the app's address field does (which computer is there).
+        if std::env::var_os("GLASS_VIEWER_SETTLE").is_some() {
+            t = tokio::task::spawn_blocking(move || t.settle()).await??;
+            println!("settled: {} ({}) at {:?}", t.dns, t.name, t.at);
+        }
         t
     });
     session.viewer.audio_on.store(false, Ordering::Relaxed);

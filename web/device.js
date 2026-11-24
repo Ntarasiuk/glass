@@ -21,8 +21,15 @@ export function createDevice({ ui, push, control, log, input, screens, streams, 
 
   let smooth = storage((s) => s.getItem(SMOOTH_KEY)) !== '0';
   let refreshHz = 0; // measured; 0 until known
+  // Set by the bench (bench/run.mjs --fps 120): headless browsers animate at 60 whatever the
+  // test asks for, so it says the rate instead of having it measured.
+  const forcedHz = Number(storage((s) => s.getItem('glass.refreshHz'))) || 0;
   /** Times animation frames for about a second: the screen's refresh rate. */
   function measureRefresh() {
+    if (forcedHz > 0) {
+      refreshHz = forcedHz; // sent once connected
+      return;
+    }
     if (document.visibilityState !== 'visible') return;
     const times = [];
     const tick = (t) => {

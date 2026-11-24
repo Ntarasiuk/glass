@@ -3,9 +3,8 @@
 //! connect to one), and the switches people reach for most.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -30,9 +29,18 @@ impl GlassApp {
         // The address shown, copied and put in the QR code: on your tailnet, or from anywhere
         // (only while remote access is on).
         let me = cx.entity();
-        let via = if self.via == Via::Anywhere && snap.anywhere_url.is_some() { Via::Anywhere } else { Via::Tailnet };
+        // Without Tailscale's certificate the service's own address is only this computer's
+        // (http://localhost): then it's the one on its network that's worth showing.
+        let on_tailnet = snap.url().is_some_and(|u| u.starts_with("https://"));
+        let via = match self.via {
+            Via::Anywhere if snap.anywhere_url.is_some() => Via::Anywhere,
+            Via::Network if snap.lan.is_some() => Via::Network,
+            _ if !on_tailnet && snap.lan.is_some() && tailnet != Tailnet::Checking => Via::Network,
+            _ => Via::Tailnet,
+        };
         let url = match via {
             Via::Anywhere => snap.anywhere_url.clone(),
+            Via::Network => snap.lan.clone(),
             Via::Tailnet => snap.url(),
         };
 
@@ -60,6 +68,7 @@ impl GlassApp {
                 "Ready for connections",
                 match via {
                     Via::Tailnet => "Open the address on any device signed in to your Tailscale.",
+                    Via::Network => "In the Glass app on another computer, enter this address under Machines. It works on this network, and over a VPN into it.",
                     Via::Anywhere => "Open the address in any browser, then sign in.",
                 }
                 .to_string(),
@@ -94,11 +103,9 @@ impl GlassApp {
                     .when_some(url.clone().filter(|_| snap.running()), |d, url| {
                         let copy = url.clone();
                         let open = url.clone();
-                        d.child(
+                        d.child(div().mt_1().child(address_switch(via, on_tailnet, snap.remote, me.clone(), cx))).child(
                             h_flex()
-                                .mt_1()
                                 .gap_2()
-                                .child(address_switch(via, snap.remote, me.clone()))
                                 .child(
                                     ui::mono(url)
                                         .px_2p5()
@@ -115,9 +122,12 @@ impl GlassApp {
                                         super::toast(window, cx, Ok("Address copied.".into()));
                                     },
                                 ))
-                                .child(Button::new("open-url").icon(I::ExternalLink).ghost().small().tooltip("Open in your browser").on_click(
-                                    move |_, _, _| actions::open(&open),
-                                )),
+                                // An address on this network is for the Glass app: a browser needs HTTPS.
+                                .when(via != Via::Network, |d| {
+                                    d.child(Button::new("open-url").icon(I::ExternalLink).ghost().small().tooltip("Open in your browser").on_click(
+                                        move |_, _, _| actions::open(&open),
+                                    ))
+                                }),
                         )
                     })
                     .when(loaded && !snap.running(), |d| {
@@ -131,14 +141,14 @@ impl GlassApp {
                         )
                     }),
             )
-            .when_some(url.filter(|_| snap.running() && screen), |d, url| {
+            .when_some(url.filter(|_| snap.running() && screen && via != Via::Network), |d, url| {
                 d.child(
                     v_flex()
                         .items_center()
                         .gap_2()
                         .child(ui::qr(&url, 132.))
                         .child(div().text_xs().text_color(theme.muted_foreground).child(match via {
-                            Via::Tailnet => "Scan with your iPad",
+                            Via::Tailnet | Via::Network => "Scan with your iPad",
                             Via::Anywhere => "Scan, then sign in",
                         })),
                 )
@@ -179,12 +189,15 @@ impl GlassApp {
                 ));
             }
         }
+        // Not something to fix on a computer that's reached another way already.
+        let reached = snap.remote || !snap.passes.is_empty();
         match &tailnet {
+            Tailnet::Missing if reached => {}
             Tailnet::Missing => fixes.push(ui::icon_row(
                 I::Network,
                 theme.muted_foreground,
                 "Tailscale isn't installed",
-                "It's free and links your devices privately. Without it, use one-time links.",
+                "Optional. It's free, links your devices privately and gives browsers HTTPS. A VPN into this network and links from anywhere work without it.",
                 Button::new("get-ts").small().label("Get Tailscale").on_click(|_, _, _| actions::open("https://tailscale.com/download/mac")),
                 cx,
             )),
@@ -372,7 +385,7 @@ impl GlassApp {
             theme.primary,
             "Connect to another computer",
             match (others, more_nearby) {
-                (0, 0) => "Your computers on Tailscale and on this network, or a link someone sent you.".to_string(),
+                (0, 0) => "Your computers on this network, over your VPN or on Tailscale, or a link someone sent you.".to_string(),
                 (n, 0) => format!("{n} on your tailnet, or a link someone sent you."),
                 (0, m) => format!("{m} more on this network, or a link someone sent you."),
                 (n, m) => format!("{n} on your tailnet, {m} more on this network, or a link someone sent you."),
@@ -444,44 +457,43 @@ pub fn hostname() -> &'static str {
     })
 }
 
-/// The button beside the address: its icon says which address this is, and its menu switches
-/// between your Tailscale network and from anywhere (turning remote access on if it's off).
-fn address_switch(via: Via, remote_on: bool, me: Entity<GlassApp>) -> impl IntoElement {
-    let icon = match via {
-        Via::Tailnet => ui::tailscale(),
-        Via::Anywhere => I::Globe.into(),
-    };
-    Button::new("address-via")
-        .icon(icon)
-        .ghost()
-        .small()
-        .dropdown_caret(true)
-        .tooltip("Choose the address")
-        .dropdown_menu(move |menu, _, _| {
-            let tailnet = me.clone();
-            let anywhere = me.clone();
-            menu.min_w(px(230. * super::text_size::scale()))
-                .item(PopupMenuItem::new("Your Tailscale network").icon(ui::tailscale()).checked(via == Via::Tailnet).on_click(
-                    move |_, _, cx| {
-                        tailnet.update(cx, |this, cx| {
-                            this.via = Via::Tailnet;
-                            cx.notify();
-                        })
-                    },
-                ))
-                .item(
-                    PopupMenuItem::new(if remote_on { "From anywhere" } else { "From anywhere (off: turn it on)" })
-                        .icon(I::Globe)
-                        .checked(via == Via::Anywhere)
-                        .on_click(move |_, window, cx| {
-                            if !remote_on {
-                                act(window, cx, move || actions::set_remote(true));
-                            }
-                            anywhere.update(cx, |this, cx| {
-                                this.via = Via::Anywhere;
-                                cx.notify();
-                            })
-                        }),
-                )
-        })
+/// Above the address: which way in it's for. One labelled segment each for your Tailscale
+/// network (when this computer is on one), this network or a VPN into it, and from anywhere
+/// (which says so, and turns remote access on, while that's off).
+fn address_switch(via: Via, on_tailnet: bool, remote_on: bool, me: Entity<GlassApp>, cx: &App) -> impl IntoElement {
+    let theme = cx.theme().clone();
+    let ways: [(Via, Icon, &str, bool); 3] = [
+        (Via::Tailnet, ui::tailscale(), "Tailscale", on_tailnet),
+        (Via::Network, I::Network.into(), "This network or VPN", true),
+        (Via::Anywhere, I::Globe.into(), if remote_on { "Anywhere" } else { "Anywhere (turn on)" }, true),
+    ];
+    h_flex()
+        .gap_2()
+        .child(div().text_xs().text_color(theme.muted_foreground).child("Connect from"))
+        .child(h_flex().gap_1().p_0p5().rounded(px(9.)).bg(theme.secondary_hover).children(ways.into_iter().filter(|w| w.3).enumerate().map(|(i, (way, icon, label, _))| {
+            let on = via == way;
+            let me = me.clone();
+            h_flex()
+                .id(("address-via", i))
+                .gap_1p5()
+                .px_3()
+                .py_1()
+                .rounded(px(7.))
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .when(on, |d| d.bg(theme.background).shadow_sm())
+                .when(!on, |d| d.text_color(theme.muted_foreground).hover(|d| d.text_color(theme.foreground)))
+                .child(icon.small())
+                .child(label)
+                .on_click(move |_, window, cx| {
+                    if way == Via::Anywhere && !remote_on {
+                        act(window, cx, move || actions::set_remote(true));
+                    }
+                    me.update(cx, |this, cx| {
+                        this.via = way;
+                        cx.notify();
+                    })
+                })
+        })))
 }

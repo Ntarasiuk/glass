@@ -41,6 +41,9 @@ pub struct Snapshot {
     pub mic: Option<String>,
     /// What an administrator manages (shown, but not editable).
     pub policy: crate::policy::Policy,
+    /// This computer's address on its local network (with the port, when it isn't the usual
+    /// one): what the Glass app on another computer there, or on a VPN into it, is given.
+    pub lan: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -249,6 +252,14 @@ pub fn gather() -> Snapshot {
         .filter(|g| g.live(now))
         .map(|g| GrantRow { summary: g.summary(), id: g.id, name: g.client_name, domain: g.domain, last_used: g.last_used })
         .collect();
+    if let Some(s) = &status {
+        // The web port, when the address says: without a port it's 443, beside the usual 8080.
+        let port = s.url.as_deref().and_then(|u| u.trim_end_matches('/').rsplit_once(':')).and_then(|(_, p)| p.parse::<u16>().ok()).filter(|p| *p != 8080);
+        snap.lan = crate::nearby::own_address().map(|ip| match port {
+            Some(port) => format!("{ip}:{port}"),
+            None => ip.to_string(),
+        });
+    }
     snap.status = status;
     snap
 }
@@ -320,6 +331,18 @@ pub async fn tailnet() -> (Tailnet, Vec<Machine>) {
         Vec::new()
     };
     (probe, machines)
+}
+
+/// The computers this app has opened before, and where each of the ones not `heard` on this
+/// network answers right now (over a VPN into its network, say). Blocking: each gets a
+/// moment to answer, all at once.
+pub fn saved(heard: &[String]) -> (Vec<crate::viewer::saved::Computer>, std::collections::HashMap<String, std::net::IpAddr>) {
+    let list = crate::viewer::saved::all();
+    let reach = std::thread::scope(|scope| {
+        let asked: Vec<_> = list.iter().filter(|c| !heard.contains(&c.id)).map(|c| (c.id.clone(), scope.spawn(|| crate::viewer::reach(c)))).collect();
+        asked.into_iter().filter_map(|(id, at)| Some((id, at.join().ok()??))).collect()
+    });
+    (list, reach)
 }
 
 /// "in 3 h", "in 6 days".

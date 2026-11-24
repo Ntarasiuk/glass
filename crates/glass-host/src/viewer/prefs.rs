@@ -49,7 +49,7 @@ pub fn update(dns: &str, f: impl FnOnce(&mut MachinePrefs)) {
     }
 }
 
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(super) fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);

@@ -1,6 +1,9 @@
 //! Frame rate: a viewer on a fast screen (120 Hz) asks for more frames; one on an ordinary
 //! screen, or one that says nothing, gets 60. Displays are shared by every viewer, so the
-//! slowest one sets the pace (frames a screen can't show only cost bandwidth).
+//! fastest one sets the pace: a 60 Hz viewer joining mustn't halve what a 120 Hz one sees.
+//! The frames it can't show cost it bits, not latency: its own acknowledgements still hold
+//! capture and set its bitrate (crate::flow, rate::AckRate), and the bitrate sets the frame
+//! rate (rate::policy), so a slow link still gets fewer frames.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -38,9 +41,9 @@ pub fn set(session: u64, fps: Option<u32>) {
     }
 }
 
-/// The slowest viewer's rate (each clamped to [MIN, MAX]); [`DEFAULT`] with nobody.
+/// The fastest viewer's rate (each clamped to [MIN, MAX]); [`DEFAULT`] with nobody.
 pub fn combine(wants: impl Iterator<Item = u32>) -> u32 {
-    wants.map(|f| f.clamp(MIN, MAX)).min().unwrap_or(DEFAULT)
+    wants.map(|f| f.clamp(MIN, MAX)).max().unwrap_or(DEFAULT)
 }
 
 /// Common panel refresh rates.
@@ -64,10 +67,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_slowest_viewer_sets_the_pace() {
+    fn the_fastest_viewer_sets_the_pace() {
         assert_eq!(combine([].into_iter()), 60);
         assert_eq!(combine([120].into_iter()), 120);
-        assert_eq!(combine([120, 60].into_iter()), 60);
+        assert_eq!(combine([120, 60].into_iter()), 120);
+        assert_eq!(combine([60, 60].into_iter()), 60);
         assert_eq!(combine([240].into_iter()), 120, "never more than MAX");
         assert_eq!(combine([5].into_iter()), 30, "never less than MIN");
     }

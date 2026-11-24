@@ -57,7 +57,7 @@ And the viewer is just a web page. No app to install, no account to create.
 - **Apple Pencil.** Pressure and tilt reach the Mac as tablet input, so drawing apps respond as they do to a drawing tablet.
 - **Keyboards per machine.** ⌘↔Ctrl, PC-keyboard and ⌘/⌥ swaps remembered for each computer, and a shortcut bar for touch screens.
 - **Games.** Capture the mouse (relative motion) for games and 3D apps; game controllers reach Linux hosts, and Windows hosts with the free ViGEmBus driver.
-- **Every machine.** All your computers in one menu, found on Tailscale and on the same network; wake sleeping ones (Wake-on-LAN), restart Glass or the whole computer and reconnect.
+- **Every machine.** All your computers in one menu, found on Tailscale and on the same network, and remembered for when you're on a VPN into it; wake sleeping ones (Wake-on-LAN), restart Glass or the whole computer and reconnect.
 
 ### Between your devices
 - **Your microphone on the computer.** Talk into its apps from your iPad or phone. On a Mac it comes in as Glass Microphone, our own small audio driver (`glass mic install`, one password); on Linux through PipeWire or PulseAudio, nothing to install.
@@ -206,7 +206,7 @@ NSPasteboard, files ◀─▶ control + file streams ◀────────
 ## Security and privacy
 
 - Everything is encrypted: TLS 1.3 over QUIC on your tailnet, end-to-end encrypted WebRTC from anywhere.
-- A device gets in only if Tailscale says it's yours, or it has the access token or a one-time pass. Nothing is sent until then.
+- A device gets in only if Tailscale says it's yours, or it has the access token or a one-time pass. Nothing is sent until then. On your own network or a VPN into it, a device with neither can only ask the person at the computer.
 - Narrow it further: limited or passkey-bound links, ask-first, single sign-on or LDAP with access rules, SCIM deprovisioning and device posture checks. Secrets are stored owner-only.
 - Remote access from outside your tailnet is off until you make a link or run `glass remote on`.
 - Glass runs as your user, never as root. The app sends nothing to glassdesk.dev except feedback you choose to send, and, if you sign the app in to your account, this computer's name (shown there as a signed-in app), and, if you run `glass account add`, this computer's name and public key for your account's list (and, only if you also run `glass fleet on`, its model, system, memory, disk space, FileVault and firewall state, uptime, battery and Glass version).

@@ -4,10 +4,13 @@
  * No cookies, no storage. Sends: pv on load/route change, engage on hide (time, interaction, scroll depth,
  * Core Web Vitals), custom events, and automatic $error, $rage_click, $outbound, $file_download and $clicks
  * (batched click positions for heatmaps, with dead clicks: no visible effect within 600 ms) events.
+ * The page token lasts a day; a page older than 12 h (service-worker cached shell, long-lived tab) gets a new one
+ * from /_al/t before it sends.
  * With #al_heatmap in the URL (the dashboard's heatmap iframe) it tracks nothing and answers element positions.
  *
  *   agentlens.track("signup", { plan: "pro" }, 49)
  *   agentlens.experiment("pricing_v2", "b")   → $exposure, once per page
+ *   <script data-x="test:variant">            → the same, for a variant the edge already applied (edge tests)
  *   <button data-al-event="cta_click">  → auto-tracked
  */
 export const BEACON_JS = `(()=>{var s=document.currentScript,t=s&&s.dataset.t;if(!t||window.agentlens)return;
@@ -21,7 +24,11 @@ if(/HeadlessChrome/.test(n.userAgent))G.push("headless_ua");
 if(w.outerWidth===0&&w.outerHeight===0)G.push("zero_outer");
 if(n.languages&&n.languages.length===0)G.push("no_languages");
 var q=new URLSearchParams(location.search),utm=q.get("utm_source")||"",med=q.get("utm_medium")||"",cmp=q.get("utm_campaign")||"",ref=document.referrer,P=location.pathname;
-function send(k,d){var b=JSON.stringify(Object.assign({t:t,k:k,p:P,r:ref,u:utm,m:med,c:cmp,w:w.innerWidth,tp:n.maxTouchPoints||0,s:G},d));try{n.sendBeacon(E,b)||fetch(E,{method:"POST",body:b,keepalive:true})}catch(e){}}
+var W=0,B=[],TA=0;
+function post(o){o.t=t;var b=JSON.stringify(o);try{n.sendBeacon(E,b)||fetch(E,{method:"POST",body:b,keepalive:true})}catch(e){}}
+function send(k,d){var o=Object.assign({k:k,p:P,r:ref,u:utm,m:med,c:cmp,w:w.innerWidth,tp:n.maxTouchPoints||0,s:G},d),now=Date.now();
+if(!W&&now/1000-parseInt(t,36)>43200&&now-TA>60000){W=1;TA=now;fetch("/_al/t",{cache:"no-store"}).then(function(r){return r.ok?r.text():""}).then(function(x){if(/^\\w+\\.\\d+\\.[\\w-]+$/.test(x))t=x},function(){}).then(function(){W=0;B.splice(0).forEach(post)})}
+W?B.push(o):post(o)}
 var S;function reset(){S={t0:performance.now(),mv:0,sc:0,ky:0,ck:0,cnm:0,tc:0,ut:0,d:0,fx:-1,fy:-1,lx:-1,ly:-1,sent:0,sd:0}}reset();
 var o={passive:true,capture:true},V={lcp:0,inp:0,cls:0,ttfb:0},EC=0,RC=[];
 try{var nv=performance.getEntriesByType("navigation")[0];if(nv)V.ttfb=Math.round(nv.responseStart)}catch(e){}
@@ -36,7 +43,7 @@ addEventListener("unhandledrejection",function(e){var r=e.reason;if(EC++<5)track
 function csel(el){var p=[];for(var i=0;el&&el.nodeType===1&&el!==document.body&&i<7;i++,el=el.parentElement){var x=el.tagName.toLowerCase();if(el.id&&/^[A-Za-z][\\w-]{0,40}$/.test(el.id)){p.unshift("#"+el.id);break}var pe=el.parentElement,k=0,j=0;if(pe)for(var c=pe.firstElementChild;c;c=c.nextElementSibling)if(c.tagName===el.tagName){k++;if(c===el)j=k}p.unshift(k>1?x+":nth-of-type("+j+")":x)}return p.join(">")}
 var CB=[],CN=0,MC=0;try{new MutationObserver(function(){MC++}).observe(document.documentElement,{childList:true,subtree:true,attributes:true,characterData:true})}catch(e){}
 function flush(){if(CB.length){track("$clicks",{w:w.innerWidth,h:dh(),c:CB});CB=[]}}
-function sel(el){var p=[];for(var i=0;el&&el.nodeType===1&&i<3;i++,el=el.parentElement){var x=el.tagName.toLowerCase();if(el.id){p.unshift(x+"#"+el.id);break}var c=(el.getAttribute("class")||"").trim().split(/\s+/)[0];p.unshift(c&&!/[:\[]/.test(c)?x+"."+c:x)}return p.join(" > ").slice(0,120)}
+function sel(el){var p=[];for(var i=0;el&&el.nodeType===1&&i<3;i++,el=el.parentElement){var x=el.tagName.toLowerCase();if(el.id){p.unshift(x+"#"+el.id);break}var c=(el.getAttribute("class")||"").trim().split(/\\s+/)[0];p.unshift(c&&!/[:[]/.test(c)?x+"."+c:x)}return p.join(" > ").slice(0,120)}
 addEventListener("mousemove",function(e){if(!e.isTrusted){S.ut++;return}if(S.lx<0){S.fx=e.clientX;S.fy=e.clientY}else S.d+=Math.hypot(e.clientX-S.lx,e.clientY-S.ly);S.lx=e.clientX;S.ly=e.clientY;S.mv++},o);
 addEventListener("scroll",function(){S.sc++;depth()},o);
 addEventListener("touchstart",function(){S.tc++},o);
@@ -44,7 +51,7 @@ addEventListener("keydown",function(e){e.isTrusted?S.ky++:S.ut++},o);
 addEventListener("click",function(e){if(!e.isTrusted){S.ut++;return}S.ck++;if(!S.mv&&!S.tc)S.cnm++;
 var tg=e.target&&e.target.closest?e.target:null,el=tg&&tg.closest("[data-al-event]");if(el)track(el.getAttribute("data-al-event"));
 var a=tg&&tg.closest("a[href]");if(a){try{var u=new URL(a.href,location.href),f=u.pathname.split("/").pop()||"";
-if(/\.(zip|dmg|pkg|exe|msi|deb|rpm|apk|gz|tgz|bz2|xz|7z|rar|pdf|csv|xlsx?|docx?|pptx?|mp3|mp4|mov|iso|img)$/i.test(f))track("$file_download",{file:f.slice(0,120),host:u.host});
+if(/\\.(zip|dmg|pkg|exe|msi|deb|rpm|apk|gz|tgz|bz2|xz|7z|rar|pdf|csv|xlsx?|docx?|pptx?|mp3|mp4|mov|iso|img)$/i.test(f))track("$file_download",{file:f.slice(0,120),host:u.host});
 else if(/^https?:$/.test(u.protocol)&&u.host!==location.host)track("$outbound",{to:u.host,url:(u.host+u.pathname).slice(0,160)})}catch(x){}}
 var now=Date.now();RC=RC.filter(function(c){return now-c.t<1000&&Math.abs(c.x-e.clientX)<30&&Math.abs(c.y-e.clientY)<30});RC.push({t:now,x:e.clientX,y:e.clientY});
 if(RC.length===3&&tg)track("$rage_click",{target:sel(tg),text:(tg.innerText||"").trim().slice(0,40)});
@@ -62,4 +69,4 @@ addEventListener("popstate",nav);
 addEventListener("visibilitychange",function(){if(document.visibilityState==="hidden")engage()});
 addEventListener("pagehide",engage);
 var Q=w.agentlens_q||[];w.agentlens={track:track,experiment:experiment};Q.forEach(function(a){a[0]==="experiment"?experiment(a[1],a[2]):track.apply(null,a)});
-send("pv")})();`;
+send("pv");(s.dataset.x||"").split(",").forEach(function(p){var a=p.split(":");if(a[1])experiment(a[0],a[1])})})();`;

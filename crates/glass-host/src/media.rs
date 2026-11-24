@@ -280,3 +280,38 @@ mod tests {
         assert_eq!(*ran.lock().unwrap(), [1, 2, 3]);
     }
 }
+
+/// Frames after which a still moment takes the periodic keyframe early: half the 900 the
+/// hardware encoders allow between keyframes (they're held to that because some decoders,
+/// Safari's, fail when H.264's frame counter wraps). At 120 fps the limit comes every 7.5 s,
+/// and a keyframe in the middle of motion is a stall of its size on a slow link; on a still
+/// screen nobody sees it.
+// The Linux and Windows encode loops use it (the Mac's capture has its own).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub const EARLY_KEY_FRAMES: u32 = 450;
+/// Still this long, the screen counts as still for that.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub const STILL_FOR: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Whether to send a keyframe now: one is due soon (`since_key` frames since the last), the
+/// screen has been still for `still_for`, and nothing is on its way to a viewer
+/// (crate::flow::idle), so it queues ahead of nothing.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn early_keyframe(since_key: u32, still_for: std::time::Duration, link_idle: bool) -> bool {
+    since_key >= EARLY_KEY_FRAMES && still_for >= STILL_FOR && link_idle
+}
+
+#[cfg(test)]
+mod early_key_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_due_keyframe_waits_for_a_still_screen_and_an_idle_link() {
+        let still = Duration::from_millis(200);
+        assert!(early_keyframe(450, still, true));
+        assert!(!early_keyframe(449, still, true), "not due yet");
+        assert!(!early_keyframe(800, Duration::from_millis(50), true), "still moving");
+        assert!(!early_keyframe(800, still, false), "a frame is still on its way");
+    }
+}

@@ -192,6 +192,11 @@ struct Pass {
     /// helper's passes ([`revoke_link`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     link: Option<String>,
+    /// A pass someone here said yes to (the prompt, the owner's passkey) lasts this many
+    /// seconds from each visit, not from the first: a device in use isn't locked out while
+    /// nobody's here to say yes again. Unused that long, or revoked, it ends ([`renew`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    renews: Option<u64>,
 }
 
 /// A WebAuthn credential (ES256) bound to a guest pass.
@@ -296,6 +301,45 @@ pub fn grant_pass(path: &Path, grant: Duration, scope: Scope, device: &str) -> R
     grant_pass_for(path, grant, scope, device, Some(device))
 }
 
+/// A pass for a device the person here let in (or the owner's passkey did): `grant` from
+/// each visit ([`renew`]), until it goes unused that long or is revoked.
+pub fn grant_standing_pass(path: &Path, grant: Duration, scope: Scope, device: &str) -> Result<Granted> {
+    let granted = grant_pass(path, grant, scope, device)?;
+    let hash = fingerprint(&granted.pass);
+    update(path, |store| {
+        if let Some(p) = store.passes.iter_mut().find(|p| p.hash == hash) {
+            p.renews = Some(grant.clamp(MIN_GRANT, MAX_GRANT).as_secs());
+        }
+    })?;
+    Ok(granted)
+}
+
+/// A standing pass's time isn't written again more often than this.
+const RENEW_SPACING: u64 = 24 * 3600;
+
+/// A visit with a standing pass ([`grant_standing_pass`]) starts its time over. The new
+/// expiry, when it moved (at most once a day); none for any other pass, which ends when it
+/// was always going to.
+pub fn renew(path: &Path, pass: &str) -> Option<u64> {
+    let hash = fingerprint(pass);
+    let due = |p: &Pass, now: u64| p.usable(now) && crate::control::token_matches(&p.hash, &hash) && p.renews.is_some_and(|secs| p.expires + RENEW_SPACING <= now + secs);
+    // Most visits change nothing: no write.
+    let now = now();
+    if !load(path).passes.iter().any(|p| due(p, now)) {
+        return None;
+    }
+    let mut renewed = None;
+    update(path, |store| {
+        let now = self::now();
+        if let Some(p) = store.passes.iter_mut().find(|p| due(p, now)) {
+            p.expires = now + p.renews.unwrap_or_default();
+            renewed = Some(p.expires);
+        }
+    })
+    .ok()?;
+    renewed
+}
+
 pub fn grant_pass_for(
     path: &Path,
     grant: Duration,
@@ -316,6 +360,7 @@ pub fn grant_pass_for(
             passkey: None,
             account: account.map(|a| a.to_ascii_lowercase()),
             link: None,
+            renews: None,
         });
     })?;
     Ok(Granted {
@@ -394,6 +439,7 @@ pub fn redeem_link(path: &Path, code: &str, device: &str, ip: std::net::IpAddr) 
             passkey: None,
             account: None,
             link: Some(from),
+            renews: None,
         });
         granted = Some(Granted {
             pass: pass.clone(),
@@ -699,6 +745,30 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("access.json")
+    }
+
+    #[test]
+    fn a_standing_pass_starts_over_on_a_visit_and_no_other_does() {
+        let path = temp();
+        let day = 24 * 3600;
+        let standing = grant_standing_pass(&path, MAX_GRANT, Scope::default(), "Glass app on Studio").unwrap();
+        let plain = grant_pass(&path, MAX_GRANT, Scope::default(), "ada@example.com").unwrap();
+        assert_eq!(renew(&path, &standing.pass), None, "just made: nothing to move");
+        // Ten days on.
+        let age = |by: u64| {
+            update(&path, |s| s.passes.iter_mut().for_each(|p| p.expires -= by)).unwrap();
+        };
+        age(10 * day);
+        let renewed = renew(&path, &standing.pass).expect("a visit starts its time over");
+        assert!(renewed >= now() + MAX_GRANT.as_secs() - 5);
+        assert_eq!(pass_expiry(&path, &standing.pass), Some(renewed));
+        assert_eq!(renew(&path, &standing.pass), None, "once a day at most");
+        assert_eq!(renew(&path, &plain.pass), None, "a directory's pass ends when it was going to");
+        assert_eq!(renew(&path, "not-a-pass"), None);
+        // Unused past its time: gone, and a visit doesn't bring it back.
+        age(31 * day);
+        assert_eq!(renew(&path, &standing.pass), None);
+        assert!(pass_expiry(&path, &standing.pass).is_none());
     }
 
     #[test]

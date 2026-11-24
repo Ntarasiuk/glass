@@ -8,7 +8,7 @@ export interface ParsedSignature {
   components: string[]; // raw component identifiers, e.g. `"@authority";req`
   paramsRaw: string; // everything after `label=` (the @signature-params value)
   params: Record<string, string | number>;
-  signature: Uint8Array;
+  signature: Uint8Array<ArrayBuffer>;
 }
 
 export type WbaResult =
@@ -38,7 +38,7 @@ function splitTop(s: string): string[] {
 }
 
 export function parseSignatureHeaders(sigInput: string, sig: string): ParsedSignature[] {
-  const sigs = new Map<string, Uint8Array>();
+  const sigs = new Map<string, Uint8Array<ArrayBuffer>>();
   for (const m of splitTop(sig)) {
     const mm = /^([a-z0-9_*.-]+)=:([A-Za-z0-9+/=]+):$/i.exec(m);
     if (mm) sigs.set(mm[1]!, b64(mm[2]!));
@@ -170,7 +170,7 @@ export async function verifyWebBotAuth(req: Request, fetchKeys: KeyFetcher, nowS
   return { ok: false, reason: "unknown_key", agentUrl };
 }
 
-function b64(s: string): Uint8Array {
+function b64(s: string): Uint8Array<ArrayBuffer> {
   const bin = atob(s);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);

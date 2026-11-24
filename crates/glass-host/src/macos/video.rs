@@ -399,6 +399,7 @@ impl Video {
         let fps_cap = Arc::new(std::sync::atomic::AtomicU32::new(
             encoder.apply_policy(self.bitrate.load(Ordering::Relaxed), fps),
         ));
+        crate::flow::set_frame_rate(index, fps_cap.load(Ordering::Relaxed));
         let capture = capture::start(
             target.source(),
             index,
@@ -744,9 +745,13 @@ impl VideoSource for Video {
             })
             .collect();
         let shares = crate::rate::split(self.bitrate.load(Ordering::Relaxed), &activity);
-        for (s, bps) in streams.iter().zip(shares) {
+        for (i, (s, bps)) in streams.iter().zip(shares).enumerate() {
             let fps = s.encoder.apply_policy(bps, self.fps_for(s.refresh));
             s.fps.store(fps, Ordering::Relaxed);
+            crate::flow::set_frame_rate(i as u8, fps);
+        }
+        for gone in streams.len()..glass_proto::MAX_STREAMS {
+            crate::flow::set_frame_rate(gone as u8, 0);
         }
     }
 }

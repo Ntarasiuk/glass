@@ -164,7 +164,18 @@ pub struct HostKey {
 impl HostKey {
     /// Loads this host's key, creating it on first use (mode 0600).
     pub fn load_or_create() -> Result<Self> {
-        let path = dir().join("host-key.pk8");
+        Self::load_or_create_at("host-key.pk8")
+    }
+
+    /// The key this computer proves itself with to a viewer that reaches it directly, on a
+    /// local network or over a VPN. Its own key: the host key's public half is what a link
+    /// from anywhere carries, and isn't for a whole network to read.
+    pub fn direct() -> Result<Self> {
+        Self::load_or_create_at("direct-key.pk8")
+    }
+
+    fn load_or_create_at(file: &str) -> Result<Self> {
+        let path = dir().join(file);
         let rng = SystemRandom::new();
         let pkcs8 = match std::fs::read(&path) {
             Ok(b) => b,
@@ -204,6 +215,19 @@ impl HostKey {
 pub fn id_for(public_key: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, public_key);
     b64url(&digest.as_ref()[..16])
+}
+
+/// What a host signs to vouch for its self-signed certificate (by its SHA-256): a viewer
+/// that saved this computer's direct key then knows the address still leads to it.
+pub fn direct_payload(cert_hash: &[u8]) -> Vec<u8> {
+    let hex: String = cert_hash.iter().map(|b| format!("{b:02x}")).collect();
+    format!("glass-direct-v1\n{hex}").into_bytes()
+}
+
+/// Whether `sig` is `key`'s signature over `msg` (both base64url, as [`HostKey`] gives them).
+pub fn verify(key: &str, msg: &[u8], sig: &str) -> bool {
+    let (Some(key), Some(sig)) = (b64url_decode(key), b64url_decode(sig)) else { return false };
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_FIXED, &key).verify(msg, &sig).is_ok()
 }
 
 /// What the host signs for an answer: both SDPs, so neither side can be swapped.
@@ -939,7 +963,7 @@ async fn bridge(
     // them too, so its own flow control knows what's on screen. Once they come, the host
     // sets this viewer's bitrate from them (end to end, through this bridge), and the link
     // meter steps aside.
-    let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<(u8, u32)>();
+    let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<(u8, u32, u64)>();
     let mut acking = false;
     let mut bridge_drops = 0u64;
     // Video over the data channel: measure the link and cap the bitrate to it (RTP video
@@ -978,7 +1002,7 @@ async fn bridge(
                             while let Some(event) = channel.poll().await {
                                 match event {
                                     DataChannelEvent::OnMessage(m) => {
-                                        if let Some(ack) = glass_proto::read_frame_ack(&m.data[..]) {
+                                        if let Some(ack) = glass_proto::read_frame_ack_waited(&m.data[..]) {
                                             let _ = ack_tx.send(ack);
                                         }
                                         let _ = conn.send_datagram(&m.data[..]);
@@ -1071,14 +1095,14 @@ async fn bridge(
                     pipe_stream_to_channel(recv, channel).await;
                 });
             }
-            Some((stream, id)) = ack_rx.recv() => {
+            Some((stream, id, waited_us)) = ack_rx.recv() => {
                 if !acking {
                     acking = true;
                     crate::server::set_remote_cap(bridge_id, None);
                     debug!("remote peer ({peer}): frames acknowledged; the host paces video by them");
                 }
                 let now = std::time::Instant::now();
-                link.acked(stream, id, now);
+                link.acked_waited(stream, id, std::time::Duration::from_micros(waited_us), now);
                 flow.update(&mut link, now);
             }
             _ = flow_poll.tick(), if link.busy() => {

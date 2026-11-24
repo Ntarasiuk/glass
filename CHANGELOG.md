@@ -4,8 +4,40 @@ What changed in each release of Glass. `glass update` (or the Glass app) install
 
 ## Unreleased
 
-- **Links from anywhere open in the browser again.** A browser's connection offer had outgrown what glassdesk.dev would pass on, so it was dropped and the page said the computer didn't answer. glassdesk.dev now takes much larger offers (and says so if one is still too big), and the browser sends about 40% less, listing its network routes once instead of once per screen.
 - **Netflix and Prime Video play on a Mac running Glass.** The Mac's screen was captured all the time, viewed or not, and DRM video goes black while anything captures the screen. Now it's captured only while someone is viewing or recording, and for 10 seconds after (so a reload reconnects at once); a new viewer's first picture takes about half a second longer.
+
+## 0.16.0
+
+November 19, 2026
+
+### Over a VPN into your network
+
+- **A VPN into your network now works like being on it: no Tailscale needed.** With any VPN that routes to the network, the Glass app opens your computers at the addresses they have there.
+- **The Glass app remembers the computers you open.** Machines → Opened before lists each one and whether it answers from where you are now. Over a VPN nothing announces itself, so this is where your home computers are when you're away: one click, with the pass they already gave this device. Forget removes one.
+- **Open any computer by its address.** The field under Machines takes `192.168.1.20` (or a name, with a port if it isn't 8080) as well as a link. The address is on that computer's Home, under This network or VPN.
+- **An address is only where to look.** A remembered computer has to prove it's the same one before the app shows it a pass or a token: its own key signs the certificate the connection is pinned to, or its certificate is for its name. On someone else's network, whatever has that address gets nothing.
+- **A new address doesn't lose a computer.** When the router gives a remembered computer another address, the app looks it up by the name it has on that network's DNS (the one it was typed by, or the one it says it has) and connects there once it proves it's the same computer. A name like `studio.attlocal.net` works in the address field too.
+- **A device you let in stays in while it's used.** The pass from "Let in" (or from your passkey) now runs 30 days from each visit instead of from the first, so a computer you open regularly doesn't ask again while you're away and nobody is there to say yes. Unused for 30 days, or revoked under Links, it ends as before. Passes from links, single sign-on and LDAP still end when they were set to.
+- A device on a VPN may ask to be let in, like one on the same subnet: the person at the computer (or a phone with notifications on) sees that it's from another private network and allows it. Public addresses still can't ask. `glass config nearby off` stops it.
+- Home shows this computer's own network address when it has no Tailscale name, instead of `http://localhost`, and setup no longer reads as if Tailscale were required.
+- Browsers still need HTTPS, which an address on a private network doesn't have: for an iPad over a VPN, use a link from anywhere (it connects directly through the VPN) or Tailscale.
+
+### Smoother on fast screens
+
+- **120 fps on a light screen too.** Typing or moving a window never raised the bitrate past where it started (4 Mbps), and 120 fps needs 10, so a 120 Hz viewer got 60 however good the link. While frames come back with no queue the bitrate now rises gently to 12 Mbps, and no further on that alone.
+- **The fastest screen watching sets the frame rate.** A 60 Hz viewer joining no longer drops a 120 Hz one to 60; its own link still sets its own bitrate.
+- **The Glass app asks for 120 fps on a fast screen** (a ProMotion MacBook, a 120 or 144 Hz monitor), as the browser does. It used to always get 60.
+- **Linux at 120 fps with the GPU** (`GLASS_ENCODER=gpu`, VA-API or NVENC). OpenH264 stays at 60, and the encoder no longer works on frames a monitor faster than the frame rate repaints.
+- Sharp text on a fast link runs at 60 fps instead of 30.
+- How many frames may be on their way follows the frame rate: at 120 fps it counted half the time it should, and held capture back on any link with a real round trip. A held capture also looks again every 2 ms instead of 8, and on a Mac a frame a little too early goes when it's due instead of up to 83 ms later.
+- Frame acknowledgements say how long the viewer took to decode and draw, so a slow decoder isn't taken for a slow network and the bitrate isn't cut for it.
+- **No stall every 7.5 seconds at 120 fps.** The keyframe H.264 needs before its frame counter wraps came every 900 frames: every 15 s at 60 fps, every 7.5 s at 120, each one a pause of its size on a slower link (about 140 ms on 10 Mbps). It now goes the next time the screen is still (and nothing is on its way to a viewer), where nobody sees it: on a Mac, and with the GPU encoders on Linux and Windows. OpenH264, whose counter runs much longer, makes one every 15 s at any frame rate.
+- **Windows reads back only what changed.** Each frame copied the whole screen from the GPU (8 MB at 1080p); it now copies just the regions Windows says changed, and converts to NV12 in one pass.
+- `bench/run.mjs --fps 120` measures 120 fps (headless Chrome animates at 60, so the viewer never asked for more).
+
+### Fixes
+
+- **Links from anywhere open in the browser again.** A browser's connection offer had outgrown what glassdesk.dev would pass on, so it was dropped and the page said the computer didn't answer. glassdesk.dev now takes much larger offers (and says so if one is still too big), and the browser sends about 40% less, listing its network routes once instead of once per screen.
 
 ## 0.15.3
 

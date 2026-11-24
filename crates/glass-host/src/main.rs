@@ -136,7 +136,8 @@ struct Args {
     /// overrides `glass config bind`.
     #[arg(long, value_name = "ADDR", value_delimiter = ',')]
     bind: Vec<String>,
-    /// Capture frame rate cap. Viewers get 60, or up to 120 on a fast screen (macOS).
+    /// Capture frame rate cap. Viewers get 60, or up to 120 on a fast screen (macOS, or a
+    /// hardware encoder on Linux and Windows; OpenH264 stays at 60).
     #[arg(long, default_value_t = 120)]
     fps: i32,
     /// Target bitrate in Mbps.
@@ -1565,9 +1566,9 @@ async fn run_host(args: Args) -> Result<()> {
         }
         let video = Arc::new(video::Video::new(
             video::VideoConfig {
-                // Linux encodes in software: 60 at most. Windows caps OpenH264 at 60 itself
-                // and lets its hardware encoder go faster.
-                fps: if cfg!(target_os = "linux") { args.fps.min(60) } else { args.fps },
+                // OpenH264 is capped at 60 by each platform's encode loop; hardware encoders
+                // (VideoToolbox, Media Foundation, VA-API/NVENC) go up to this.
+                fps: args.fps,
                 bitrate: args.mbps * 1_000_000,
                 scale: args.scale,
             },

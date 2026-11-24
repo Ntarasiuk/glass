@@ -157,7 +157,7 @@ impl FrameState {
             }
             // Held: look again shortly, and send the newest picture once the link has room.
             if state.held() {
-                state.schedule_check(crate::flow::POLL);
+                state.schedule_check(crate::flow::HELD_POLL);
                 return;
             }
             if state.unsent.swap(false, Relaxed) {
@@ -181,6 +181,15 @@ impl FrameState {
                     if size < TINY_FRAME {
                         state.tiny.fetch_add(1, Relaxed);
                     }
+                }
+                // Just gone still, with a keyframe due soon: it goes now, while nothing moves,
+                // instead of in the middle of the next motion; the refinements after it
+                // sharpen it as they would any frame.
+                if done == 0 && state.encoder.early_keyframe() {
+                    state.refreshes.fetch_add(1, Relaxed);
+                    state.encode_last(true);
+                    state.schedule_idle_check();
+                    return;
                 }
                 let fps = state.fps_cap.load(Relaxed);
                 let (count, bytes) = crate::rate::refresh_budget(state.encoder.bitrate(), fps);
@@ -285,7 +294,12 @@ define_class!(
             }
             *state.last.lock().unwrap() = LastFrame(Some(image), capture_us);
             if held {
-                state.schedule_check(crate::flow::POLL);
+                state.schedule_check(crate::flow::HELD_POLL);
+            } else if too_soon && state.unsent.load(Relaxed) {
+                // Early by a little: it goes when its interval is up, unless a newer one comes
+                // first (not after the idle wait, which at 120 fps is ten frames).
+                let interval = 1_000_000 / fps.max(1) as u64;
+                state.schedule_check(std::time::Duration::from_micros(interval.saturating_sub(since).max(500)));
             } else {
                 state.schedule_idle_check();
             }

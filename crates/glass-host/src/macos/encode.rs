@@ -39,6 +39,11 @@ use objc2_video_toolbox::{
 
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
 const MAX_GOP_FRAMES: i32 = 900;
+/// Past this many frames since the last keyframe, the next still moment (see
+/// [`Encoder::early_keyframe`]) takes the keyframe the limit would force soon anyway. At
+/// 120 fps the limit comes every 7.5 s, and a keyframe in the middle of motion is a stall
+/// of its size on a slow link (177 KB on 10 Mbps: 140 ms); on a still screen nobody sees it.
+const EARLY_KEY_FRAMES: u32 = MAX_GOP_FRAMES as u32 / 2;
 
 /// Frames the encoder skipped to stay within its rate limits, logged every few seconds.
 fn note_skipped_frame() {
@@ -137,6 +142,8 @@ pub struct Encoder {
     last_size: Arc<AtomicU64>,
     /// The bitrate its policy was last applied for.
     bps: AtomicU32,
+    /// Frames out since the last keyframe (VideoToolbox makes one at MAX_GOP_FRAMES itself).
+    since_key: Arc<AtomicU32>,
 }
 
 // VTCompressionSession is thread-safe; frames are submitted from the capture queue only.
@@ -256,6 +263,7 @@ impl Encoder {
             bytes: Arc::new(AtomicU64::new(0)),
             last_size: Arc::new(AtomicU64::new(0)),
             bps: AtomicU32::new(bitrate as u32),
+            since_key: Arc::new(AtomicU32::new(0)),
         })
     }
 
@@ -315,6 +323,16 @@ impl Encoder {
         self.force_keyframe.load(Ordering::Relaxed)
     }
 
+    /// The screen has gone still: if a keyframe will be due soon anyway, asks for it now
+    /// (the next frame encoded is one) and says so.
+    pub fn early_keyframe(&self) -> bool {
+        let due = self.since_key.load(Ordering::Relaxed) >= EARLY_KEY_FRAMES;
+        if due {
+            self.force_keyframe.store(true, Ordering::Relaxed);
+        }
+        due
+    }
+
     /// `refresh`: the picture is unchanged since the last encode (see FLAG_REFRESH).
     pub fn encode(&self, image: &CVImageBuffer, pts: CMTime, capture_us: u64, refresh: bool) {
         let keyframe = self.force_keyframe.swap(false, Ordering::Relaxed);
@@ -332,6 +350,7 @@ impl Encoder {
         let hevc = self.hevc;
         let (bytes, last_size) = (self.bytes.clone(), self.last_size.clone());
         let force_keyframe = self.force_keyframe.clone();
+        let since_key = self.since_key.clone();
         let handler = RcBlock::new(
             move |status: i32, _flags: VTEncodeInfoFlags, sample: *mut CMSampleBuffer| {
                 if status != 0 {
@@ -355,6 +374,11 @@ impl Encoder {
                     return;
                 }
                 if let Some(frame) = unsafe { annex_b(&*sample, hevc) } {
+                    if frame.keyframe {
+                        since_key.store(0, Ordering::Relaxed);
+                    } else {
+                        since_key.fetch_add(1, Ordering::Relaxed);
+                    }
                     bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
                     last_size.store(frame.data.len() as u64, Ordering::Relaxed);
                     on_frame(EncodedFrame {

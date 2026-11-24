@@ -295,6 +295,10 @@ pub enum ServerMsg {
     Pass {
         pass: String,
         expires: u64,
+        /// The pass it already had, with more time (a standing pass, on a visit): nothing
+        /// to tell the person.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        renewed: bool,
     },
     Layout {
         streams: Vec<DisplayInfo>,

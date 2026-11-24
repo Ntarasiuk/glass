@@ -21,13 +21,16 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use glass_proto::MAX_STREAMS;
 
-/// How often a held capture looks again (and a send path re-checks a busy link).
+/// How often a send path re-checks a busy link (and a refinement waits for an idle one).
 pub const POLL: Duration = Duration::from_millis(8);
+/// How often a held capture looks again. A quarter of a frame at 120 fps: a hold usually
+/// ends with an acknowledgement, and waiting most of a frame to notice would cost one.
+pub const HELD_POLL: Duration = Duration::from_millis(2);
 /// Queue allowed beyond a round trip before the link counts as full.
 const SLACK_MS: f64 = 120.0;
 /// Round trip assumed before any is measured.
@@ -43,8 +46,10 @@ const MAX_HOLD: Duration = Duration::from_millis(750);
 const IDLE_AFTER: Duration = Duration::from_secs(1);
 /// The least round trip seen over this long is the link's own (the rest is queue).
 const BASE_WINDOW: Duration = Duration::from_secs(10);
-/// Frame interval the frame-count limit assumes (the fastest common rate).
-const FRAME_MS: f64 = 1000.0 / 60.0;
+/// Frame rate the frame-count limit assumes until an encoder says (see [`set_frame_rate`]).
+const DEFAULT_FPS: u32 = 60;
+/// Time's worth of frames in flight allowed before the link's rate is known (3 at 60 fps).
+const COLD_WINDOW_MS: f64 = 50.0;
 /// Frames remembered at most (a link that never confirms anything mustn't grow this).
 const MAX_TRACKED: usize = 256;
 /// Delivery is measured from one delivery to another at least this much later...
@@ -105,6 +110,8 @@ pub struct Link {
     acked_sent: Option<Instant>,
     /// The bitrate frames are being made at, to tell how long one takes just to send.
     pace_bps: f64,
+    /// Like `base`, less the time frames spent in the viewer: the network's own.
+    net_base: Option<(f64, Instant)>,
 }
 
 /// Nothing on its way for this long: the stream had nothing to send.
@@ -216,10 +223,19 @@ impl Link {
         }
     }
 
+    /// [`Link::acked_waited`] without a viewer wait.
+    #[cfg(test)]
+    pub fn acked(&mut self, stream: u8, id: u32, now: Instant) {
+        self.acked_waited(stream, id, Duration::ZERO, now);
+    }
+
     /// The viewer drew frame `id` of `stream`: it and every earlier one of that stream are
     /// gone (an earlier one it never drew was lost or skipped). From then on frames are
-    /// gone only when acknowledged.
-    pub fn acked(&mut self, stream: u8, id: u32, now: Instant) {
+    /// gone only when acknowledged. `waited`: how long the frame spent in the viewer
+    /// (decoding and drawing, as it measured it). That part of the delay is the viewer's, not the network's: it
+    /// still holds capture (frames queued at a slow decoder are a queue), but doesn't
+    /// count against the bitrate, which can't make a decoder faster.
+    pub fn acked_waited(&mut self, stream: u8, id: u32, waited: Duration, now: Instant) {
         self.expect_acks();
         self.last_ack = Some(now);
         let pace = self.pace();
@@ -245,7 +261,14 @@ impl Link {
         }
         if let Some((took, sending)) = took {
             self.sample(took, now);
-            let base = self.base.map_or(0.0, |(b, _)| b);
+            // More than the whole trip can't have been spent in the viewer: not believed.
+            let waited = if waited < took { waited } else { Duration::ZERO };
+            let took = took - waited;
+            let ms = took.as_secs_f64() * 1000.0;
+            if self.net_base.is_none_or(|(b, at)| ms < b || now.duration_since(at) >= BASE_WINDOW) {
+                self.net_base = Some((ms, now));
+            }
+            let base = self.net_base.map_or(0.0, |(b, _)| b);
             // How long it took beyond the quickest, less how long it (and what was ahead of
             // it) takes just to send at the rate it was made for. A keyframe is many times
             // the size of a frame: its own length isn't a queue on the link.
@@ -280,6 +303,7 @@ impl Link {
             // Its own baseline: acknowledgements take a decode longer than the buffer did.
             self.acks = true;
             self.base = None;
+            self.net_base = None;
             self.window = None;
         }
     }
@@ -296,6 +320,7 @@ impl Link {
     pub fn stop_expecting_acks(&mut self) {
         self.acks = false;
         self.base = None;
+        self.net_base = None;
         self.window = None;
         self.acked_sent = None;
     }
@@ -308,7 +333,7 @@ impl Link {
         self.inflight.iter().find(|f| self.acked_sent.is_none_or(|at| f.at >= at))
     }
 
-    /// The bitrate frames are being made at (see [`Link::acked`]).
+    /// The bitrate frames are being made at (see [`Link::acked_waited`]).
     pub fn set_pace(&mut self, bps: u32) {
         self.pace_bps = bps as f64;
     }
@@ -397,11 +422,7 @@ impl Link {
             return false;
         }
         let rtt = self.rtt_ms();
-        // Until the link's rate is known, only a few: a burst into a slow link is a queue.
-        let max_frames = match self.rate() {
-            Some(_) => (((rtt + 40.0) / FRAME_MS).ceil() as usize + 2).clamp(3, 40),
-            None => 3,
-        };
+        let max_frames = max_frames(self.rate().is_some(), rtt, frame_rate());
         let too_many_bytes = self.rate().is_some_and(|rate| {
             let in_flight = if self.acks {
                 self.inflight.iter().map(|f| f.bytes).sum::<usize>() as f64
@@ -427,6 +448,18 @@ impl Link {
     }
 }
 
+/// Frames in flight a link allows: a round trip (plus decoding) of them, and two more. Until
+/// the link's rate is known, only a few: a burst into a slow link is a queue. Counted in
+/// time, not frames: at 120 fps a round trip holds twice as many as at 60.
+fn max_frames(rate_known: bool, rtt_ms: f64, fps: u32) -> usize {
+    let frames_in = |ms: f64| (ms * fps.max(1) as f64 / 1000.0).ceil() as usize;
+    if rate_known {
+        (frames_in(rtt_ms + 40.0) + 2).clamp(3, 80)
+    } else {
+        frames_in(COLD_WINDOW_MS).max(3)
+    }
+}
+
 /// Per viewer: the streams it holds (a bit each; 0 when its link isn't full), and the
 /// streams it has frames in flight for.
 static VIEWERS: Mutex<Option<HashMap<u64, (u8, u8)>>> = Mutex::new(None);
@@ -434,6 +467,25 @@ static VIEWERS: Mutex<Option<HashMap<u64, (u8, u8)>>> = Mutex::new(None);
 static HELD: AtomicU8 = AtomicU8::new(0);
 static BUSY: AtomicU8 = AtomicU8::new(0);
 static NEXT: AtomicU64 = AtomicU64::new(1);
+/// Each stream's frame rate, as its encoder last set it (0: not streaming).
+static FPS: [AtomicU32; MAX_STREAMS] = [const { AtomicU32::new(0) }; MAX_STREAMS];
+
+/// The frame rate `stream` is encoded at now, so the frame-count limit spans the same time
+/// whatever the rate. 0 when it stops.
+pub fn set_frame_rate(stream: u8, fps: u32) {
+    if let Some(slot) = FPS.get(stream as usize) {
+        slot.store(fps, Ordering::Relaxed);
+    }
+}
+
+/// The fastest stream's frame rate: links carry every stream, and the fastest fills one
+/// quickest.
+fn frame_rate() -> u32 {
+    match FPS.iter().map(|f| f.load(Ordering::Relaxed)).max().unwrap_or(0) {
+        0 => DEFAULT_FPS,
+        fps => fps,
+    }
+}
 
 /// A send path's place in the registry; its hold is lifted when it drops.
 pub struct Viewer {
@@ -491,8 +543,6 @@ fn publish(id: u64, state: (u8, u8)) {
 
 /// No viewer has a frame of `stream` still on its way: the link is idle, so a frame that
 /// only refines a still picture won't queue ahead of the next real change.
-// Only the Mac's capture refines a still screen.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn idle(stream: u8) -> bool {
     BUSY.load(Ordering::Relaxed) & 1 << (stream as usize).min(MAX_STREAMS - 1) == 0
 }
@@ -572,6 +622,47 @@ pub(crate) mod tests {
             now += step;
         }
         (sent, worst)
+    }
+
+    #[test]
+    fn a_slow_decoder_is_not_a_queue_on_the_network() {
+        // 20 ms on the network every time; the viewer's decoder takes 2 ms, then 30.
+        let t0 = Instant::now();
+        let ms = |n| Duration::from_millis(n);
+        let (mut said, mut unsaid) = (Link::default(), Link::default());
+        for l in [&mut said, &mut unsaid] {
+            l.set_pace(1_000_000_000);
+        }
+        for id in 0..20u32 {
+            let sent = t0 + ms(id as u64 * 10);
+            let decode = if id < 10 { ms(2) } else { ms(30) };
+            said.sent(0, id, 10, sent);
+            unsaid.sent(0, id, 10, sent);
+            said.acked_waited(0, id, decode, sent + ms(20) + decode);
+            unsaid.acked(0, id, sent + ms(20) + decode);
+        }
+        assert!(said.queue_ms < 1.0, "{}", said.queue_ms);
+        assert!(unsaid.queue_ms > 20.0, "{}", unsaid.queue_ms);
+        // A wait longer than the whole trip isn't believed.
+        let mut lying = Link::default();
+        lying.set_pace(1_000_000_000);
+        lying.sent(0, 0, 10, t0);
+        lying.acked_waited(0, 0, ms(5), t0 + ms(20));
+        lying.sent(0, 1, 10, t0 + ms(30));
+        lying.acked_waited(0, 1, ms(500), t0 + ms(130));
+        assert!(lying.queue_ms > 20.0, "{}", lying.queue_ms);
+    }
+
+    #[test]
+    fn the_frame_window_spans_the_same_time_at_any_rate() {
+        // 40 ms round trip: 80 ms of frames, and two more.
+        assert_eq!(max_frames(true, 40.0, 60), 7);
+        assert_eq!(max_frames(true, 40.0, 120), 12);
+        // Before the rate is known: 50 ms of them, never fewer than 3.
+        assert_eq!(max_frames(false, 40.0, 60), 3);
+        assert_eq!(max_frames(false, 40.0, 120), 6);
+        assert_eq!(max_frames(false, 40.0, 30), 3);
+        assert_eq!(max_frames(true, 5_000.0, 120), 80, "capped");
     }
 
     #[test]

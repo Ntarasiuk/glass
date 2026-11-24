@@ -88,7 +88,7 @@ export class VideoStream {
     this.env = env;
     this.ctx = undefined;
     this.pending = new Map(); // frameId -> { parts, received, keyframe, captureUs, checksum }
-    this.acks = new Map(); // capture time -> frameId, for frames being decoded
+    this.acks = new Map(); // capture time -> { frameId, when it went to the decoder }, for frames being decoded
     this.ready = new Map(); // frameId -> complete frames waiting for an earlier one (repair)
     this.counts = { nacks: 0, asked: 0, keyRequests: 0 };
     this.keyframeRetry = KEYFRAME_RETRY_MS;
@@ -391,7 +391,7 @@ export class VideoStream {
     }
     // Acked once drawn (by capture time, which the decoded frame carries).
     if (this.acks.size > 64) this.acks.clear();
-    this.acks.set(frame.captureUs, id);
+    this.acks.set(frame.captureUs, { id, at: performance.now() });
     this.decoder.decode(new EncodedVideoChunk({ type: frame.keyframe ? 'key' : 'delta', timestamp: frame.captureUs, data }));
   }
 
@@ -499,10 +499,11 @@ export class VideoStream {
     const hostNow = this.env.hostNowUs();
     // Tell the host it's on screen: it sends the next frame when the link has room
     // (instead of queuing), and sets the bitrate by how long frames take to get here.
-    const id = this.acks.get(videoFrame.timestamp);
-    if (id !== undefined) {
+    const ack = this.acks.get(videoFrame.timestamp);
+    if (ack !== undefined) {
       this.acks.delete(videoFrame.timestamp);
-      this.env.ack?.(this.index, id);
+      // With how long decoding and drawing took: the host doesn't count that against the link.
+      this.env.ack?.(this.index, ack.id, performance.now() - ack.at);
     }
     this.env.firstFrame?.();
     this.env.probe?.(this.index, videoFrame, hostNow);

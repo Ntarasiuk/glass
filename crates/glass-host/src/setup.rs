@@ -38,12 +38,13 @@ async fn tailscale_step() -> Result<Option<String>> {
         match tailscale::probe().await {
             tailscale::Probe::Missing => {
                 log::warning(format!(
-                    "Tailscale isn't installed. It's free and gives your devices a private, secure link.\n\
-                     {TAILSCALE_INSTALL}"
+                    "Tailscale isn't installed. It's free, gives your devices a private link and browsers HTTPS.\n\
+                     {TAILSCALE_INSTALL}\n\
+                     Have a VPN into this network already? Skip this: the Glass app connects over it."
                 ))?;
                 if !ask_retry(
                     "Installed it?",
-                    "Skip (connect with a one-time link instead)",
+                    "Skip (I use a VPN into this network, or one-time links)",
                 )? {
                     return Ok(None);
                 }
@@ -230,6 +231,13 @@ fn finish(tailnet: Option<String>) -> Result<()> {
                 )?,
             }
         }
+    }
+    // The Glass app on another computer needs neither Tailscale nor a link.
+    if let Some(ip) = crate::nearby::own_address() {
+        log::remark(format!(
+            "From another computer's Glass app: this one is listed under Machines on this network. Over a VPN into it, enter its address there: {}",
+            style(ip).cyan()
+        ))?;
     }
     outro(format!(
         "All set. Problems or ideas? {}",

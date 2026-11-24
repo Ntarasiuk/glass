@@ -6,6 +6,7 @@ export interface AgentLensEnv {
   INJECT?: string; // "false" disables beacon injection
   LOG_ASSETS?: string; // "true" logs static assets requested by humans
   DEBUG_LOG?: string; // "true" logs every data point (local dev)
+  AL_DASHBOARD?: string; // dashboard origin: turns on edge tests and surveys (applied here, set from the dashboard)
 }
 
 export interface ObserveOptions {

@@ -35,6 +35,9 @@ pub struct Target {
     /// Where it is, for a computer found on this network (`nearby`): `dns` names it (and
     /// is what its certificate and this app's memory of it go by), this reaches it.
     pub at: Option<std::net::IpAddr>,
+    /// The name it was typed by (`studio.lan`), kept to find it again when its address
+    /// changes ([`Target::settle`]).
+    pub typed: Option<String>,
 }
 
 impl Target {
@@ -54,7 +57,7 @@ impl Target {
         let dns = if authority.contains(':') || base.starts_with("http://") { format!("{}://{authority}", if base.starts_with("http://") { "http" } else { "https" }) } else { authority.to_string() };
         if let Some(key) = param("r") {
             let origin = base.split_once("://").map_or(format!("https://{authority}"), |(scheme, _)| format!("{scheme}://{authority}"));
-            return Some(Self { name: "Remote computer".into(), dns: format!("remote:{}", &key[..key.len().min(12)]), is_self: false, token: param("t"), link: param("l"), remote: Some((origin, key)), at: None });
+            return Some(Self { name: "Remote computer".into(), dns: format!("remote:{}", &key[..key.len().min(12)]), is_self: false, token: param("t"), link: param("l"), remote: Some((origin, key)), at: None, typed: None });
         }
         Some(Self {
             // A name's first label ("mac"), or an address as it is.
@@ -65,6 +68,7 @@ impl Target {
             link: param("l"),
             remote: None,
             at: None,
+            typed: None,
         })
     }
 }
@@ -163,10 +167,27 @@ impl wtransport::config::DnsResolver for Pinned {
     }
 }
 
+/// Who a host says it is (`/config.json`'s `self`), once that checks out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Who {
+    pub id: String,
+    pub name: String,
+    pub os: String,
+    /// The key it proves itself with: it signed the certificate this viewer pins.
+    pub key: String,
+    /// The name its web certificate is for, when a certificate authority gave it one.
+    pub tls: Option<String>,
+    /// What it's called on its network's DNS, as far as it knows (`studio.lan`).
+    pub host: Option<String>,
+}
+
 struct HostConfig {
     wt_port: u16,
     wt_host: Option<String>,
     cert_hash: Option<[u8; 32]>,
+    who: Option<Who>,
+    /// The web address that answered.
+    base: String,
 }
 
 /// The host's web addresses to try and its name: for a tailnet name, HTTPS on 443, then on
@@ -176,48 +197,249 @@ fn web_base(dns: &str) -> (Vec<String>, String) {
     match dns.split_once("://") {
         Some((_, rest)) => {
             let authority = rest.split('/').next().unwrap_or(rest);
-            let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+            let host = authority.rsplit_once(':').filter(|(h, _)| !h.contains(':') || h.ends_with(']')).map_or(authority, |(h, _)| h);
             (vec![dns.trim_end_matches('/').to_string()], host.trim_matches(['[', ']']).to_string())
         }
         None => (vec![format!("https://{dns}"), format!("https://{dns}:8080")], dns.to_string()),
     }
 }
 
-/// What the host's web server tells browsers: where WebTransport listens, and the hash of
-/// its certificate when that's self-signed.
-async fn host_config(dns: &str, at: Option<std::net::IpAddr>) -> Result<HostConfig> {
-    let (bases, host) = web_base(dns);
-    let v: Value = tokio::task::spawn_blocking(move || -> Result<Value> {
-        // Generous: some hosts are slow to answer (older Windows hosts take seconds).
-        let config = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(12))).build();
-        let agent: ureq::Agent = match at.map(|ip| (host, ip)).or_else(pinned_address) {
-            Some((name, ip)) => ureq::Agent::with_parts(config, ureq::unversioned::transport::DefaultConnector::new(), Pinned(name, ip)),
-            None => config.new_agent(),
-        };
-        let mut last = anyhow::anyhow!("no address to try");
-        for base in bases {
-            // Another app on that port answers too, with something that isn't Glass's config.
-            match agent.get(format!("{base}/config.json")).call().map_err(anyhow::Error::from).and_then(|mut r| Ok(r.body_mut().read_json::<Value>()?)) {
-                Ok(v) if v.get("wtPort").is_some() => return Ok(v),
-                Ok(_) => last = anyhow::anyhow!("{base} isn't Glass"),
-                Err(e) => last = e.context(base),
-            }
+/// Asks each web address in turn for `/config.json`; the first that's Glass, and which.
+/// `pin`: reach that name at this address. `unverified`: read it whatever certificate is
+/// there, only ever to learn the name to check it by ([`Target::settle`]).
+fn fetch_config(bases: &[String], pin: Option<(String, std::net::IpAddr)>, timeout: Duration, unverified: bool) -> Result<(Value, String)> {
+    let mut config = ureq::Agent::config_builder().timeout_global(Some(timeout));
+    if unverified {
+        config = config.tls_config(ureq::tls::TlsConfig::builder().disable_verification(true).build());
+    }
+    let config = config.build();
+    let agent: ureq::Agent = match pin {
+        Some((name, ip)) => ureq::Agent::with_parts(config, ureq::unversioned::transport::DefaultConnector::new(), Pinned(name, ip)),
+        None => config.new_agent(),
+    };
+    let mut last = anyhow::anyhow!("no address to try");
+    for base in bases {
+        // Another app on that port answers too, with something that isn't Glass's config.
+        match agent.get(format!("{base}/config.json")).call().map_err(anyhow::Error::from).and_then(|mut r| Ok(r.body_mut().read_json::<Value>()?)) {
+            Ok(v) if v.get("wtPort").is_some() => return Ok((v, base.clone())),
+            Ok(_) => last = anyhow::anyhow!("{base} isn't Glass"),
+            Err(e) => last = e.context(base.clone()),
         }
-        Err(last)
-    })
-    .await??;
-    let cert_hash = match v.get("certHash") {
+    }
+    Err(last)
+}
+
+/// What a host's `/config.json` says. Who it claims to be is only kept when it's proved:
+/// its key signed the self-signed certificate named here (a certificate from an authority
+/// was checked on the way in).
+fn read_config(v: &Value, base: String) -> Result<HostConfig> {
+    let cert_hash: Option<[u8; 32]> = match v.get("certHash") {
         Some(Value::Array(bytes)) => {
             let bytes: Vec<u8> = bytes.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect();
             Some(bytes.try_into().map_err(|_| anyhow::anyhow!("bad certificate hash"))?)
         }
         _ => None,
     };
+    let me = &v["self"];
+    let text = |k: &str, max: usize| -> String { me[k].as_str().unwrap_or_default().chars().filter(|c| !c.is_control()).take(max).collect::<String>().trim().to_string() };
+    // These go into an address and a file name's worth of memory: nothing odd in them.
+    let plain = |s: &str, extra: &[char]| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(&c));
+    let (id, key) = (text("id", 32), text("key", 128));
+    let who = if id.len() >= 8 && plain(&id, &['-', '_']) && plain(&key, &['-', '_']) {
+        if let Some(hash) = &cert_hash {
+            anyhow::ensure!(
+                crate::remote::verify(&key, &crate::remote::direct_payload(hash), me["sig"].as_str().unwrap_or_default()),
+                "the computer there couldn't prove who it is"
+            );
+        }
+        let name = text("name", 64);
+        Some(Who {
+            id,
+            key,
+            name: if name.is_empty() { "Glass computer".into() } else { name },
+            os: text("os", 16),
+            tls: Some(text("tls", 253)).filter(|t| plain(t, &['-', '.'])),
+            host: Some(text("host", 253)).filter(|t| plain(t, &['-', '.'])),
+        })
+    } else {
+        None
+    };
     Ok(HostConfig {
         wt_port: v["wtPort"].as_u64().context("no wtPort")? as u16,
         wt_host: v["wtHost"].as_str().map(str::to_string),
         cert_hash,
+        who,
+        base,
     })
+}
+
+/// What the host's web server tells browsers: where WebTransport listens, and the hash of
+/// its certificate when that's self-signed.
+async fn host_config(dns: &str, at: Option<std::net::IpAddr>) -> Result<HostConfig> {
+    let (bases, host) = web_base(dns);
+    tokio::task::spawn_blocking(move || {
+        // Generous: some hosts are slow to answer (older Windows hosts take seconds).
+        let (v, base) = fetch_config(&bases, at.map(|ip| (host, ip)).or_else(pinned_address), Duration::from_secs(12), false)?;
+        read_config(&v, base)
+    })
+    .await?
+}
+
+/// How long a remembered computer gets to answer when the list is only checking on it.
+const REACH_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Where a computer's Glass opens in a browser: the first of its web addresses that
+/// answers as Glass. Blocking, briefly.
+pub fn web_address(dns: &str, at: Option<std::net::IpAddr>) -> String {
+    let (bases, host) = web_base(dns);
+    browser_address(&bases, at.map(|ip| (host, ip)).or_else(pinned_address), REACH_TIMEOUT)
+}
+
+/// When none answers in time, the last one: Glass always serves its web port, and the
+/// standard one only when it could have it (another app there answers instead).
+fn browser_address(bases: &[String], pin: Option<(String, std::net::IpAddr)>, timeout: Duration) -> String {
+    let base = fetch_config(bases, pin, timeout, false).map_or_else(|_| bases.last().cloned().unwrap_or_default(), |(_, base)| base);
+    format!("{base}/")
+}
+
+/// Whether the computer remembered as `saved` answers at `at` right now, and is still that
+/// computer. Blocking.
+fn is_at(saved: &super::saved::Computer, at: std::net::IpAddr, timeout: Duration) -> bool {
+    let (bases, host) = web_base(&saved.url);
+    let Ok(cfg) = fetch_config(&bases, Some((host, at)), timeout, false).and_then(|(v, base)| read_config(&v, base)) else { return false };
+    still(saved, &cfg)
+}
+
+/// Over HTTPS its certificate's name was checked; otherwise it's the key that says so.
+fn still(saved: &super::saved::Computer, cfg: &HostConfig) -> bool {
+    cfg.base.starts_with("https://") && cfg.cert_hash.is_none() || cfg.cert_hash.is_some() && cfg.who.as_ref().is_some_and(|w| w.key == saved.key)
+}
+
+/// Where a remembered computer answers right now, if anywhere: its addresses, newest
+/// first. Over a VPN into its network that's the address it had there; and when its router
+/// has since given it another, the address its name has now. Blocking.
+pub fn reach(saved: &super::saved::Computer) -> Option<std::net::IpAddr> {
+    if let Some(at) = saved.addrs.iter().copied().find(|at| is_at(saved, *at, REACH_TIMEOUT)) {
+        return Some(at);
+    }
+    // Only ever a private address: a name is a hint the computer gave, not somewhere on
+    // the internet to go asking.
+    let mut tried = saved.addrs.clone();
+    saved.names.iter().flat_map(|name| lookup(name)).filter(|ip| crate::nearby::private(*ip)).find(|at| {
+        let new = !tried.contains(at);
+        tried.push(*at);
+        new && is_at(saved, *at, REACH_TIMEOUT)
+    })
+}
+
+/// A name's addresses, IPv4 first, if its network's DNS answers soon. Blocking, briefly.
+fn lookup(name: &str) -> Vec<std::net::IpAddr> {
+    use std::net::ToSocketAddrs;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name = name.to_string();
+    // The system's lookup has no timeout of its own: left to finish by itself.
+    std::thread::spawn(move || {
+        let mut found: Vec<std::net::IpAddr> = (name.as_str(), 0).to_socket_addrs().map(|a| a.map(|a| a.ip()).collect()).unwrap_or_default();
+        found.sort_by_key(|ip| !ip.is_ipv4());
+        let _ = tx.send(found);
+    });
+    rx.recv_timeout(REACH_TIMEOUT).unwrap_or_default()
+}
+
+/// The names to look a computer up by later: the one it was typed by, and the one it says
+/// it has (in full, and alone: a VPN's DNS often adds the network's own ending). Not
+/// `.local` ones: those are only heard on its own network, where it's found anyway. Whatever
+/// a name turns out to be, only a private address is ever asked ([`reach`]).
+pub(super) fn names(typed: Option<&str>, host: Option<&str>) -> Vec<String> {
+    let mut all: Vec<String> = Vec::new();
+    let short = host.and_then(|h| h.split('.').next());
+    for name in typed.into_iter().chain(host).chain(short) {
+        let name = name.trim_end_matches('.').to_ascii_lowercase();
+        if !name.is_empty() && name.parse::<std::net::IpAddr>().is_err() && !name.ends_with(".local") && name != "localhost" && !all.contains(&name) {
+            all.push(name);
+        }
+    }
+    all
+}
+
+/// A name or address on a private network rather than the internet: where a computer can
+/// be without a certificate, or with one for another name (its tailnet's).
+fn local_host(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>().is_ok() || !host.contains('.') || [".local", ".lan", ".home", ".home.arpa", ".localdomain", ".internal"].iter().any(|d| host.ends_with(d))
+}
+
+/// The web addresses to try for a typed private address, best first. Without a certificate
+/// Glass is plain HTTP there, and `from_url` reads a bare `host:port` as HTTPS, so each is
+/// tried both ways; `http://…` typed out is taken at its word.
+fn typed_bases(dns: &str, given: &[String], host: &str) -> Vec<String> {
+    let authority = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
+    match dns.strip_prefix("https://") {
+        Some(rest) if rest.starts_with(&format!("{authority}:")) => vec![dns.to_string(), format!("http://{rest}")],
+        Some(_) => given.to_vec(),
+        None if dns.contains("://") => given.to_vec(),
+        // No port typed: where Glass serves by default, then 443 (it has a certificate).
+        None => vec![format!("https://{authority}:8080"), format!("http://{authority}:8080"), format!("https://{authority}")],
+    }
+}
+
+impl Target {
+    /// An address someone typed (`192.168.1.20`, `studio.lan:8080`) turned into the
+    /// computer that's there: what it calls itself, the name it's remembered by, and where
+    /// it is. So it's the same computer as when it's heard on the network, with the same
+    /// pass. Anything else (a link, a tailnet name) comes back as it was. Blocking.
+    pub fn settle(mut self) -> Result<Self> {
+        if self.remote.is_some() || self.at.is_some() || self.is_self {
+            return Ok(self);
+        }
+        let (given, host) = web_base(&self.dns);
+        use std::net::ToSocketAddrs;
+        let found = (host.as_str(), 0).to_socket_addrs().map(|a| a.map(|a| a.ip()).collect::<Vec<_>>());
+        let private = |ip: &&std::net::IpAddr| ip.is_ipv4() && crate::nearby::private(**ip);
+        // Any other name is private too when it has a private address (a router's own
+        // ending for its network: `studio.attlocal.net`), and that's the one asked.
+        if !local_host(&host) && !found.as_ref().is_ok_and(|f| f.iter().any(|ip| private(&ip))) {
+            return Ok(self);
+        }
+        let found = found.with_context(|| format!("Can't find {host}"))?;
+        let at = *found.iter().find(private).or(found.iter().find(|ip| ip.is_ipv4())).or(found.first()).with_context(|| format!("Can't find {host}"))?;
+        let mut bases = typed_bases(&self.dns, &given, &host);
+        // A host only answers to names it knows are its own (a site could point any other
+        // at it), and its router's name for it isn't one: asked by its address too.
+        if host.parse::<std::net::IpAddr>().is_err() {
+            let (name, ip) = (format!("://{host}"), format!("://{}", if at.is_ipv6() { format!("[{at}]") } else { at.to_string() }));
+            let by_address: Vec<String> = bases.iter().filter(|b| b.starts_with("http://")).map(|b| b.replacen(&name, &ip, 1)).collect();
+            bases.extend(by_address);
+        }
+        let port = |base: &str| base.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok());
+        let pin = Some((host.clone(), at));
+        let timeout = Duration::from_secs(6);
+        let cfg = match fetch_config(&bases, pin.clone(), timeout, false).and_then(|(v, base)| read_config(&v, base)) {
+            Ok(cfg) => cfg,
+            // A certificate for another name (its tailnet's): learn the name from whatever
+            // is there, then ask again by that name, which its certificate has to match.
+            Err(first) => {
+                let https: Vec<String> = bases.iter().filter(|b| b.starts_with("https://")).cloned().collect();
+                let named = fetch_config(&https, pin, timeout, true).ok().and_then(|(v, base)| {
+                    let name = v["self"]["tls"].as_str().filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'))?;
+                    Some(format!("https://{name}{}", port(&base).map(|p| format!(":{p}")).unwrap_or_default()))
+                });
+                let Some(url) = named else { return Err(first.context("Glass isn't answering there")) };
+                let (bases, name) = web_base(&url);
+                fetch_config(&bases, Some((name, at)), timeout, false).and_then(|(v, base)| read_config(&v, base))?
+            }
+        };
+        self.at = Some(at);
+        self.typed = Some(host).filter(|h| h.parse::<std::net::IpAddr>().is_err());
+        self.dns = cfg.base.clone();
+        if let Some(who) = &cfg.who {
+            self.name = who.name.clone();
+            // Without a certificate, the name it announces itself by on its own network.
+            if cfg.cert_hash.is_some() && cfg.base.starts_with("http://") {
+                self.dns = format!("http://glass-{}.local:{}", who.id, port(&cfg.base).unwrap_or(8080));
+            }
+        }
+        Ok(self)
+    }
 }
 
 pub fn codecs() -> Vec<&'static str> {
@@ -271,12 +493,19 @@ fn step(what: &str) {
 
 async fn once(target: &Target, viewer: &Arc<Viewer>, rx: &mut mpsc::UnboundedReceiver<Out>) -> Result<End> {
     step("start");
+    let mut who = None;
     let conn = match &target.remote {
         // Remote access: through glassdesk.dev, then peer to peer.
         Some((base, key)) => Conn::Rtc(Arc::new(super::rtc::RtcConn::connect(base, key).await?)),
         None => {
             let cfg = host_config(&target.dns, target.at).await.context("Glass isn't answering there")?;
             step(&format!("config: wt port {}, pinned cert {}", cfg.wt_port, cfg.cert_hash.is_some()));
+            // A computer opened before, at an address it had then: on another network that
+            // address is someone else's. Nothing is sent unless it's still that computer.
+            if let Some(saved) = super::saved::by_url(&target.dns) {
+                anyhow::ensure!(still(&saved, &cfg), "something else answered at {}'s address", target.name);
+            }
+            who = cfg.who.clone();
             let builder = ClientConfig::builder().with_bind_default();
             let config = match cfg.cert_hash {
                 Some(hash) => builder.with_server_certificate_hashes([Sha256Digest::new(hash)]),
@@ -362,6 +591,13 @@ async fn once(target: &Target, viewer: &Arc<Viewer>, rx: &mut mpsc::UnboundedRec
                             if let Some(t) = target.token.as_ref().filter(|_| !target.is_self) {
                                 super::prefs::update(&target.dns, |m| m.token = Some(t.clone()));
                             }
+                            // Let in, at an address rather than a tailnet name: remembered, to
+                            // open again from wherever this computer is next (over a VPN, say).
+                            if let (Some(at), Some(w), false) = (target.at, who.take(), target.is_self) {
+                                let last = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                                let names = names(target.typed.as_deref(), w.host.as_deref());
+                                super::saved::remember(super::saved::Computer { id: w.id, name: w.name, os: w.os, url: target.dns.clone(), key: w.key, addrs: Vec::new(), names, last }, at);
+                            }
                             let repair = msg["features"]["nack"].as_bool().unwrap_or(false);
                             for p in &mut pipes {
                                 p.asm.reset(Instant::now());
@@ -375,6 +611,11 @@ async fn once(target: &Target, viewer: &Arc<Viewer>, rx: &mut mpsc::UnboundedRec
                             }
                             if !viewer.video_on.load(Ordering::Relaxed) {
                                 write_json(&mut send, &json!({ "t": "video", "on": false })).await?;
+                            }
+                            // On a fast screen (a ProMotion MacBook, a 144 Hz monitor), more
+                            // frames, as the browser viewer asks; otherwise the host sends 60.
+                            if let Some(hz) = screen_hz().filter(|&hz| hz > 68.0) {
+                                write_json(&mut send, &json!({ "t": "refresh", "hz": hz })).await?;
                             }
                             if viewer.audio_on.load(Ordering::Relaxed) && msg["audio"].as_bool().unwrap_or(false) {
                                 write_json(&mut send, &json!({ "t": "audio", "on": true })).await?;
@@ -1117,4 +1358,185 @@ async fn read_json(r: &mut Rx) -> Result<Option<Value>> {
     let mut body = vec![0u8; n];
     r.read_exact(&mut body).await?;
     Ok(Some(serde_json::from_slice(&body)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+
+    /// A host's key and what its `/config.json` would say with `hash` signed by `signer`.
+    fn config(hash: Option<[u8; 32]>, signer: &EcdsaKeyPair, key: &EcdsaKeyPair) -> Value {
+        let rng = ring::rand::SystemRandom::new();
+        let sig = hash.map(|h| crate::remote::b64url(signer.sign(&rng, &crate::remote::direct_payload(&h)).unwrap().as_ref()));
+        json!({
+            "wtPort": 8443,
+            "certHash": hash.map(|h| h.to_vec()),
+            "self": { "id": "abcdef0123456789", "name": " Studio\u{7} ", "os": "macos", "key": crate::remote::b64url(key.public_key().as_ref()), "tls": null, "sig": sig },
+        })
+    }
+
+    fn pair() -> EcdsaKeyPair {
+        let rng = ring::rand::SystemRandom::new();
+        let doc = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, doc.as_ref(), &rng).unwrap()
+    }
+
+    fn saved(key: &EcdsaKeyPair, url: &str) -> super::super::saved::Computer {
+        super::super::saved::Computer { id: "abcdef0123456789".into(), name: "Studio".into(), os: "macos".into(), url: url.into(), key: crate::remote::b64url(key.public_key().as_ref()), addrs: Vec::new(), names: Vec::new(), last: 0 }
+    }
+
+    #[test]
+    fn a_computer_is_who_it_says_only_when_its_key_signed_the_certificate() {
+        let (mine, other) = (pair(), pair());
+        let hash = [7u8; 32];
+        let cfg = read_config(&config(Some(hash), &mine, &mine), "http://glass-abcdef0123456789.local:8080".into()).unwrap();
+        let who = cfg.who.clone().unwrap();
+        assert_eq!((who.id.as_str(), who.name.as_str(), who.os.as_str()), ("abcdef0123456789", "Studio", "macos"));
+        assert!(still(&saved(&mine, "http://glass-abcdef0123456789.local:8080"), &cfg));
+        // Another computer at that address, saying it's the one remembered: its own key
+        // can't have signed for ours, and ours didn't sign its certificate.
+        assert!(read_config(&config(Some(hash), &other, &mine), "http://x:8080".into()).is_err(), "claims our key without its signature");
+        let theirs = read_config(&config(Some(hash), &other, &other), "http://x:8080".into()).unwrap();
+        assert!(!still(&saved(&mine, "http://x:8080"), &theirs), "a different computer");
+        // A signature for an older certificate doesn't cover a new one.
+        let mut replayed = config(Some(hash), &mine, &mine);
+        replayed["certHash"] = json!([9u8; 32].to_vec());
+        assert!(read_config(&replayed, "http://x:8080".into()).is_err());
+        // An older host says nothing about itself: it connects as before, and isn't remembered.
+        let old = read_config(&json!({ "wtPort": 8443, "certHash": hash.to_vec() }), "http://x:8080".into()).unwrap();
+        assert!(old.who.is_none() && !still(&saved(&mine, "http://x:8080"), &old));
+    }
+
+    /// Something on this computer answering every request with `body`; its address.
+    fn serves(status: &'static str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let _ = s.read(&mut [0; 2048]);
+                let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn a_browser_opens_where_glass_answers() {
+        let limit = Duration::from_secs(5);
+        let glass = serves("200 OK", r#"{"wtPort":4433}"#);
+        let (missing, other) = (serves("404 Not Found", "{}"), serves("200 OK", r#"{"hello":1}"#));
+        let nothing = format!("http://{}", std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap());
+        assert_eq!(browser_address(&[glass.clone(), nothing.clone()], None, limit), format!("{glass}/"));
+        // Another app has the standard port (`tailscale serve`): Glass is on its web port.
+        assert_eq!(browser_address(&[missing.clone(), glass.clone()], None, limit), format!("{glass}/"));
+        assert_eq!(browser_address(&[other, glass.clone()], None, limit), format!("{glass}/"));
+        // Glass isn't answering: still its web port, not the other app.
+        assert_eq!(browser_address(&[missing, nothing.clone()], None, limit), format!("{nothing}/"));
+    }
+
+    #[test]
+    fn a_certificate_for_its_name_is_proof_enough() {
+        let key = pair();
+        let cfg = read_config(&config(None, &key, &key), "https://studio.tail1.ts.net:8080".into()).unwrap();
+        assert!(still(&saved(&pair(), "https://studio.tail1.ts.net:8080"), &cfg), "the name was checked on the way in");
+        // No certificate at all (plain HTTP, nothing to pin): nothing proves it.
+        let bare = read_config(&config(None, &key, &key), "http://192.168.1.20:8080".into()).unwrap();
+        assert!(!still(&saved(&key, "http://192.168.1.20:8080"), &bare));
+    }
+
+    #[test]
+    fn a_typed_address_is_tried_where_glass_serves() {
+        let bases = |typed: &str| {
+            let t = Target::from_url(typed).unwrap();
+            let (given, host) = web_base(&t.dns);
+            typed_bases(&t.dns, &given, &host)
+        };
+        assert_eq!(bases("192.168.1.20"), ["https://192.168.1.20:8080", "http://192.168.1.20:8080", "https://192.168.1.20"]);
+        assert_eq!(bases("studio.lan:9000"), ["https://studio.lan:9000", "http://studio.lan:9000"]);
+        assert_eq!(bases("http://10.0.0.5:8080"), ["http://10.0.0.5:8080"]);
+        assert_eq!(bases("[fd00::5]:8080"), ["https://[fd00::5]:8080", "http://[fd00::5]:8080"]);
+        assert_eq!(web_base("https://[fd00::5]:8080").1, "fd00::5");
+        assert_eq!(web_base("http://glass-abc.local:8080").1, "glass-abc.local");
+    }
+
+    #[test]
+    fn a_computer_is_looked_up_later_by_its_private_names() {
+        assert_eq!(names(Some("Studio.lan"), Some("Nathans-Mac.local")), ["studio.lan", "nathans-mac"]);
+        assert_eq!(names(None, Some("studio.home.arpa")), ["studio.home.arpa", "studio"]);
+        assert_eq!(names(Some("studio"), Some("studio")), ["studio"]);
+        assert_eq!(names(None, Some("studio.attlocal.net")), ["studio.attlocal.net", "studio"], "a router's own ending");
+        assert!(names(Some("192.168.1.20"), None).is_empty());
+        assert!(names(None, Some("localhost")).is_empty());
+    }
+
+    #[test]
+    fn only_private_names_are_looked_up_as_addresses() {
+        for host in ["192.168.1.20", "10.8.0.6", "fd00::5", "studio", "studio.local", "nas.lan", "mini.home.arpa"] {
+            assert!(local_host(host), "{host}");
+        }
+        for host in ["studio.tail1234.ts.net", "glassdesk.dev", "example.com"] {
+            assert!(!local_host(host), "{host}");
+        }
+        // A link, or a tailnet name, comes back untouched (and nothing is looked up).
+        let link = Target::from_url("https://studio.tail1234.ts.net/#l=code").unwrap();
+        assert_eq!(link.clone().settle().unwrap().dns, link.dns);
+    }
+}
+
+/// The fastest active screen's refresh rate, if it can be told. On a Mac the display link's:
+/// a ProMotion panel's display mode says 0 Hz, its link 120.
+#[cfg(target_os = "macos")]
+fn screen_hz() -> Option<f64> {
+    use objc2_core_video::CVDisplayLink;
+    let mut ids = [0u32; 16];
+    let mut count = 0u32;
+    let ok = unsafe { objc2_core_graphics::CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) };
+    if ok != objc2_core_graphics::CGError::Success {
+        return None;
+    }
+    ids[..count as usize]
+        .iter()
+        .filter_map(|&id| {
+            let mut link: *mut CVDisplayLink = std::ptr::null_mut();
+            #[allow(deprecated)]
+            let made = unsafe { CVDisplayLink::create_with_cg_display(id, std::ptr::NonNull::from(&mut link)) };
+            let link = std::ptr::NonNull::new(link)?;
+            // Created here: released when this drops.
+            let link = unsafe { objc2_core_foundation::CFRetained::from_raw(link) };
+            if made != objc2_core_video::kCVReturnSuccess {
+                return None;
+            }
+            #[allow(deprecated)]
+            let period = link.nominal_output_video_refresh_period();
+            (period.timeValue > 0 && period.timeScale > 0).then(|| period.timeScale as f64 / period.timeValue as f64)
+        })
+        .reduce(f64::max)
+}
+
+/// The primary screen's refresh rate (Windows reports whole hertz).
+#[cfg(windows)]
+fn screen_hz() -> Option<f64> {
+    use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW};
+    let mut mode = DEVMODEW { dmSize: std::mem::size_of::<DEVMODEW>() as u16, ..Default::default() };
+    let ok = unsafe { EnumDisplaySettingsW(windows::core::PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut mode) };
+    (ok.as_bool() && mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency as f64)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn screen_hz() -> Option<f64> {
+    None
+}
+
+#[cfg(all(test, any(target_os = "macos", windows)))]
+mod screen_hz_tests {
+    #[test]
+    fn a_screen_refreshes_at_a_plausible_rate() {
+        // No screen at all (a CI runner) says nothing; one that's there says something sane.
+        if let Some(hz) = super::screen_hz() {
+            eprintln!("screen refresh: {hz:.1} Hz");
+            assert!((20.0..=500.0).contains(&hz), "{hz}");
+        }
+    }
 }

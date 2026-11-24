@@ -197,6 +197,8 @@ export function summarise(seconds) {
     dropped: seconds.reduce((n, s) => n + s.dropped, 0),
     badMarkers: seconds.reduce((n, s) => n + s.bad, 0),
     rttMs: round(mean(seconds.map((s) => s.rtt))),
+    // Each second's unique frames and worst latency (--json), to tell a steady tail from spikes.
+    perSecond: seconds.map((s) => [s.unique, s.lat.length ? Math.max(...s.lat) : null]),
   };
 }
 
@@ -228,9 +230,12 @@ async function run(o, browser, introducer, workload, linkName) {
     const page = await context.newPage();
     await page.addInitScript((o) => {
       localStorage.setItem('glass.bench', '1');
+      // Over 60: the page says its screen is that fast (headless Chrome animates at 60), so
+      // the host sends what --fps allows.
+      if (o.fps > 60) localStorage.setItem('glass.refreshHz', String(o.fps));
       if (o.sharp) localStorage.setItem('glass.sharp', '1'); // capture restarts for it
       if (o.rtc) sessionStorage.setItem('glass.rtp', '0'); // video over the data channel
-    }, { rtc: o.path === 'rtc', sharp: o.sharp === '1' });
+    }, { rtc: o.path === 'rtc', sharp: o.sharp === '1', fps: o.fps });
     let url;
     if (o.path === 'rtc') {
       for (let i = 0; i < 100 && !host.cli('status', '--json').includes('"running":true'); i++) await sleep(100);

@@ -15,8 +15,11 @@ use openh264::formats::YUVSlices;
 /// Above this many pixels, frames are halved before encoding to keep software encode
 /// within the frame budget (4K → 1080p, 5K → 1440p).
 pub(crate) const MAX_PIXELS: usize = 2560 * 1600;
-/// Matches the macOS encoder: a periodic IDR before frame_num wraps.
-const MAX_GOP_FRAMES: u32 = 900;
+/// A periodic IDR this often, in time: OpenH264's frame_num runs to 32768 (its SPS has
+/// log2_max_frame_num 15), so unlike VideoToolbox's 1024 there's no wrap to beat, and a
+/// count of frames would make them twice as often at 120 fps. Each is a stall of its size on
+/// a slow link.
+const GOP_SECS: u32 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
@@ -69,7 +72,7 @@ impl Encoder {
             .rate_control_mode(RateControlMode::Bitrate)
             .bitrate(BitRate::from_bps(bitrate))
             .max_frame_rate(FrameRate::from_hz(fps as f32))
-            .intra_frame_period(IntraFramePeriod::from_num_frames(MAX_GOP_FRAMES))
+            .intra_frame_period(IntraFramePeriod::from_num_frames(GOP_SECS * fps.max(1)))
             .skip_frames(false)
             .num_threads(threads.min(4) as u16);
         let h264 = H264::with_api_config(OpenH264API::from_source(), config)
@@ -184,33 +187,62 @@ pub(crate) fn to_i420(
     }
     // Chroma rows per band (each is two luma rows).
     let rows = ch.div_ceil(threads().min(ch));
-    let mut bands = y[..w * h]
+    let bands = y[..w * h]
         .chunks_mut(rows * 2 * w)
-        .zip(u[..cw * ch].chunks_mut(rows * cw))
-        .zip(v[..cw * ch].chunks_mut(rows * cw))
-        .enumerate();
-    // The last band runs here, the others on their own threads.
-    let Some((last, ((ly, lu), lv))) = bands.next_back() else {
+        .zip(u[..cw * ch].chunks_mut(rows * cw).zip(v[..cw * ch].chunks_mut(rows * cw)))
+        .map(|(yb, (ub, vb))| (yb, Chroma::Planar(ub, vb)));
+    convert_bands(f, div, w, rows, bands);
+}
+
+/// [`to_i420`], but with chroma interleaved (NV12, what hardware encoders take) and written
+/// straight there: no separate pass to interleave planes.
+// Only the Windows host's Media Foundation encoder takes NV12 from here.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn to_nv12(f: &Frame, div: usize, (w, h): (usize, usize), y: &mut [u8], uv: &mut [u8]) {
+    let (cw, ch) = (w / 2, h / 2);
+    if cw == 0 || ch == 0 {
+        return;
+    }
+    let rows = ch.div_ceil(threads().min(ch));
+    let bands = y[..w * h]
+        .chunks_mut(rows * 2 * w)
+        .zip(uv[..cw * ch * 2].chunks_mut(rows * cw * 2))
+        .map(|(yb, uvb)| (yb, Chroma::Interleaved(uvb)));
+    convert_bands(f, div, w, rows, bands);
+}
+
+/// Where a band's chroma goes: separate U and V planes, or one plane of U,V pairs.
+enum Chroma<'a> {
+    Planar(&'a mut [u8], &'a mut [u8]),
+    Interleaved(&'a mut [u8]),
+}
+
+/// Converts bands of `rows` chroma rows in parallel: the last here, the others on their own
+/// threads.
+fn convert_bands<'a>(f: &Frame, div: usize, w: usize, rows: usize, bands: impl Iterator<Item = (&'a mut [u8], Chroma<'a>)>) {
+    let mut bands: Vec<_> = bands.collect();
+    let last = bands.len().saturating_sub(1);
+    let Some((ly, lc)) = bands.pop() else {
         return;
     };
     std::thread::scope(|s| {
-        for (i, ((yb, ub), vb)) in bands {
-            s.spawn(move || convert_band(f, div, w, i * rows, yb, ub, vb));
+        for (i, (yb, cb)) in bands.into_iter().enumerate() {
+            s.spawn(move || convert_band(f, div, w, i * rows, yb, cb));
         }
-        convert_band(f, div, w, last * rows, ly, lu, lv);
+        convert_band(f, div, w, last * rows, ly, lc);
     });
 }
 
-/// Converts chroma rows from `cy0` on; `y`, `u` and `v` hold just this band.
-fn convert_band(f: &Frame, div: usize, w: usize, cy0: usize, y: &mut [u8], u: &mut [u8], v: &mut [u8]) {
+/// Converts chroma rows from `cy0` on; `y` and the chroma hold just this band.
+fn convert_band(f: &Frame, div: usize, w: usize, cy0: usize, y: &mut [u8], chroma: Chroma) {
     match div {
-        1 => convert_band_div::<1>(f, w, cy0, y, u, v),
-        2 => convert_band_div::<2>(f, w, cy0, y, u, v),
+        1 => convert_band_div::<1>(f, w, cy0, y, chroma),
+        2 => convert_band_div::<2>(f, w, cy0, y, chroma),
         _ => unreachable!("frames are encoded at full or half size"),
     }
 }
 
-fn convert_band_div<const D: usize>(f: &Frame, w: usize, cy0: usize, y: &mut [u8], u: &mut [u8], v: &mut [u8]) {
+fn convert_band_div<const D: usize>(f: &Frame, w: usize, cy0: usize, y: &mut [u8], mut chroma: Chroma) {
     let (ri, gi, bi) = match f.format {
         PixelFormat::Bgrx => (2, 1, 0),
         PixelFormat::Rgbx => (0, 1, 2),
@@ -219,7 +251,11 @@ fn convert_band_div<const D: usize>(f: &Frame, w: usize, cy0: usize, y: &mut [u8
     let n = (D * D) as i32;
     // Per chroma column: the r, g, b sums of its four luma pixels.
     let mut acc = vec![[0i32; 3]; cw];
-    for (i, (urow, vrow)) in u.chunks_exact_mut(cw).zip(v.chunks_exact_mut(cw)).enumerate() {
+    let chroma_rows = match &chroma {
+        Chroma::Planar(u, _) => u.len() / cw,
+        Chroma::Interleaved(uv) => uv.len() / (cw * 2),
+    };
+    for i in 0..chroma_rows {
         for dy in 0..2 {
             let py = (cy0 + i) * 2 + dy;
             let src: [&[u8]; D] = std::array::from_fn(|k| {
@@ -245,11 +281,26 @@ fn convert_band_div<const D: usize>(f: &Frame, w: usize, cy0: usize, y: &mut [u8
                 a[2] += b;
             }
         }
-        for ((a, cu), cv) in acc.iter_mut().zip(urow.iter_mut()).zip(vrow.iter_mut()) {
+        let uv = |a: &mut [i32; 3]| {
             let (r, g, b) = (a[0] / 4, a[1] / 4, a[2] / 4);
-            *cu = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
-            *cv = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
             *a = [0; 3];
+            (
+                (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8,
+                (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8,
+            )
+        };
+        match &mut chroma {
+            Chroma::Planar(u, v) => {
+                let (urow, vrow) = (&mut u[i * cw..][..cw], &mut v[i * cw..][..cw]);
+                for ((a, cu), cv) in acc.iter_mut().zip(urow).zip(vrow) {
+                    (*cu, *cv) = uv(a);
+                }
+            }
+            Chroma::Interleaved(both) => {
+                for (a, pair) in acc.iter_mut().zip(both[i * cw * 2..][..cw * 2].chunks_exact_mut(2)) {
+                    (pair[0], pair[1]) = uv(a);
+                }
+            }
         }
     }
 }
@@ -401,6 +452,22 @@ mod tests {
                     reference_i420(&frame, div, (w, h), &mut y2, &mut u2, &mut v2);
                     assert!(y1 == y2 && u1 == u2 && v1 == v2, "{width}x{height} {format:?} div {div}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn nv12_is_i420_with_chroma_interleaved() {
+        for (width, height) in [(2, 2), (6, 4), (643, 361), (1923, 1083)] {
+            for div in [1, 2] {
+                let frame = busy_frame(width, height, PixelFormat::Bgrx);
+                let (w, h) = ((width / div) & !1, (height / div) & !1);
+                let (mut y, mut u, mut v) = (vec![0u8; w * h], vec![0u8; w * h / 4], vec![0u8; w * h / 4]);
+                to_i420(&frame, div, (w, h), &mut y, &mut u, &mut v);
+                let (mut ny, mut uv) = (vec![0u8; w * h], vec![0u8; w * h / 2]);
+                to_nv12(&frame, div, (w, h), &mut ny, &mut uv);
+                let interleaved: Vec<u8> = u.iter().zip(&v).flat_map(|(&a, &b)| [a, b]).collect();
+                assert!(ny == y && uv == interleaved, "{width}x{height} div {div}");
             }
         }
     }

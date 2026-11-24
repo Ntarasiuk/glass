@@ -363,7 +363,7 @@ export function createUI({ onOpenMachines, onSelectMachine, onWakeMachine = () =
       item.disabled = m.id !== current && !wakeable(m) && (!m.online || !m.glass);
       return item;
     });
-    if (!items.length) items.push(menuItem('No machines found', 'needs Tailscale', { onSelect: () => {} }));
+    if (!items.length) items.push(menuItem('No machines found', 'listed with Tailscale', { onSelect: () => {} }));
     // Groups from the console's address book, as headings; the rest after them.
     const groupOf = (m) => groups.find((g) => g.machines.includes(m.dns?.toLowerCase()))?.name;
     if (groups.length && machines.some(groupOf)) {

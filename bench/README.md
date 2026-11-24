@@ -40,6 +40,18 @@ running Glass for real.
   - Host to viewer: the rate, half the RTT, the loss and a drop-tail queue (200 ms in
     `user`, 100 packets in `kernel`). Viewer to host: half the RTT.
 
+## 120 fps
+
+`--fps 120` starts the test host at 120 and has the page say its screen is that fast
+(`localStorage['glass.refreshHz']`): headless Chrome animates at 60 whatever the screen,
+so the viewer would never ask for more and the run would measure 60. Frames are read in
+the viewer's worker as they're decoded, not on the page's animation clock, so the count
+is what the host sent. The test host encodes with OpenH264, which keeps up at 1280×720.
+
+```sh
+node bench/run.mjs --fps 120 --workload anim,scroll --link lan
+```
+
 ## Regressions
 
 `bench/regress.mjs` checks what went wrong on an iPhone on a cellular link, and exits

@@ -138,10 +138,15 @@ test('cursor positions match glass_proto::CursorPos byte for byte', () => {
   assert.deepEqual(readCursor(v), { stream: 1, flags: 3, shape: 7, x: 0.25, y: 0.5 });
 });
 
-test('frame acks are kind 8, stream, two spare bytes, then the frame id', () => {
+test('frame acks are kind 8, stream, the wait, then the frame id', () => {
   // Same bytes as glass_proto::frame_ack(2, 0xdeadbeef).
   assert.equal(KIND_FRAME_ACK, 8);
   assert.deepEqual([...frameAck(2, 0xdeadbeef)], [8, 2, 0, 0, 0xef, 0xbe, 0xad, 0xde]);
+  // glass_proto::frame_ack_waited(1, 7, 12_300): the wait in 100 µs units, little-endian.
+  assert.deepEqual([...frameAck(1, 7, 12.3)], [8, 1, 123, 0, 7, 0, 0, 0]);
+  assert.deepEqual([...frameAck(1, 7, 1e9)].slice(2, 4), [0xff, 0xff], 'saturates');
+  assert.deepEqual([...frameAck(1, 7, -5)].slice(2, 4), [0, 0]);
+  assert.deepEqual([...frameAck(1, 7, NaN)].slice(2, 4), [0, 0]);
 });
 
 test('nacks match glass_proto::nack byte for byte', () => {

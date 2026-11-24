@@ -6,6 +6,12 @@
 //! (no token, link or pass) may *ask*: the person at the computer sees who, and allowing it
 //! gives that device a pass like a link's (`server::control`). `glass config nearby off`
 //! stops both the announcing and the asking.
+//!
+//! A VPN into this network is the same thing
+//! from further away: the device arrives from another private address, routed here rather
+//! than on the same subnet, and nothing it announces crosses the tunnel. So it may ask too
+//! ([`From::Routed`]), and the app remembers the computers it has opened and where they
+//! were (`viewer::saved`), checking it's still them by the key in [`proof`].
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -47,6 +53,45 @@ fn own_id() -> Option<&'static str> {
 pub fn id_for(key: &str) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, format!("glass-nearby-v1\n{key}").as_bytes());
     digest.as_ref()[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Who this computer is to a viewer that reaches it directly, for /config.json: its id, the
+/// key it proves itself with, and that key's signature over the certificate the viewer is
+/// about to pin (`cert_hash`; none when a certificate authority vouches for its name, `tls`).
+pub fn proof(cert_hash: Option<&[u8]>, tls: Option<&str>) -> serde_json::Value {
+    static KEY: OnceLock<Option<crate::remote::HostKey>> = OnceLock::new();
+    // Not a computer to remember: the sign-in screen's host, a quick-support session.
+    if crate::signin::active() || crate::support::is_host() {
+        return serde_json::Value::Null;
+    }
+    let Some(key) = KEY.get_or_init(|| crate::remote::HostKey::direct().map_err(|e| tracing::warn!("nearby: no key to prove this computer by: {e:#}")).ok()) else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "id": own_id(),
+        "name": crate::support::computer_name(),
+        "os": std::env::consts::OS,
+        "key": key.public(),
+        "tls": tls,
+        // To find it again by, when its router gives it another address.
+        "host": dns_name(),
+        "sig": cert_hash.and_then(|h| key.sign(&crate::remote::direct_payload(h)).ok()),
+    })
+}
+
+/// What this computer calls itself to its network (`studio`, `studio.lan`): the name its
+/// router's DNS usually has for it.
+fn dns_name() -> Option<String> {
+    #[cfg(unix)]
+    let name = {
+        let mut buf = [0u8; 256];
+        // SAFETY: the buffer outlives the call, and its last byte stays 0.
+        let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len() - 1) } == 0;
+        ok.then(|| std::ffi::CStr::from_bytes_until_nul(&buf).ok().map(|s| s.to_string_lossy().into_owned())).flatten()
+    };
+    #[cfg(not(unix))]
+    let name = std::env::var("COMPUTERNAME").ok();
+    name.map(|n| n.trim().to_ascii_lowercase()).filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'))
 }
 
 /// Whether this computer announces itself and lets nearby devices ask.
@@ -226,10 +271,14 @@ fn local_nets() -> Vec<Net> {
     nets
 }
 
-/// `peer` is on a network this computer is directly on (same subnet), and that network
-/// isn't the tailnet or the internet at large.
-pub fn on_link(peer: IpAddr) -> bool {
-    on_link_in(peer.to_canonical(), &local_nets())
+/// This computer's address on its local network: what another computer there, or on a VPN
+/// into it, types to reach it. The one traffic leaves by, when that's a private network;
+/// else any private one it has.
+pub fn own_address() -> Option<IpAddr> {
+    let lan = |ip: &IpAddr| ip.is_ipv4() && private(*ip) && !link_local(*ip) && !crate::tailscale::is_tailscale_ip(*ip);
+    // No packet is sent: connecting a UDP socket only picks the route.
+    let routed = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| s.connect("192.0.2.1:9").and_then(|()| s.local_addr())).ok().map(|a| a.ip());
+    routed.filter(lan).or_else(|| local_nets().into_iter().map(|n| n.ip).find(lan))
 }
 
 fn on_link_in(peer: IpAddr, nets: &[Net]) -> bool {
@@ -241,7 +290,7 @@ fn on_link_in(peer: IpAddr, nets: &[Net]) -> bool {
 
 /// Home and office address ranges: an ISP that hands every customer a public address on
 /// one big subnet doesn't make its other customers "nearby".
-fn private(ip: IpAddr) -> bool {
+pub(crate) fn private(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
         // Unique local (fc00::/7) and link-local.
@@ -280,15 +329,50 @@ impl Drop for Asking {
     }
 }
 
-/// Whether a device at `peer` with nothing to show may ask the person here to let it in:
-/// `Err` says why not, for the log.
-pub fn may_ask(peer: IpAddr) -> Result<Asking, &'static str> {
+/// Where a device that may ask is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum From {
+    /// On a network this computer is on.
+    Link,
+    /// On another private network, routed here: a VPN into this one, or another of the
+    /// router's networks.
+    Routed,
+}
+
+impl From {
+    /// For the question the person here is asked, and the log.
+    pub fn describe(self) -> &'static str {
+        match self {
+            From::Link => "on this network",
+            From::Routed => "from another private network, like your VPN",
+        }
+    }
+}
+
+/// A private address that isn't on any of `nets`: it can only have been routed here, by a
+/// VPN or between a router's networks. (The internet can't send from one, and the tailnet
+/// has its own sign-in.)
+fn routed_in(peer: IpAddr, nets: &[Net]) -> bool {
+    !peer.is_loopback() && !link_local(peer) && !crate::tailscale::is_tailscale_ip(peer) && private(peer) && !on_link_in(peer, nets)
+}
+
+fn from_in(peer: IpAddr, nets: &[Net]) -> Option<From> {
+    if on_link_in(peer, nets) {
+        Some(From::Link)
+    } else {
+        routed_in(peer, nets).then_some(From::Routed)
+    }
+}
+
+/// Whether a device at `peer` with nothing to show may ask the person here to let it in,
+/// and from where: `Err` says why not, for the log.
+pub fn may_ask(peer: IpAddr) -> Result<(Asking, From), &'static str> {
     if !enabled() {
         return Err("nearby is off");
     }
-    if !on_link(peer) {
-        return Err("not on this network");
-    }
+    let Some(from) = from_in(peer.to_canonical(), &local_nets()) else {
+        return Err("not on this network or another private one");
+    };
     {
         let mut denied = DENIED.lock().unwrap();
         denied.retain(|(_, at)| at.elapsed() < DENIED_FOR);
@@ -299,7 +383,7 @@ pub fn may_ask(peer: IpAddr) -> Result<Asking, &'static str> {
     if ASKING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return Err("another device is asking");
     }
-    Ok(Asking(()))
+    Ok((Asking(()), from))
 }
 
 /// The person said no: that address doesn't get to ask again for a while.
@@ -331,6 +415,21 @@ mod tests {
         assert!(!on_link_in(ip("127.0.0.1"), &n));
         assert!(!on_link_in(ip("192.168.1.77"), &[]));
         assert!(!on_link_in(ip("192.168.1.77"), &[Net { ip: ip("192.168.1.20"), prefix: 0 }]), "a /0 isn't a network");
+    }
+
+    #[test]
+    fn a_vpn_into_this_network_may_ask_and_the_internet_may_not() {
+        let n = nets();
+        assert_eq!(from_in(ip("192.168.1.77"), &n), Some(From::Link));
+        // A VPN usually hands its clients a subnet of their own, routed to this one.
+        assert_eq!(from_in(ip("192.168.3.2"), &n), Some(From::Routed));
+        assert_eq!(from_in(ip("10.8.0.6"), &n), Some(From::Routed));
+        assert_eq!(from_in(ip("fd12:3456::7"), &n), Some(From::Routed));
+        assert_eq!(from_in(ip("203.0.113.50"), &n), None, "a public address");
+        assert_eq!(from_in(ip("8.8.8.8"), &n), None);
+        assert_eq!(from_in(ip("100.101.1.1"), &n), None, "the tailnet has its own sign-in");
+        assert_eq!(from_in(ip("169.254.9.9"), &n), None, "link-local, but on no link of ours");
+        assert_eq!(from_in(ip("127.0.0.1"), &n), None);
     }
 
     #[test]

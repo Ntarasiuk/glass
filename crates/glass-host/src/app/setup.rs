@@ -243,7 +243,7 @@ impl GlassApp {
                     .bg(theme.secondary)
                     .children(
                         [
-                            (I::Network, "Private by default", "Your devices find each other over Tailscale. Nothing is exposed to the internet."),
+                            (I::Network, "Private by default", "Your devices find each other on your network, over your VPN or Tailscale. Nothing is exposed to the internet."),
                             (I::Zap, "Built for low latency", "Hardware video at up to 120 fps, with sharp text when you stop moving."),
                             (I::ShieldCheck, "You stay in charge", "Links with limits, approvals, and one switch to end every session."),
                         ]
@@ -323,7 +323,7 @@ impl GlassApp {
         let ready = tailnet.name().is_some();
         v_flex()
             .gap_5()
-            .child(Self::step_header(1, "Connect your devices", "Glass uses Tailscale to reach this computer securely from your other devices.", cx))
+            .child(Self::step_header(1, "Connect your devices", "Tailscale is the quickest way to an iPad: private, with HTTPS for its browser. Already have a VPN into this network? Skip this: the Glass app on your other computers connects over it.", cx))
             .child(ui::group(
                 vec![
                     h_flex()
@@ -351,7 +351,7 @@ impl GlassApp {
                     .child(
                         Button::new("ts-skip")
                             .ghost()
-                            .label("Skip: connect with a link instead")
+                            .label("Skip: I use a VPN or links")
                             .on_click(cx.listener(|this, _, _, cx| this.step_to(Step::Service, cx))),
                     )
                     .child(
@@ -527,7 +527,7 @@ impl GlassApp {
                 if tailnet_url.is_some() {
                     "Scan this with the iPad's camera, or open the address on any device signed in to your Tailscale."
                 } else {
-                    "Without Tailscale, a one-time link connects any device, from any network, end-to-end encrypted."
+                    "A one-time link connects any device, from any network, end-to-end encrypted. Another computer on this network, or on a VPN into it, needs no link: it's on Machines in the Glass app there, or opens by the address on this computer's Home."
                 },
                 cx,
             ))

@@ -15,7 +15,7 @@ Windows shipped in 0.13.0 (beta); a ✅ there means it ran in a Windows 11 Arm V
 | Pointer in the picture | ✅ | ✅ | ✅ drawn on the CPU | |
 | Hardware H.264 | ✅ VideoToolbox | ✅ VA-API, opt-in | 🧪 Media Foundation | Windows falls back to OpenH264 |
 | Software H.264 (OpenH264) | — | ✅ | ✅ | |
-| Up to 120 fps | ✅ | ❌ 60 | 🧪 with hardware encode | |
+| Up to 120 fps | ✅ | 🧪 with VA-API/NVENC (OpenH264: 60) | 🧪 with hardware encode | |
 | HEVC, sharp text 4:2:2 | ✅ | ❌ | ❌ | |
 | Lossless 4:4:4 still picture | ✅ | ✅ | 🧪 | |
 | Display P3 | ✅ | — | ❌ | |

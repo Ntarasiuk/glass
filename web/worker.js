@@ -109,7 +109,7 @@ const streamEnv = {
   nack: (index, frameId, fragments) => datagramWriter?.write(nack(index, frameId, fragments)).catch(() => {}),
   requestKeyframe: (index) => datagramWriter?.write(new Uint8Array([KIND_KEYFRAME_REQUEST, index])).catch(() => {}),
   // Over WebTransport, or the WebRTC data channel (RtcTransport's datagrams).
-  ack: (index, frameId) => datagramWriter?.write(frameAck(index, frameId)).catch(() => {}),
+  ack: (index, frameId, waitMs) => datagramWriter?.write(frameAck(index, frameId, waitMs)).catch(() => {}),
 };
 const streams = []; // VideoStream per host stream number
 let streamCount = Infinity; // how many of them the host is sending, once main.js has said

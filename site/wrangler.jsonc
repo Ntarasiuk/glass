@@ -35,6 +35,8 @@
   // AgentLens analytics (src/agentlens/): one row per request, page beacon and download goal, read by the
   // agentlens-dashboard Worker. Needs the AL_SECRET secret; without it analytics stays off.
   "analytics_engine_datasets": [{ "binding": "AGENTLENS", "dataset": "agentlens_events" }],
+  // Edge tests: the collector reads this site's running copy tests from the AgentLens dashboard (public endpoint).
+  "vars": { "AL_DASHBOARD": "https://agentlens-dashboard.ntarasiuk.workers.dev" },
   "routes": [{ "pattern": "glassdesk.dev", "custom_domain": true }],
   "workers_dev": true,
   "observability": { "enabled": true }

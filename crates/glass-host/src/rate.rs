@@ -211,6 +211,12 @@ pub const ACK_START_BPS: u32 = 4_000_000;
 /// The least it goes to: still a picture, if a slow one. An absolute floor, not a share of
 /// the maximum: 8% of a 30 Mbps maximum is more than a 1 Mbps link carries.
 const MIN_BPS: u32 = 250_000;
+/// A stream that doesn't use its rate (a light screen: typing, a cursor, small changes)
+/// still has it raised, slowly, up to this, while frames come back with no queue at all.
+/// Without it a light screen never got past the 4 Mbps it started at, and the frame rate
+/// (rate::policy) stayed at half of a 120 Hz screen's however good the link. Just over
+/// where 120 fps starts; beyond, the link has to show it carries more.
+const UNUSED_PROBE_BPS: f64 = 12_000_000.0;
 
 impl AckRate {
     pub fn new(max: u32) -> Self {
@@ -276,6 +282,18 @@ impl AckRate {
                 }
                 self.target = next.max(MIN_BPS as f64);
                 self.last_decrease = Some(now);
+            }
+        } else if settled && !congested && clear && !used && !s.held && s.oldest_ms <= s.rtt_ms + 20.0 {
+            // Unused, but nothing is waiting (and past the first seconds): probe gently, to no more than UNUSED_PROBE_BPS
+            // and short of where the link last choked.
+            let near = self.ceiling.map_or(f64::INFINITY, |(c, _)| c * 0.9);
+            let cap = UNUSED_PROBE_BPS.min(near).min(self.max);
+            if self.target < cap
+                && since(self.last_increase) >= Duration::from_millis(200)
+                && since(self.last_decrease) >= Duration::from_secs(2)
+            {
+                self.target = (self.target * 1.06).min(cap);
+                self.last_increase = Some(now);
             }
         } else if self.slow_start && !congested && clear {
             // (A cut that didn't end slow start isn't undone at once: let the queue drain.)
@@ -375,7 +393,9 @@ pub fn sharp_policy(bps: u32, max_fps: u32) -> (u32, u32) {
 pub fn policy(bps: u32, text: bool, max_fps: u32) -> (u32, u32) {
     let (fps, qp) = motion_policy(bps, max_fps);
     if text {
-        ((fps / 2).clamp(5, 30), qp.saturating_sub(4).max(20))
+        // Half the frames, but no less than 60 on a link fast enough for 120: a fast
+        // screen scrolling code shouldn't look like 30.
+        ((fps / 2).clamp(5, 60), qp.saturating_sub(4).max(20))
     } else {
         (fps, qp)
     }
@@ -586,20 +606,47 @@ mod tests {
         assert_eq!(r.update(sample(0.0, 3_000_000.0), ms(0)), 6_000_000);
         assert_eq!(r.update(sample(0.0, 5_000_000.0), ms(100)), 6_000_000);
         assert_eq!(r.update(sample(0.0, 5_000_000.0), ms(250)), 9_000_000);
-        // A still screen (little delivered) doesn't raise it.
-        assert_eq!(r.update(sample(0.0, 100_000.0), ms(600)), 9_000_000);
+        // A light screen (little delivered) raises it only gently: 6%.
+        assert_eq!(r.update(sample(0.0, 100_000.0), ms(600)), 9_540_000);
         // Queueing: 85% of what got through.
-        assert_eq!(r.update(sample(80.0, 5_000_000.0), ms(700)), 4_250_000);
+        assert_eq!(r.update(sample(80.0, 5_000_000.0), ms(800)), 4_250_000);
         // Not again within 300 ms; then again.
-        assert_eq!(r.update(sample(80.0, 4_000_000.0), ms(800)), 4_250_000);
-        assert_eq!(r.update(sample(80.0, 4_000_000.0), ms(1000)), 3_400_000);
+        assert_eq!(r.update(sample(80.0, 4_000_000.0), ms(900)), 4_250_000);
+        assert_eq!(r.update(sample(80.0, 4_000_000.0), ms(1100)), 3_400_000);
         // No more slow start: near the choke point (4 Mbps), +6% steps up to 90% of it,
         // a second after the last cut...
-        assert_eq!(r.update(sample(0.0, 3_000_000.0), ms(1500)), 3_400_000);
-        assert_eq!(r.update(sample(0.0, 3_000_000.0), ms(2000)), 3_600_000);
-        assert_eq!(r.update(sample(0.0, 3_000_000.0), ms(2200)), 3_600_000, "capped at 90%");
+        assert_eq!(r.update(sample(0.0, 3_000_000.0), ms(1600)), 3_400_000);
+        assert_eq!(r.update(sample(0.0, 3_000_000.0), ms(2100)), 3_600_000);
+        assert_eq!(r.update(sample(0.0, 3_000_000.0), ms(2300)), 3_600_000, "capped at 90%");
         // ...then 2% a second past it.
-        assert_eq!(r.update(sample(0.0, 3_000_000.0), ms(3200)), 3_672_000);
+        assert_eq!(r.update(sample(0.0, 3_000_000.0), ms(3300)), 3_672_000);
+    }
+
+    #[test]
+    fn a_light_screen_on_a_clear_link_reaches_120_fps() {
+        let t0 = Instant::now();
+        let mut r = settled(t0);
+        // Typing: 600 kbps, frames back with no queue. Within seconds the rate allows a
+        // 120 Hz screen its 120 fps, and goes no further on that evidence.
+        for i in 1..100 {
+            r.update(sample(0.0, 600_000.0), t0 + ACK_TICK * i);
+        }
+        assert_eq!(r.target(), UNUSED_PROBE_BPS as u32);
+        assert_eq!(policy(r.target(), false, 120).0, 120);
+        // Nor past where the link last choked...
+        let mut choked = settled(t0);
+        choked.ceiling = Some((5_000_000.0, t0));
+        choked.slow_start = false;
+        for i in 1..100 {
+            choked.update(sample(0.0, 600_000.0), t0 + ACK_TICK * i);
+        }
+        assert_eq!(choked.target(), 4_500_000);
+        // ...nor with capture held.
+        let mut waiting = settled(t0);
+        for i in 1..100 {
+            waiting.update(AckSample { held: true, ..sample(0.0, 600_000.0) }, t0 + ACK_TICK * i);
+        }
+        assert_eq!(waiting.target(), ACK_START_BPS);
     }
 
     #[test]
@@ -708,7 +755,8 @@ mod tests {
         assert_eq!(policy(6_000_000, false, 120).0, 45, "a slow link: as for anyone");
         assert_eq!(policy(30_000_000, false, 90).0, 90, "a 90 Hz screen gets 90");
         assert_eq!(policy(30_000_000, false, 30).0, 30, "a slow display caps it");
-        assert_eq!(policy(30_000_000, true, 120).0, 30, "sharp text still trades frames for detail");
+        assert_eq!(policy(30_000_000, true, 120).0, 60, "sharp text still trades frames for detail");
+        assert_eq!(policy(30_000_000, true, 60).0, 30);
     }
 
     #[test]

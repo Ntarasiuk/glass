@@ -10,7 +10,7 @@
 //!   host -> client  AUDIO  5 ms of 48 kHz s16 PCM (only to sessions that enabled audio)
 //!   host -> client  AUDIO_OPUS  one Opus packet instead, to viewers whose hello offered "opus"
 //!   host -> client  CURSOR where the pointer is (only to sessions that draw it themselves)
-//!   client -> host  FRAME_ACK  [kind, stream, 0, 0, frame id u32] once a frame is drawn
+//!   client -> host  FRAME_ACK  [kind, stream, wait u16, frame id u32] once a frame is drawn
 //!
 //! Input travels client -> host on one reliable unidirectional stream as fixed-size
 //! [`InputEvent`] records, so a lost key-up can never leave a key stuck down. Text (IME,
@@ -39,20 +39,39 @@ pub const KIND_CURSOR: u8 = 9;
 pub const KIND_FRAME_ACK: u8 = 8;
 pub const FRAME_ACK_LEN: usize = 8;
 
+/// The unit of a FRAME_ACK's wait: 100 µs, so a u16 spans 6.5 s.
+pub const FRAME_ACK_WAIT_US: u64 = 100;
+
 pub fn frame_ack(stream: u8, frame_id: u32) -> [u8; FRAME_ACK_LEN] {
+    frame_ack_waited(stream, frame_id, 0)
+}
+
+/// A FRAME_ACK that also says how long the frame spent in the viewer, from handing it to
+/// the decoder to drawing it (`wait_us`, saturating), so a slow decoder isn't read as a
+/// queue on the network. Older hosts ignore it (the bytes were reserved as zero); zero
+/// means not measured.
+pub fn frame_ack_waited(stream: u8, frame_id: u32, wait_us: u64) -> [u8; FRAME_ACK_LEN] {
     let mut out = [0u8; FRAME_ACK_LEN];
     out[0] = KIND_FRAME_ACK;
     out[1] = stream;
+    let wait = (wait_us / FRAME_ACK_WAIT_US).min(u16::MAX as u64) as u16;
+    out[2..4].copy_from_slice(&wait.to_le_bytes());
     out[4..8].copy_from_slice(&frame_id.to_le_bytes());
     out
 }
 
 /// (stream, frame id) from a FRAME_ACK datagram.
 pub fn read_frame_ack(buf: &[u8]) -> Option<(u8, u32)> {
+    read_frame_ack_waited(buf).map(|(stream, id, _)| (stream, id))
+}
+
+/// (stream, frame id, viewer wait in µs; 0 when not measured) from a FRAME_ACK datagram.
+pub fn read_frame_ack_waited(buf: &[u8]) -> Option<(u8, u32, u64)> {
     if buf.len() < FRAME_ACK_LEN || buf[0] != KIND_FRAME_ACK {
         return None;
     }
-    Some((buf[1], u32::from_le_bytes(buf[4..8].try_into().ok()?)))
+    let wait = u16::from_le_bytes(buf[2..4].try_into().ok()?) as u64 * FRAME_ACK_WAIT_US;
+    Some((buf[1], u32::from_le_bytes(buf[4..8].try_into().ok()?), wait))
 }
 
 /// 5 ms at 48 kHz: one packet fits a datagram (16 + 240 * 2 ch * 2 B = 976 bytes).
@@ -682,6 +701,11 @@ mod tests {
         assert_eq!(ack[0], KIND_FRAME_ACK);
         assert_eq!(read_frame_ack(&ack), Some((2, 0xdead_beef)));
         assert_eq!(read_frame_ack(&ack[..7]), None);
+        assert_eq!(read_frame_ack_waited(&ack), Some((2, 0xdead_beef, 0)));
+        let waited = frame_ack_waited(1, 7, 12_345);
+        assert_eq!(read_frame_ack_waited(&waited), Some((1, 7, 12_300)));
+        assert_eq!(read_frame_ack(&waited), Some((1, 7)));
+        assert_eq!(read_frame_ack_waited(&frame_ack_waited(0, 0, u64::MAX)).unwrap().2, 6_553_500, "saturates");
         assert_eq!(read_frame_ack(&[KIND_PING; 8]), None);
     }
 }

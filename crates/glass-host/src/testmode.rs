@@ -378,6 +378,7 @@ fn pattern_loop(
         if s < 0 {
             continue;
         }
+        crate::flow::set_frame_rate(s as u8, fps);
         if bench() == Some(Bench::Still) && !keyframe.load(Ordering::Relaxed) {
             // Nothing changes: only a refresh that's due.
             if still.1.is_none_or(|at: Instant| at.elapsed() < STILL_REFRESH_EVERY) {
