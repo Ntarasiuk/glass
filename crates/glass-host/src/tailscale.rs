@@ -411,12 +411,10 @@ pub async fn ensure_cert(
     let key = dir.join(format!("{name}.key"));
     // `tailscale cert` only contacts Let's Encrypt when the cert is missing or near expiry.
     // Longer than other commands: it may have to get a certificate from Let's Encrypt.
+    // It prints the pair and Glass writes the files: the Mac App Store CLI is sandboxed, so
+    // files it writes land in its own container, not where Glass asked (#172).
     let run = tokio::process::Command::new(cli())
-        .arg("cert")
-        .arg("--cert-file")
-        .arg(&cert)
-        .arg("--key-file")
-        .arg(&key)
+        .args(["cert", "--cert-file", "-", "--key-file", "-"])
         .arg(&name)
         .kill_on_drop(true)
         .output();
@@ -434,8 +432,61 @@ pub async fn ensure_cert(
         );
         return None;
     }
+    let Some((cert_pem, key_pem)) = split_pem(&String::from_utf8_lossy(&out.stdout)) else {
+        tracing::warn!("tailscale cert: no certificate and key in its output");
+        return None;
+    };
+    if let Err(e) = write_if_changed(&cert, &cert_pem, false).and_then(|()| write_if_changed(&key, &key_pem, true)) {
+        tracing::warn!("can't save the Tailscale certificate in {}: {e}", dir.display());
+        return None;
+    }
     tracing::info!("using Tailscale HTTPS certificate for {name}");
     Some((cert, key))
+}
+
+/// Splits `tailscale cert`'s output into the certificate chain and the private key, as PEM.
+fn split_pem(out: &str) -> Option<(String, String)> {
+    let (mut certs, mut key) = (String::new(), String::new());
+    let mut rest = out;
+    while let Some(start) = rest.find("-----BEGIN ") {
+        let block = &rest[start..];
+        let label_end = block[11..].find("-----")? + 11;
+        let label = &block[11..label_end];
+        let end_marker = format!("-----END {label}-----");
+        let end = block.find(&end_marker)? + end_marker.len();
+        let into = if label.ends_with("PRIVATE KEY") {
+            Some(&mut key)
+        } else {
+            (label == "CERTIFICATE").then_some(&mut certs)
+        };
+        if let Some(into) = into {
+            into.push_str(&block[..end]);
+            into.push('\n');
+        }
+        rest = &block[end..];
+    }
+    (!certs.is_empty() && !key.is_empty()).then_some((certs, key))
+}
+
+/// Writes atomically (a host loading it never sees half a file), and only when it changed.
+fn write_if_changed(path: &std::path::Path, contents: &str, private: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    if std::fs::read(path).is_ok_and(|old| old == contents.as_bytes()) {
+        return Ok(());
+    }
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, if private { 0o600 } else { 0o644 });
+    #[cfg(not(unix))]
+    let _ = private;
+    let written = opts.open(&tmp).and_then(|mut f| f.write_all(contents.as_bytes()));
+    let renamed = written.and_then(|()| std::fs::rename(&tmp, path));
+    if renamed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    renamed
 }
 
 /// How long after startup Glass looks for its certificate, how often it checks on Tailscale,
@@ -553,6 +604,34 @@ pub async fn device_name(peer: IpAddr) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splits_the_printed_certificate_and_key() {
+        let leaf = "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----";
+        let chain = "-----BEGIN CERTIFICATE-----\nBBB\n-----END CERTIFICATE-----";
+        let key = "-----BEGIN EC PRIVATE KEY-----\nKKK\n-----END EC PRIVATE KEY-----";
+        let out = format!("{leaf}\n{chain}\n{key}\n");
+        assert_eq!(split_pem(&out), Some((format!("{leaf}\n{chain}\n"), format!("{key}\n"))));
+        assert_eq!(split_pem(&format!("Warning: sandbox\n{leaf}\n")), None);
+        assert_eq!(split_pem("-----BEGIN CERTIFICATE-----\ntruncated"), None);
+    }
+
+    #[test]
+    fn saves_a_certificate_only_when_it_changed() {
+        let dir = std::env::temp_dir().join(format!("glass-cert-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.key");
+        write_if_changed(&path, "one", true).unwrap();
+        let first = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        write_if_changed(&path, "one", true).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), first);
+        write_if_changed(&path, "two", true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions()) & 0o777, 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_person_owns_a_device_a_tag_does_not() {
