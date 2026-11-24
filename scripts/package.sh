@@ -24,6 +24,8 @@ tarball() {
   chmod 755 "$stage/glass/bin/glass"
   cp -R web "$stage/glass/share/glass/web"
   for extra in "$@"; do cp -R "$extra" "$stage/glass/share/glass/"; done
+  # Readable by everyone whatever the umask: coreaudiod (not root) loads the mic driver.
+  chmod -R a+rX,go-w "$stage"
   mkdir -p dist
   name="glass-$version-$platform.tar.gz"
   tar -C "$stage" -czf "dist/$name" glass

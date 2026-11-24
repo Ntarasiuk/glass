@@ -57,9 +57,11 @@ jobs:
           SIGNING_KEY: ${{ secrets.GLASS_SIGNING_KEY }}
           SIGNING_CERT: ${{ secrets.GLASS_SIGNING_CERT }}
         run: |
-          umask 077
-          printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/signing.key"
-          printf '%s\n' "$SIGNING_CERT" > "$RUNNER_TEMP/signing.crt"
+          # Only the key files are private: a umask left at 077 makes every file in the tarball
+          # 0700, and coreaudiod can't read the microphone driver (#170).
+          (umask 077
+           printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/signing.key"
+           printf '%s\n' "$SIGNING_CERT" > "$RUNNER_TEMP/signing.crt")
           GLASS_SIGNING_KEY="$RUNNER_TEMP/signing.key" GLASS_SIGNING_CERT="$RUNNER_TEMP/signing.crt" \
             scripts/package.sh macos
           rm -f "$RUNNER_TEMP/signing.key"

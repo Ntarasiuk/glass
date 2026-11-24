@@ -161,10 +161,11 @@ fn bundled_driver() -> Option<std::path::PathBuf> {
 fn mac_install(ask: Ask) -> anyhow::Result<String> {
     if let Some(src) = bundled_driver() {
         let dest = std::path::Path::new(HAL_DIR).join(DRIVER);
-        // Copy, owned by root, then restart the audio server (launchd starts it again) so
-        // it loads the driver.
+        // Copy, owned by root and readable by coreaudiod (it isn't root; 0.15 tarballs shipped
+        // the driver as 0700), then restart the audio server (launchd starts it again) so it
+        // loads the driver.
         let script = format!(
-            "mkdir -p {hal} && rm -rf {dest} && cp -R {src} {hal}/ && chown -R root:wheel {dest} && xattr -cr {dest} && killall -9 coreaudiod 2>/dev/null; true",
+            "mkdir -p {hal} && rm -rf {dest} && cp -R {src} {hal}/ && chown -R root:wheel {dest} && chmod -R a+rX,go-w {dest} && xattr -cr {dest} && killall -9 coreaudiod 2>/dev/null; true",
             hal = sh_quote(HAL_DIR),
             dest = sh_quote(&dest.display().to_string()),
             src = sh_quote(&src.display().to_string()),
