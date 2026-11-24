@@ -777,7 +777,7 @@ pub fn list_windows() -> Result<Vec<Window>> {
         .map(|d| {
             let id = unsafe { d.displayID() };
             let b = CGDisplayBounds(id);
-            (b, CGDisplayPixelsWide(id) as f64 / b.size.width.max(1.0))
+            (b, pixel_size(id).0 as f64 / b.size.width.max(1.0))
         })
         .collect();
     let mut windows = Vec::new();
@@ -900,6 +900,17 @@ fn recover_capture_service() {
     }
 }
 
+/// A display's size in pixels. For a scaled (Retina) mode CGDisplayPixelsWide/High give its
+/// size in points (half on a 2x display); the mode knows the pixels.
+fn pixel_size(id: CGDirectDisplayID) -> (usize, usize) {
+    let mode = objc2_core_graphics::CGDisplayCopyDisplayMode(id);
+    let (w, h) = (
+        objc2_core_graphics::CGDisplayMode::pixel_width(mode.as_deref()),
+        objc2_core_graphics::CGDisplayMode::pixel_height(mode.as_deref()),
+    );
+    if w > 0 && h > 0 { (w, h) } else { (CGDisplayPixelsWide(id), CGDisplayPixelsHigh(id)) }
+}
+
 /// All capturable displays, main display first. Sleeping displays are not listed.
 pub fn list_displays() -> Result<Vec<Display>> {
     let content = shareable_content()?;
@@ -908,10 +919,11 @@ pub fn list_displays() -> Result<Vec<Display>> {
         .map(|sc| {
             let id = unsafe { sc.displayID() };
             let bounds = CGDisplayBounds(id);
+            let (width, height) = pixel_size(id);
             let info = DisplayInfo {
                 id,
-                width: CGDisplayPixelsWide(id),
-                height: CGDisplayPixelsHigh(id),
+                width,
+                height,
                 x: bounds.origin.x,
                 y: bounds.origin.y,
                 points_width: bounds.size.width,
@@ -1064,6 +1076,16 @@ pub fn start(
 #[cfg(test)]
 mod tests {
     use super::Gate;
+
+    #[test]
+    fn a_display_is_sized_in_pixels_not_points() {
+        // On a Retina display CGDisplayPixelsWide gives points; the mode's pixels are more.
+        let id = objc2_core_graphics::CGMainDisplayID();
+        let (w, h) = super::pixel_size(id);
+        let bounds = super::CGDisplayBounds(id);
+        assert!(w as f64 >= bounds.size.width && h as f64 >= bounds.size.height);
+        assert!(w >= super::CGDisplayPixelsWide(id) && h >= super::CGDisplayPixelsHigh(id));
+    }
 
     #[test]
     fn a_gate_lets_through_only_while_open() {
