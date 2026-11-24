@@ -760,10 +760,36 @@ struct SessionCtx {
 /// Whether a new viewer's screen size has settled. Frames wait for it. It either says its size
 /// (and frames wait until that's in force, or a restart's keyframe goes out at the old one), or
 /// doesn't in time; once the viewer has said, the timer has no more say.
+///
+/// It also holds the screen's capture for the viewer, from when its size is settled: capture
+/// then starts at that size, where starting at another and restarting held its first picture
+/// back about a second.
 #[derive(Default)]
-struct FirstSize(std::sync::atomic::AtomicU8);
+struct FirstSize(std::sync::atomic::AtomicU8, std::sync::Mutex<Capture>);
+
+#[derive(Default)]
+enum Capture {
+    #[default]
+    NotYet,
+    Held(#[allow(dead_code)] crate::media::CaptureHold),
+    /// The session is over: nothing captures for it any more.
+    Released,
+}
 
 impl FirstSize {
+    /// Captures the screen for this viewer (once; not after it has left).
+    fn capture(&self, video: &Arc<dyn VideoSource>) {
+        let mut capture = self.1.lock().unwrap();
+        if matches!(*capture, Capture::NotYet) {
+            *capture = Capture::Held(crate::media::hold_capture(video.clone()));
+        }
+    }
+
+    /// The viewer left.
+    fn release(&self) {
+        *self.1.lock().unwrap() = Capture::Released;
+    }
+
     const WAITING: u8 = 0;
     const APPLYING: u8 = 1;
     const SETTLED: u8 = 2;
@@ -1307,6 +1333,15 @@ async fn control(
     }
     // Shown on the host (menu bar / notification) for as long as this session lasts.
     let _viewing = crate::viewers::joined(viewer, ctx.conn.clone());
+    // The screen is captured only while someone is viewing (or recording), from when this
+    // viewer's first size is settled (`FirstSize::capture`) until it leaves.
+    struct Release(Arc<FirstSize>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _capture = Release(ctx.sized.clone());
     // Recording every session (glass config record on), or when an owner asks.
     let mut recording = if settings.record {
         match start_recording(&ctx, &device) {
@@ -1401,8 +1436,11 @@ async fn control(
         let (keyed, sized, shared) = (ctx.keyed.clone(), ctx.sized.clone(), shared.clone());
         tokio::spawn(async move {
             tokio::time::sleep(FIRST_VIEWPORT_WAIT).await;
-            if sized.give_up_waiting() && keyed.load(Ordering::Relaxed) == 0 {
-                shared.video.request_keyframe(None);
+            if sized.give_up_waiting() {
+                sized.capture(&shared.video);
+                if keyed.load(Ordering::Relaxed) == 0 {
+                    shared.video.request_keyframe(None);
+                }
             }
         });
     }
@@ -1627,6 +1665,7 @@ async fn control(
                     // Frames may go out from here. A new size's restart has just made a
                     // keyframe, which they missed: ask for one in the size now in force.
                     ctx.sized.settle();
+                    ctx.sized.capture(&shared.video);
                     shared.video.request_keyframe(None);
                 } else {
                     crate::resolution::set(viewport_id, Some(streams));

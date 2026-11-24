@@ -2,6 +2,10 @@
 
 What changed in each release of Glass. `glass update` (or the Glass app) installs the newest; every build is on [GitHub Releases](https://github.com/Ntarasiuk/glass/releases).
 
+## Unreleased
+
+- **Netflix and Prime Video play on a Mac running Glass.** The Mac's screen was captured all the time, viewed or not, and DRM video goes black while anything captures the screen. Now it's captured only while someone is viewing or recording, and for 10 seconds after (so a reload reconnects at once); a new viewer's first picture takes about half a second longer.
+
 ## 0.16.0
 
 November 19, 2026
