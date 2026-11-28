@@ -630,13 +630,16 @@ impl crate::media::InputSink for Injector {
             return true;
         }
         // Modifiers already forwarded by the viewer must not turn resolved text into a
-        // shortcut. Only lift Glass-owned modifiers; retain their physical hold afterwards.
-        let modifiers: Vec<_> = self.held.iter().copied().filter(|&k| is_modifier(k)).collect();
+        // shortcut. Only lift Glass-owned Ctrl/Alt/Win, leaving Shift held for IMEs.
+        let modifiers: Vec<_> = self.held.iter().copied().filter(|&k| keymap::is_text_modifier(k)).collect();
         if modifiers.iter().any(|&k| k == LEFT_WIN || k == RIGHT_WIN) {
             send(&[keyboard(MASK, true), keyboard(MASK, false)]);
             self.mask_win = true;
         }
-        send(&modifiers.iter().map(|&k| keyboard(k, false)).collect::<Vec<_>>());
+        if !modifiers.is_empty() {
+            send(&modifiers.iter().map(|&k| keyboard(k, false)).collect::<Vec<_>>());
+            settle();
+        }
         for ch in text.chars() {
             if ch == '\n' {
                 // Enter is an explicit action; don't release a physical Enter being held.
@@ -648,7 +651,12 @@ impl crate::media::InputSink for Injector {
                 std::thread::sleep(UNICODE_GAP);
             }
         }
-        send(&modifiers.iter().map(|&k| keyboard(k, true)).collect::<Vec<_>>());
+        if !modifiers.is_empty() {
+            // Keep the last text/Enter event clear of the restored shortcut modifiers.
+            settle();
+            send(&modifiers.iter().map(|&k| keyboard(k, true)).collect::<Vec<_>>());
+            settle();
+        }
         true
     }
 }
