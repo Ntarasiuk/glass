@@ -92,13 +92,16 @@ pub fn effective() -> Vec<Rule> {
 pub fn validate(matcher: &str) -> Result<()> {
     let m = matcher.trim();
     let domain_ok = |d: &str| d.contains('.') && !d.contains('@') && !d.contains(' ');
+    // Tailscale logins from GitHub or a passkey have no dot (`alice@github`), so a whole
+    // login may; a bare `@domain` still needs one (`@github` would be everyone on GitHub).
+    let login_domain_ok = |d: &str| !d.is_empty() && !d.contains('@') && !d.contains(' ');
     let ok = m == "*"
         || m.strip_prefix('@').is_some_and(domain_ok)
         || m.strip_prefix("group:")
             .is_some_and(|g| !g.trim().is_empty() && g.len() <= 256)
         || (!m.contains(' ')
             && m.split_once('@')
-                .is_some_and(|(u, d)| !u.is_empty() && domain_ok(d)));
+                .is_some_and(|(u, d)| !u.is_empty() && login_domain_ok(d)));
     anyhow::ensure!(ok, "{m} isn't an email, @domain, group:name or *");
     Ok(())
 }
@@ -259,10 +262,10 @@ mod tests {
 
     #[test]
     fn matchers_are_validated() {
-        for ok in ["*", "@example.com", "group:eng", "ana@example.com"] {
+        for ok in ["*", "@example.com", "group:eng", "ana@example.com", "alice@github", "bob@passkey"] {
             assert!(validate(ok).is_ok(), "{ok}");
         }
-        for bad in ["", "example.com", "@nodot", "group:", "a@@b.c", "ana @x.com"] {
+        for bad in ["", "example.com", "@nodot", "@github", "group:", "a@@b.c", "ana @x.com", "ana@"] {
             assert!(validate(bad).is_err(), "{bad}");
         }
     }
